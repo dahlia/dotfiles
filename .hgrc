@@ -2,7 +2,7 @@
 username = Hong Minhee <minhee@dahlia.kr>
 
 [alias]
-l = log -G
+l = log --graph --template "\x1B[35m{rev}\x1B[0m:\x1B[31m{node|short}\x1B[0m\x1B[33m{if(branch,' |{branch}|','')}\x1B[36m{if(tags,' [{tags}]','')}\x1B[0m {desc|strip|firstline|nonempty|fill68} \x1B[32m({date|age}) \x1B[34;1m<{author|person}>\x1B[0m\n"
 
 [extensions]
 hgext.color =
@@ -11,3 +11,7 @@ hgext.shelve =
 hgext.gpg =
 hgext.pager =
 hgext.zeroconf =
+
+[pager]
+attend = l
+pager = less -RS
