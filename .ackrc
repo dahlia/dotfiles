@@ -1,1 +1,3 @@
 --ignore-dir=.tox
+--ignore-dir=.SyncArchive
+--ignore-dir=.idea

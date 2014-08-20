@@ -1,6 +1,13 @@
 [ui]
 username = Hong Minhee <minhee@dahlia.kr>
 
+[alias]
+l = log -G
+
 [extensions]
 hgext.color =
 hgext.record =
+hgext.shelve =
+hgext.gpg =
+hgext.pager =
+hgext.zeroconf =
