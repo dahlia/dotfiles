@@ -1,0 +1,6 @@
+[ui]
+username = Hong Minhee <minhee@dahlia.kr>
+
+[extensions]
+hgext.color =
+hgext.record =

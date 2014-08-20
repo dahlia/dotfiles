@@ -1,0 +1,7 @@
+[user]
+	name = Hong Minhee
+	email = minhee@dahlia.kr
+[color]
+	ui = auto
+[alias]
+	l = log --color --graph --pretty=format:'%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr)%C(bold blue)<%an>%Creset' --abbrev-commit
