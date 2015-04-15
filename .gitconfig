@@ -6,5 +6,6 @@
 [alias]
 	l = log --color --graph --pretty=format:'%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr)%C(bold blue)<%an>%Creset' --abbrev-commit
 	f = fetch --all -p
+	co = checkout -b
 [core]
 	editor = vim
