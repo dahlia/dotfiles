@@ -8,5 +8,7 @@
 	f = fetch --all -p
 	co = checkout -b
 	st = status --short --branch
+[log]
+    date = iso8601
 [core]
 	editor = vim
