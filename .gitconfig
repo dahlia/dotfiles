@@ -9,6 +9,6 @@
 	co = checkout -b
 	st = status --short --branch
 [log]
-    date = iso8601
+	date = iso8601
 [core]
 	editor = vim
