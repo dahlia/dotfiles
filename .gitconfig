@@ -12,4 +12,4 @@
 [log]
 	date = iso8601
 [core]
-	editor = vim
+	editor = nvim
