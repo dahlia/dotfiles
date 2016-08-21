@@ -1,6 +1,6 @@
 [user]
 	name = Hong Minhee
-	email = hongminhee@member.fsf.org
+	useConfigOnly = true
 [color]
 	ui = auto
 [alias]
