@@ -1,0 +1,3 @@
+editMode: Vi
+bellStyle: NoBell
+maxHistorySize: Just 1000
