@@ -1,3 +1,4 @@
 \set COMP_KEYWORD_CASE upper
 \pset null '(NULL)'
 \timing on
+\set locks `cat ~/.psqlrc_locks.sql`
