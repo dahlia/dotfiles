@@ -1,3 +1,12 @@
 syntax:glob
 .*.swp
 .ptpython/history
+.stack/build-plan/
+.stack/build-plan-cache/
+.stack/global-project/
+.stack/indices/
+.stack/precompiled/
+.stack/programs/
+.stack/setup-exe-cache/
+.stack/snapshots/
+.stack/templates/
