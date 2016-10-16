@@ -7,6 +7,7 @@ l = log --graph --template "\x1B[35m{rev}\x1B[0m:\x1B[31m{node|short}\x1B[0m\x1B
 
 [extensions]
 hgext.color =
+hgext.rebase =
 hgext.record =
 hgext.shelve =
 hgext.strip =
