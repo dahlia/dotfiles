@@ -2,3 +2,6 @@
 \pset null '(NULL)'
 \timing on
 \set locks `cat ~/.psqlrc_locks.sql`
+
+BEGIN;  -- always begin a transaction to prevent mistakes
+\echo 'A transaction has just started. You need to COMMIT in order to make your changes kept.'
