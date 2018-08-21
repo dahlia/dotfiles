@@ -9,13 +9,20 @@ if [[ "$(uname)" = "Darwin" ]]; then
   fi
 
   if [[ -f /usr/local/share/bash-completion/bash_completion ]]; then
+    # shellcheck source=/dev/null
     . /usr/local/share/bash-completion/bash_completion
+  elif [[ -f /usr/local/etc/bash_completion ]]; then
+    # shellcheck source=/dev/null
+    . /usr/local/etc/bash_completion
+    echo -e \
+      "bash-completion2 is not installed but bash-completeion is installed"
   else
     echo -e "bash-completion2 is not installed"
   fi
 
   export PATH
   export MANPATH
+  export LANG=en_US.UTF-8
   export LC_CTYPE=en_US.UTF-8
 fi
 
@@ -35,12 +42,19 @@ if command -v nvim > /dev/null; then
   alias vi=nvim
   alias nvi=nvim
   alias vim=nvim
-  alias gvim=nvim
-  alias mvim=nvim
+
+  if [[ "$(uname)" = "Darwin" ]] && command -v vimr > /dev/null; then
+    alias gvim=vimr
+  else
+    alias gvim=nvim
+  fi
+
+  alias mvim=gvim
 else
   echo -e "nvim (i.e., Neovim) is not installed"
 fi
 
+set editing-mode vi
 set -o vi
 
 # Haskell Stack ###############################################################
@@ -51,10 +65,15 @@ else
 fi
 
 # Python & pyenv ##############################################################
-if command -v pyenv-virtualenv-init > /dev/null; then
-  eval "$(pyenv virtualenv-init -)";
+if command -v pyenv > /dev/null; then
+  eval "$(pyenv init -)"
+  if command -v pyenv-virtualenv-init > /dev/null; then
+    eval "$(pyenv virtualenv-init -)";
+  else
+    echo -e "pyenv-virtualenv is not installed"
+  fi
 else
-  echo -e "pyenv-virtualenv is not installed"
+  echo -e "pyenv is not installed"
 fi
 
 # Rust Cargo ##################################################################
@@ -98,5 +117,11 @@ fi
 
 # Werkzeug & Flask ############################################################
 export WERKZEUG_DEBUG_PIN=off
+
+# Overrides ###################################################################
+if [[ -f "$HOME/.bash_profile_extra" ]]; then
+  # shellcheck source=/dev/null
+  . "$HOME/.bash_profile_extra"
+fi
 
 # vim: set ai et ts=2 sw=2 ss=2 :
