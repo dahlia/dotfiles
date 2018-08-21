@@ -6,7 +6,6 @@ if [[ "$(uname)" = "Darwin" ]]; then
   else
     alias ls='ls -GF'
     echo -e "coreutils is not installed"
-ERR
   fi
 
   if [[ -f /usr/local/share/bash-completion/bash_completion ]]; then
