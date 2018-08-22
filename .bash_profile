@@ -76,8 +76,11 @@ else
   echo -e "pyenv is not installed"
 fi
 
-# Rust Cargo ##################################################################
-export PATH="$HOME/.cargo/bin:$PATH"
+# Rust ########################################################################
+if [[ -f "$HOME/.cargo/env" ]]; then
+  # shellcheck source=/dev/null
+  . "$HOME/.cargo/env"
+fi
 
 # Prompt (PS1) ################################################################
 PS1='\[\e[0;35m\]\u\[\e[m\]'
