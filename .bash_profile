@@ -121,6 +121,11 @@ fi
 # Werkzeug & Flask ############################################################
 export WERKZEUG_DEBUG_PIN=off
 
+# Heroku ######################################################################
+if command -v heroku > /dev/null; then
+  eval "$(heroku autocomplete:script bash)"
+fi
+
 # Overrides ###################################################################
 if [[ -f "$HOME/.bash_profile_extra" ]]; then
   # shellcheck source=/dev/null
