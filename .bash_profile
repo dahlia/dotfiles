@@ -133,6 +133,12 @@ if command -v heroku > /dev/null; then
   eval "$(heroku autocomplete:script bash)"
 fi
 
+# User-defined commands #######################################################
+if [[ -f "$HOME/.bash_profile_fn" ]]; then
+  # shellcheck source=/dev/null
+  . "$HOME/.bash_profile_fn"
+fi
+
 # Overrides ###################################################################
 if [[ -f "$HOME/.bash_profile_extra" ]]; then
   # shellcheck source=/dev/null

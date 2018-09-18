@@ -1,0 +1,13 @@
+#!/bin/bash
+
+function unichr {
+  python -c '
+from __future__ import print_function
+import locale, sys, unicodedata
+cs = sys.argv[1]
+enc = locale.getpreferredencoding()
+for c in (cs.decode(enc) if isinstance(cs, bytes) else cs):
+  print("U+{0:04X}".format(ord(c)), unicodedata.name(c))
+' \
+    "$1"
+}
