@@ -21,8 +21,6 @@ if [[ "$(uname)" = "Darwin" ]]; then
   elif [[ -f /usr/local/etc/bash_completion ]]; then
     # shellcheck source=/dev/null
     . /usr/local/etc/bash_completion
-    echo -e \
-      "bash-completion2 is not installed but bash-completeion is installed"
   else
     echo -e "bash-completion2 is not installed"
   fi
