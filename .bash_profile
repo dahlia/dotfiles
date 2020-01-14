@@ -15,6 +15,13 @@ if [[ "$(uname)" = "Darwin" ]]; then
     echo -e "gnu-sed is not installed"
   fi
 
+  if [[ -d /usr/local/opt/gnu-tar/libexec/gnubin ]]; then
+    PATH="/usr/local/opt/gnu-tar/libexec/gnubin:$PATH"
+    MANPATH="/usr/local/opt/gnu-tar/libexec/gnuman:$MANPATH"
+  else
+    echo -e "gnu-tar is not installed"
+  fi
+
   if [[ -f /usr/local/share/bash-completion/bash_completion ]]; then
     # shellcheck source=/dev/null
     . /usr/local/share/bash-completion/bash_completion
