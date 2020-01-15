@@ -8,6 +8,13 @@ if [[ "$(uname)" = "Darwin" ]]; then
     echo -e "coreutils is not installed"
   fi
 
+  if [[ -d /usr/local/opt/findutils/libexec ]]; then
+    PATH="/usr/local/opt/findutils/libexec/gnubin:$PATH"
+    MANPATH="/usr/local/opt/findutils/libexec/gnuman:$MANPATH"
+  else
+    echo -e "findutils is not installed"
+  fi
+
   if [[ -d /usr/local/opt/gnu-sed/libexec ]]; then
     PATH="/usr/local/opt/gnu-sed/libexec/gnubin:$PATH"
     MANPATH="/usr/local/opt/gnu-sed/libexec/gnuman:$MANPATH"
