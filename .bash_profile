@@ -15,6 +15,13 @@ if [[ "$(uname)" = "Darwin" ]]; then
     echo -e "findutils is not installed"
   fi
 
+  if [[ -d /usr/local/opt/grep/libexec ]]; then
+    PATH="/usr/local/opt/grep/libexec/gnubin:$PATH"
+    MANPATH="/usr/local/opt/grep/libexec/gnuman:$MANPATH"
+  else
+    echo -e "grep is not installed"
+  fi
+
   if [[ -d /usr/local/opt/gnu-sed/libexec ]]; then
     PATH="/usr/local/opt/gnu-sed/libexec/gnubin:$PATH"
     MANPATH="/usr/local/opt/gnu-sed/libexec/gnuman:$MANPATH"
