@@ -36,12 +36,9 @@ if [[ "$(uname)" = "Darwin" ]]; then
     echo -e "gnu-tar is not installed"
   fi
 
-  if [[ -f /usr/local/share/bash-completion/bash_completion ]]; then
-    # shellcheck source=/dev/null
-    . /usr/local/share/bash-completion/bash_completion
-  elif [[ -f /usr/local/etc/bash_completion ]]; then
-    # shellcheck source=/dev/null
-    . /usr/local/etc/bash_completion
+  if [[ -r /usr/local/etc/profile.d/bash_completion.sh ]]; then
+    export BASH_COMPLETION_COMPAT_DIR=/usr/local/etc/bash_completion.d
+    . /usr/local/etc/profile.d/bash_completion.sh
   else
     echo -e "bash-completion2 is not installed"
   fi
