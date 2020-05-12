@@ -99,6 +99,14 @@ else
   echo -e "pyenv is not installed"
 fi
 
+# Ruby ########################################################################
+for rv in ~/.gem/ruby/*; do
+  if [[ -d "$rv/bin" ]]; then
+    PATH="$rv/bin:$PATH"
+  fi
+  export PATH
+done
+
 # Rust ########################################################################
 if [[ -f "$HOME/.cargo/env" ]]; then
   # shellcheck source=/dev/null
