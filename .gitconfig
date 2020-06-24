@@ -14,3 +14,5 @@
 [core]
 	editor = nvim
 	excludesfile = /Users/dahlia/.gitignore_global
+[pull]
+	ff = only
