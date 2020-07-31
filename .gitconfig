@@ -16,3 +16,5 @@
 	excludesfile = /Users/dahlia/.gitignore_global
 [pull]
 	ff = only
+[init]
+	defaultBranch = main
