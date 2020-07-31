@@ -99,6 +99,12 @@ else
   echo -e "pyenv is not installed"
 fi
 
+if command -v pipx > /dev/null; then
+  eval "$(register-python-argcomplete pipx)"
+else
+  echo -e "pipx is not installed"
+fi
+
 # Ruby ########################################################################
 for rv in ~/.gem/ruby/*; do
   if [[ -d "$rv/bin" ]]; then
