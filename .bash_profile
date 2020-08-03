@@ -119,6 +119,29 @@ if [[ -f "$HOME/.cargo/env" ]]; then
   . "$HOME/.cargo/env"
 fi
 
+# .NET Core ###################################################################
+if command -v dotnet > /dev/null; then
+  # https://docs.microsoft.com/dotnet/core/tools/enable-tab-autocomplete#bash
+  _dotnet_bash_complete() {
+    local word=${COMP_WORDS[COMP_CWORD]}
+
+    local completions
+    completions="$(dotnet complete --position "${COMP_POINT}" "${COMP_LINE}" 2>/dev/null)"
+    # shellcheck disable=SC2181
+    if [ $? -ne 0 ]; then
+      completions=""
+    fi
+
+    COMPREPLY=()
+    while IFS='' read -r line; do
+      COMPREPLY+=("$line")
+    done < <(compgen -W "$completions" -- "$word")
+  }
+  complete -f -F _dotnet_bash_complete dotnet
+else
+  echo -e "dotnet-sdk (i.e., .NET Core SDK) is not installed"
+fi
+
 # Prompt (PS1) ################################################################
 PS1='\[\e[0;35m\]\u\[\e[m\]'
 if [[ -n "$SSH_CLIENT" || -n "$SSH_CLIENT" || -n "$SSH_TTY" ]]; then
