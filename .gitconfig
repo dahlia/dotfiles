@@ -7,7 +7,7 @@
 	l = log --color --graph --pretty=format:'%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr)%C(bold blue)<%an>%Creset' --abbrev-commit
 	f = fetch --tags --all -p
 	ci = commit
-	co = checkout -b
+	co = switch --create
 	st = status --short --branch
 [log]
 	date = iso8601
