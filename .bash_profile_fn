@@ -11,3 +11,18 @@ for c in (cs.decode(enc) if isinstance(cs, bytes) else cs):
 ' \
     "$1"
 }
+
+function open-web {
+  if [[ "$1" = "" ]]; then
+    d=.
+  else
+    d="$1"
+  fi
+  set -e
+  port=8000
+  {
+    sleep 0.5
+    python3 -m webbrowser -t "http://127.0.0.1:$port/"
+  } &
+  python3 -m http.server -d "$d" "$port"
+}
