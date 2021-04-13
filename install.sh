@@ -1,20 +1,48 @@
 #!/bin/bash
-BASE="$(dirname "$0")"
-DIR="$BASE"
-files="$(ls -a "$DIR")"
-FILES=$( echo "$files" \
-       | grep -E '^[.][^.]' \
-       | grep -vE '^.(hg|git)(ignore)?$' \
-       | grep -vE '^[.].*?[.]sw[op]$'
-       )
+link-files() {
+  source="$(realpath "$1")"; shift
+  target="$(realpath "$1")"; shift
+  ignores=( "$@" )
 
-if [[ "${DIR:0:1}" != "/" ]]
-then
-    DIR="$(pwd)/$DIR"
-fi
+  for src in "$source/"* "$source"/.*; do
+    rel="${src:$((${#source} + 1))}"
+    if [[ "$rel" = "." || "$rel" = ".." ]]; then
+      continue
+    fi
+    for i in "${ignores[@]}"; do
+      if [[ "$i" = "$rel" ]]; then
+        continue 2
+      fi
+    done
+    dst="$target/$rel"
+    {
+      shorten-path "$src"
+      echo -n " -> "
+      shorten-path "$dst"
+      echo
+    } > /dev/stderr
+    if [[ -f "$dst" ]]; then
+      if [[ -L "$dst" || ! -d "$dst" ]]; then
+        rm "$dst"
+      else
+        rm -rf "$dst"
+      fi
+    fi
+    ln -sf "$src" "$dst"
+  done
+}
 
-for file in $FILES
-do
-    echo "$BASE/$file" "->" ~"/$file"
-    ln -sfi "$DIR/$file" "$HOME/$file"
-done
+shorten-path() {
+  cwd="$(pwd)"
+  if [[ "$1" = "$cwd"/* ]]; then
+    echo -n "${1:$((${#cwd} + 1))}"
+  elif [[ "$1" = "$HOME"/* ]]; then
+    # shellcheck disable=SC2088
+    echo -n "~/${1:$((${#HOME} + 1))}"
+  else
+    echo -n "$1"
+  fi
+}
+
+link-files "$(dirname "$0")" "$HOME" .hg .hgignore
+link-files "$(dirname "$0")/.config" "${XDG_CONFIG_HOME:-$HOME/.config}"
