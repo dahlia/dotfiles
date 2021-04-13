@@ -95,8 +95,6 @@ if command -v pyenv > /dev/null; then
   else
     echo -e "pyenv-virtualenv is not installed"
   fi
-else
-  echo -e "pyenv is not installed"
 fi
 
 if command -v pipx > /dev/null; then
