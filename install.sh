@@ -44,5 +44,5 @@ shorten-path() {
   fi
 }
 
-link-files "$(dirname "$0")" "$HOME" .hg .hgignore
+link-files "$(dirname "$0")" "$HOME" .hg .hgignore README.md install.sh
 link-files "$(dirname "$0")/.config" "${XDG_CONFIG_HOME:-$HOME/.config}"
