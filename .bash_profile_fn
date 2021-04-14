@@ -26,3 +26,22 @@ function open-web {
   } &
   python3 -m http.server -d "$d" "$port"
 }
+
+function hex2bin {
+  python -c '
+from __future__ import print_function
+import re, sys
+bs = [
+    int(hs[i:i + 2], 16)
+    for hs in re.split(r"0x|[-_, {}]+", sys.argv[1].strip())
+    if hs
+    for i in range(0, len(hs), 2)
+    if hs[i:i + 2]
+]
+if getattr(sys.stdout, "buffer", None) is None:
+  sys.stdout.write("".join(chr(b) for b in bs))
+else:
+  sys.stdout.buffer.write(b"".join(bs))
+print()
+' "$1"
+}
