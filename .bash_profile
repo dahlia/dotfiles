@@ -52,9 +52,14 @@ fi
 # User-local directories ######################################################
 export PATH="$HOME/.local/bin:$PATH"
 
-# ls ##########################################################################
-if [[ "$(type -t ls)" != "alias" ]]; then
-  alias ls='ls --color=auto --indicator-style=slash'
+# exa (ls alt) #################################################################
+if command -v exa; then
+  alias ls='exa --classify --group-directories-first'
+else
+  if [[ "$(type -t ls)" != "alias" ]]; then
+    alias ls='ls --color=auto --indicator-style=slash'
+  fi
+  echo "exa is not installed"
 fi
 
 # Neovim & vi mode ############################################################
