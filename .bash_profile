@@ -62,6 +62,13 @@ else
   echo "exa is not installed"
 fi
 
+# bat (cat alt) ###############################################################
+if command -v bat; then
+  alias cat=bat
+else
+  echo "bat is not installed"
+fi
+
 # Neovim & vi mode ############################################################
 if command -v nvim > /dev/null; then
   export EDITOR=nvim
