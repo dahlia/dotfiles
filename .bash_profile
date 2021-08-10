@@ -53,7 +53,7 @@ fi
 export PATH="$HOME/.local/bin:$PATH"
 
 # exa (ls alt) #################################################################
-if command -v exa; then
+if command -v exa > /dev/null; then
   alias ls='exa --classify --group-directories-first'
 else
   if [[ "$(type -t ls)" != "alias" ]]; then
@@ -63,7 +63,7 @@ else
 fi
 
 # bat (cat alt) ###############################################################
-if command -v bat; then
+if command -v bat > /dev/null; then
   alias cat=bat
 else
   echo "bat is not installed"
