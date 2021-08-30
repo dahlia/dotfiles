@@ -680,7 +680,7 @@ shell:
 #
 # If the same trigger is assigned to multiple actions, all of them are executed
 # in the order they were defined in.
-#key_bindings:
+key_bindings:
   #- { key: Paste,                                       action: Paste          }
   #- { key: Copy,                                        action: Copy           }
   #- { key: L,         mods: Control,                    action: ClearLogNotice }
@@ -771,7 +771,23 @@ shell:
 
   # (macOS only)
   #- { key: K,              mods: Command, mode: ~Vi|~Search, chars: "\x0c"            }
-  #- { key: K,              mods: Command, mode: ~Vi|~Search, action: ClearHistory     }
+  - key: K
+    mods: Command
+    mode: ~Vi|~Search
+    command:
+      program: "bash"
+      args:
+      - "-c"
+      #- '"${XDG_CONFIG_HOME:-$HOME/.config}/alacritty/clear.sh"'
+      - |
+        if [ -z "${ALACRITTY_LOG}" ]; then exit 1; fi
+
+        ALACRITTY_LOG_BASE="${ALACRITTY_LOG//$TMPDIR/}"
+        TERM_PID="${ALACRITTY_LOG_BASE//[^0-9]/}"
+        # shellcheck disable=SC2009
+        tty="$(ps -o 'ppid= tty=' | grep "^$TERM_PID" | awk '{ print $2 }')"
+
+        perl -e 'print "\ec"' > "/dev/$tty"
   #- { key: Key0,           mods: Command,                    action: ResetFontSize    }
   #- { key: Equals,         mods: Command,                    action: IncreaseFontSize }
   #- { key: Plus,           mods: Command,                    action: IncreaseFontSize }
@@ -806,7 +822,7 @@ shell:
   #   - Info
   #   - Debug
   #   - Trace
-  #log_level: Warn
+  #log_level: Debug
 
   # Print all received window events.
   #print_events: false
