@@ -1,44 +1,50 @@
 # macOS #######################################################################
 if [[ "$(uname)" = "Darwin" ]]; then
-  if [[ -d /usr/local/opt/coreutils ]]; then
-    PATH="/usr/local/opt/coreutils/libexec/gnubin:$PATH"
-    MANPATH="/usr/local/opt/coreutils/libexec/gnuman:$MANPATH"
+  if [[ -f /opt/homebrew/bin/brew ]]; then
+    export HOMEBREW_PATH=/opt/homebrew
+    PATH="$HOMEBREW_PATH/bin:$PATH"
+  else
+    export HOMEBREW_PATH=/usr/local
+  fi
+  if [[ -d "$HOMEBREW_PATH/opt/coreutils" ]]; then
+    PATH="$HOMEBREW_PATH/opt/coreutils/libexec/gnubin:$PATH"
+    MANPATH="$HOMEBREW_PATH/opt/coreutils/libexec/gnuman:$MANPATH"
   else
     alias ls='ls -GF'
     echo -e "coreutils is not installed"
   fi
 
-  if [[ -d /usr/local/opt/findutils/libexec ]]; then
-    PATH="/usr/local/opt/findutils/libexec/gnubin:$PATH"
-    MANPATH="/usr/local/opt/findutils/libexec/gnuman:$MANPATH"
+  if [[ -d "$HOMEBREW_PATH/opt/findutils/libexec" ]]; then
+    PATH="$HOMEBREW_PATH/opt/findutils/libexec/gnubin:$PATH"
+    MANPATH="$HOMEBREW_PATH/opt/findutils/libexec/gnuman:$MANPATH"
   else
     echo -e "findutils is not installed"
   fi
 
-  if [[ -d /usr/local/opt/grep/libexec ]]; then
-    PATH="/usr/local/opt/grep/libexec/gnubin:$PATH"
-    MANPATH="/usr/local/opt/grep/libexec/gnuman:$MANPATH"
+  if [[ -d "$HOMEBREW_PATH/opt/grep/libexec" ]]; then
+    PATH="$HOMEBREW_PATH/opt/grep/libexec/gnubin:$PATH"
+    MANPATH="$HOMEBREW_PATH/opt/grep/libexec/gnuman:$MANPATH"
   else
     echo -e "grep is not installed"
   fi
 
-  if [[ -d /usr/local/opt/gnu-sed/libexec ]]; then
-    PATH="/usr/local/opt/gnu-sed/libexec/gnubin:$PATH"
-    MANPATH="/usr/local/opt/gnu-sed/libexec/gnuman:$MANPATH"
+  if [[ -d "$HOMEBREW_PATH/opt/gnu-sed/libexec" ]]; then
+    PATH="$HOMEBREW_PATH/opt/gnu-sed/libexec/gnubin:$PATH"
+    MANPATH="$HOMEBREW_PATH/opt/gnu-sed/libexec/gnuman:$MANPATH"
   else
     echo -e "gnu-sed is not installed"
   fi
 
-  if [[ -d /usr/local/opt/gnu-tar/libexec/gnubin ]]; then
-    PATH="/usr/local/opt/gnu-tar/libexec/gnubin:$PATH"
-    MANPATH="/usr/local/opt/gnu-tar/libexec/gnuman:$MANPATH"
+  if [[ -d "$HOMEBREW_PATH/opt/gnu-tar/libexec/gnubin" ]]; then
+    PATH="$HOMEBREW_PATH/opt/gnu-tar/libexec/gnubin:$PATH"
+    MANPATH="$HOMEBREW_PATH/opt/gnu-tar/libexec/gnuman:$MANPATH"
   else
     echo -e "gnu-tar is not installed"
   fi
 
-  if [[ -r /usr/local/etc/profile.d/bash_completion.sh ]]; then
-    export BASH_COMPLETION_COMPAT_DIR=/usr/local/etc/bash_completion.d
-    . /usr/local/etc/profile.d/bash_completion.sh
+  if [[ -r "$HOMEBREW_PATH/etc/profile.d/bash_completion.sh" ]]; then
+    export BASH_COMPLETION_COMPAT_DIR="$HOMEBREW_PATH/etc/bash_completion.d"
+    . "$HOMEBREW_PATH/etc/profile.d/bash_completion.sh"
   else
     echo -e "bash-completion2 is not installed"
   fi
