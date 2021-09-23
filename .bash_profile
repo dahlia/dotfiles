@@ -105,6 +105,17 @@ else
   echo -e "stack (i.e., Haskell Stack) is not installed"
 fi
 
+# Deno ########################################################################
+
+if [[ "$DENO_HOME" != "" && -d "$DENO_HOME" ]]; then
+  PATH="$DENO_HOME/bin:$PATH"
+elif [[ -d "$HOME/.deno" ]]; then
+  export DENO_HOME="$HOME/.deno"
+  PATH="$DENO_HOME/bin:$PATH"
+elif ! command -v deno > /dev/null; then
+  echo -e "deno is not installed"
+fi
+
 # Python & pyenv ##############################################################
 if command -v pyenv > /dev/null; then
   eval "$(pyenv init -)"
