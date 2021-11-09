@@ -213,6 +213,11 @@ if command -v heroku > /dev/null; then
   eval "$(heroku autocomplete:script bash)"
 fi
 
+# Libplanet CLI Tools #########################################################
+if command -v planet > /dev/null; then
+  eval "$(planet --completion bash)"
+fi
+
 # User-defined commands #######################################################
 if [[ -f "$HOME/.bash_profile_fn" ]]; then
   # shellcheck source=/dev/null
