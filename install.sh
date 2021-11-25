@@ -1,4 +1,10 @@
 #!/bin/bash
+if ! command -v realpath; then
+  realpath() {
+    python -c 'import os.path, sys; print(os.path.realpath(sys.argv[1]))' "$1"
+  }
+fi
+
 link-files() {
   source="$(realpath "$1")"; shift
   target="$(realpath "$1")"; shift
