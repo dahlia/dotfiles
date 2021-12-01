@@ -77,7 +77,7 @@ fi
 
 # Neovim & vi mode ############################################################
 if command -v nvim > /dev/null; then
-  export EDITOR=nvim
+  export EDITOR="$(command -v nvim)"
   export NVIM_TUI_ENABLE_TRUE_COLOR=1
 
   alias vi=nvim
