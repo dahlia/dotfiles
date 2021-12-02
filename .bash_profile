@@ -61,6 +61,7 @@ export PATH="$HOME/.local/bin:$PATH"
 # exa (ls alt) #################################################################
 if command -v exa > /dev/null; then
   alias ls='exa --classify --group-directories-first'
+  alias tree='exa --tree'
 else
   if [[ "$(type -t ls)" != "alias" ]]; then
     alias ls='ls --color=auto --indicator-style=slash'
