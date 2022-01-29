@@ -1,6 +1,7 @@
 [user]
 	name = Hong Minhee
 	useConfigOnly = true
+	signingkey = C429ECD57EED6CCA
 [color]
 	ui = auto
 [alias]
@@ -18,3 +19,5 @@
 	ff = only
 [init]
 	defaultBranch = main
+[commit]
+	gpgsign = true
