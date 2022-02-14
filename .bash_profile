@@ -155,13 +155,18 @@ if [[ -f "$HOME/.cargo/env" ]]; then
   # shellcheck source=/dev/null
   . "$HOME/.cargo/env"
 fi
-for _rust_toolchain in "$HOME"/.rustup/toolchains/stable-*; do
-  if [[ -f "$_rust_toolchain/etc/bash_completion.d/cargo" ]]; then
-    # shellcheck source=/dev/null
-    . "$_rust_toolchain/etc/bash_completion.d/cargo"
-    break
-  fi
-done
+if command -v rustup > /dev/null; then
+  eval "$(rustup completions bash rustup)"
+  eval "$(rustup completions bash cargo)"
+else
+  for _rust_toolchain in "$HOME"/.rustup/toolchains/stable-*; do
+    if [[ -f "$_rust_toolchain/etc/bash_completion.d/cargo" ]]; then
+      # shellcheck source=/dev/null
+      . "$_rust_toolchain/etc/bash_completion.d/cargo"
+      break
+    fi
+  done
+fi
 unset _rust_toolchain
 
 # .NET Core ###################################################################
