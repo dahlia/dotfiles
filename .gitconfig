@@ -14,7 +14,7 @@
 	date = iso8601
 [core]
 	editor = nvim
-	excludesfile = /Users/dahlia/.gitignore_global
+	excludesfile = ~/.gitignore_global
 [pull]
 	ff = only
 [init]
