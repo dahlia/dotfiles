@@ -7,12 +7,12 @@ l = log --graph --template "\x1B[35m{rev}\x1B[0m:\x1B[31m{node|short}\x1B[0m\x1B
 
 [extensions]
 hgext.color =
+hgext.gpg =
+hgext.pager =
 hgext.rebase =
 hgext.record =
 hgext.shelve =
 hgext.strip =
-hgext.gpg =
-hgext.pager =
 hgext.zeroconf =
 
 [pager]
