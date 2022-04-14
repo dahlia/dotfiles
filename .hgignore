@@ -1,4 +1,6 @@
 syntax:glob
 .*.swp
+.config/nvim/
+.config/planetarium/keystore/
 .ptpython/history
 .stack/*/
