@@ -15,6 +15,7 @@
 [core]
 	editor = nvim
 	excludesfile = ~/.gitignore_global
+	pager = delta
 [pull]
 	ff = only
 [init]
@@ -25,3 +26,11 @@
 	gpgSign = true
 [include]
 	path = ~/.gitconfig_extra
+[interactive]
+	diffFilter = delta --color-only
+[delta]
+	navigate = true  # use n and N to move between diff sections
+[merge]
+	conflictStyle = diff3
+[diff]
+	colorMoved = default

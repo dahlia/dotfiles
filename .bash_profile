@@ -243,6 +243,11 @@ if command -v planet > /dev/null; then
   eval "$(planet --completion bash)"
 fi
 
+# Git Delta <https://github.com/dandavison/delta> #############################
+if ! command -v delta > /dev/null; then
+  echo "delta (Git Delta) is not installed" >&2
+fi
+
 # User-defined commands #######################################################
 if [[ -f "$HOME/.bash_profile_fn" ]]; then
   # shellcheck source=/dev/null
