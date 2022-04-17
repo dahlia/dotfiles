@@ -2,5 +2,9 @@ templates:
   params:
     author-email: hong.minhee@gmail.com
     author-name: "Hong Minhee"
-    copyright: "(c) 2016 Hong Minhee"
+    copyright: "(c) 2021 Hong Minhee"
     github-username: dahlia
+
+ghc-options:
+  # https://gitlab.haskell.org/ghc/ghc/-/issues/20592
+  "$everything": "-I/Library/Developer/CommandLineTools/SDKs/MacOSX12.sdk/usr/include/ffi"
