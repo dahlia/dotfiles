@@ -42,6 +42,11 @@ if [[ "$(uname)" = "Darwin" ]]; then
     echo "gnu-tar is not installed" > /dev/stderr
   fi
 
+  if [[ -d "$HOMEBREW_PATH/opt/openjdk/bin" ]]; then
+    PATH="$HOMEBREW_PATH/opt/openjdk/bin:$PATH"
+    MANPATH="$HOMEBREW_PATH/opt/openjdk/share/man:$MANPATH"
+  fi
+
   if [[ -r "$HOMEBREW_PATH/etc/profile.d/bash_completion.sh" ]]; then
     export BASH_COMPLETION_COMPAT_DIR="$HOMEBREW_PATH/etc/bash_completion.d"
     . "$HOMEBREW_PATH/etc/profile.d/bash_completion.sh"
