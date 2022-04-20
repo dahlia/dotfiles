@@ -1,7 +1,7 @@
 #!/bin/bash
 
 function unichr {
-  python -c '
+  python3 -c '
 from __future__ import print_function
 import locale, sys, unicodedata
 cs = sys.argv[1]
