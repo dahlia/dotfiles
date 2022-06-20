@@ -136,6 +136,11 @@ if command -v pyenv > /dev/null; then
   fi
 fi
 
+if [[ -d "$HOMEBREW_PATH/opt/python@2.7/bin" ]]; then
+  export PATH="/opt/homebrew/opt/python@2.7/bin:$PATH"
+  export LDFLAGS="-L/opt/homebrew/opt/python@2.7/lib"
+fi
+
 if command -v pipx > /dev/null; then
   eval "$(register-python-argcomplete pipx)"
 else
