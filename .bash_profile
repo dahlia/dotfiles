@@ -62,6 +62,12 @@ if [[ "$(uname)" = Linux && "$(uname -r)" = *-microsoft-standard-WSL2 ]]; then
   else
     echo "keychain is not installed" > /dev/stderr
   fi
+
+  if command -v wslview > /dev/null; then
+    export BROWSER="$(command -v wslview)"
+  else
+    echo "wslu is not installed" >&2
+  fi
 fi
 
 # User-local directories ######################################################
