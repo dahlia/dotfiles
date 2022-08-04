@@ -67,6 +67,12 @@ if [[ "$(uname)" = Linux && "$(uname -r)" = *-microsoft-standard-WSL2 ]]; then
   else
     echo "keychain is not installed" > /dev/stderr
   fi
+
+  if command -v wslview > /dev/null; then
+    export BROWSER="$(command -v wslview)"
+  else
+    echo "wslu is not installed" >&2
+  fi
 fi
 
 # User-local directories ######################################################
@@ -139,6 +145,11 @@ if command -v pyenv > /dev/null; then
   else
     echo "pyenv-virtualenv is not installed" > /dev/stderr
   fi
+fi
+
+if [[ -d "$HOMEBREW_PATH/opt/python@2.7/bin" ]]; then
+  export PATH="/opt/homebrew/opt/python@2.7/bin:$PATH"
+  export LDFLAGS="-L/opt/homebrew/opt/python@2.7/lib"
 fi
 
 if command -v pipx > /dev/null; then
