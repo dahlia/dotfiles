@@ -209,19 +209,24 @@ else
 fi
 
 # Prompt (PS1) ################################################################
-PS1='\[\e[0;35m\]\u\[\e[m\]'
-if [[ -n "$SSH_CLIENT" || -n "$SSH_CLIENT" || -n "$SSH_TTY" ]]; then
-  PS1="$PS1"'\[\e[2;3m\]@\[\e[2;91m\]\h\[\e[m\]'
-fi
-PS1="$PS1"' \[\e[2;3m\]\w\[\e[m\] '
-if command -v vcprompt > /dev/null; then
-  export VCPROMPT_FORMAT='<%b%m%u>'
-  PS1="$PS1"'\[\e[0;34m\]$(vcprompt)'
+if ! command -v starship > /dev/null; then
+  eval "$(starship init bash)"
 else
-  echo "vcprompt is not installed" > /dev/stderr
+  echo "starship is not installed; fallback to bare PS1/PS2 & vcprompt..."
+  PS1='\[\e[0;35m\]\u\[\e[m\]'
+  if [[ -n "$SSH_CLIENT" || -n "$SSH_CLIENT" || -n "$SSH_TTY" ]]; then
+    PS1="$PS1"'\[\e[2;3m\]@\[\e[2;91m\]\h\[\e[m\]'
+  fi
+  PS1="$PS1"' \[\e[2;3m\]\w\[\e[m\] '
+  if command -v vcprompt > /dev/null; then
+    export VCPROMPT_FORMAT='<%b%m%u>'
+    PS1="$PS1"'\[\e[0;34m\]$(vcprompt)'
+  else
+    echo "vcprompt is not installed" > /dev/stderr
+  fi
+  PS1="$PS1"'\[\e[m\]\[\e[1;32m\]\$\[\e[m\] '
+  export PS1
 fi
-PS1="$PS1"'\[\e[m\]\[\e[1;32m\]\$\[\e[m\] '
-export PS1
 
 # iTerm #######################################################################
 if [[ "$TERM_PROGRAM" = "iTerm.app" ]]; then
