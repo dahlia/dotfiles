@@ -4,7 +4,7 @@ add_newline = false
 disabled = true
 
 [character]
-format = "\b$symbol "
+format = "$symbol "
 success_symbol = "[\\$](green)"
 error_symbol = "[\\$](red)"
 
@@ -26,12 +26,12 @@ style = "blue"
 symbol = ""
 
 [git_status]
-format = "[$all_status$ahead_behind]($style)[>](blue) "
+format = "[$all_status$ahead_behind]($style)[>](blue)"
 style = "cyan"
 
 [hg_branch]
 disabled = false
-format = "[<$symbol$branch>]($style) "
+format = "[<$symbol$branch>]($style)"
 style = "blue"
 symbol = ""
 
