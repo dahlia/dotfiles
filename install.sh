@@ -50,7 +50,7 @@ shorten-path() {
   fi
 }
 
-link-files "$(dirname "$0")" "$HOME" .hg .hgignore README.md install.sh
+link-files "$(dirname "$0")" "$HOME" .config .hg .hgignore README.md install.sh
 xdg_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}"
 if [[ -d "$xdg_config_dir" ]]; then
   mkdir -p "$xdg_config_dir"
