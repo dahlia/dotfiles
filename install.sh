@@ -34,7 +34,10 @@ link-files() {
         rm -rf "$dst"
       fi
     fi
-    ln -sf "$src" "$dst"
+    if [[ ! -L "$dst" || \
+          "$(realpath "$dst")" != "$(realpath "$src")" ]]; then
+      ln -sf "$src" "$dst"
+    fi
   done
 }
 
