@@ -14,6 +14,11 @@ return {
       mods = 'CMD',
       action = act.ClearScrollback "ScrollbackAndViewport",
     },
+    { -- CMD + T in Hangul mode
+      key = "ㅅ",
+      mods = "CMD",
+      action = act.SpawnTab "CurrentPaneDomain",
+    },
   },
 }
 
