@@ -8,6 +8,13 @@ format = "$symbol "
 success_symbol = "[\\$](green)"
 error_symbol = "[\\$](red)"
 
+[shell]
+bash_indicator = ""
+unknown_indicator = ""
+powershell_indicator = " PS"
+style = "gray"
+disabled = false
+
 [directory]
 style = "italic"
 
