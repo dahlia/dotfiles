@@ -42,6 +42,10 @@ format = "[<$symbol$branch>]($style)"
 style = "blue"
 symbol = ""
 
+[haskell]
+format = " [$symbol([$version](italic $style))]($style)"
+style = "red"
+
 [package]
 disabled = true
 
