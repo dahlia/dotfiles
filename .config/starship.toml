@@ -27,6 +27,10 @@ format = "[$user]($style) "
 ssh_symbol = ""
 format = "\b@[$ssh_symbol$hostname]($style) "
 
+[cmd_duration]
+format = " \\(took [$duration]($style)\\)"
+style = "yellow"
+
 [git_branch]
 format = "[<$symbol$branch]($style)"
 style = "blue"
