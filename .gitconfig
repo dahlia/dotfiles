@@ -1,3 +1,6 @@
+[includeIf "gitdir:/Applications/GPG Keychain.app"]
+	path = ~/.gitconfig-macos-gpg-suite
+
 [user]
 	name = Hong Minhee
 	useConfigOnly = true
@@ -35,3 +38,5 @@
 	conflictStyle = diff3
 [diff]
 	colorMoved = default
+
+# vim: set noet sw=2 ts=2 sts=2 ft=gitconfig:
