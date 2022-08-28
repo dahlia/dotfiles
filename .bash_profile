@@ -11,7 +11,7 @@ if [[ "$(uname)" = "Darwin" ]]; then
     C_INCLUDE_PATH="$HOMEBREW_PATH/include"
   fi
 
-  if [[ -d "$HOMEBREW_PATH/lib " ]]; then
+  if [[ -d "$HOMEBREW_PATH/lib" ]]; then
     LDFLAGS="$LDFLAGS -L$HOMEBREW_PATH/lib"
     DYLD_LIBRARY_PATH="$HOMEBREW_PATH/lib"
   fi
