@@ -6,6 +6,16 @@ if [[ "$(uname)" = "Darwin" ]]; then
   else
     export HOMEBREW_PATH=/usr/local
   fi
+
+  if [[ -d "$HOMEBREW_PATH/include" ]]; then
+    C_INCLUDE_PATH="$HOMEBREW_PATH/include"
+  fi
+
+  if [[ -d "$HOMEBREW_PATH/lib " ]]; then
+    LDFLAGS="$LDFLAGS -L$HOMEBREW_PATH/lib"
+    DYLD_LIBRARY_PATH="$HOMEBREW_PATH/lib"
+  fi
+
   if [[ -d "$HOMEBREW_PATH/opt/coreutils" ]]; then
     PATH="$HOMEBREW_PATH/opt/coreutils/libexec/gnubin:$PATH"
     MANPATH="$HOMEBREW_PATH/opt/coreutils/libexec/gnuman:$MANPATH"
@@ -56,6 +66,9 @@ if [[ "$(uname)" = "Darwin" ]]; then
 
   export PATH
   export MANPATH
+  export C_INCLUDE_PATH
+  export LDFLAGS
+  export DYLD_LIBRARY_PATH
   export LANG=en_US.UTF-8
   export LC_CTYPE=en_US.UTF-8
 fi
