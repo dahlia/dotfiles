@@ -1,65 +1,67 @@
 # macOS #######################################################################
 if [[ "$(uname)" = "Darwin" ]]; then
-  if [[ -f /opt/homebrew/bin/brew ]]; then
-    export HOMEBREW_PATH=/opt/homebrew
-    PATH="$HOMEBREW_PATH/bin:$PATH"
-  else
-    export HOMEBREW_PATH=/usr/local
+  if [[ "$HOMEBREW_PREFIX" = "" || ! -d "$HOMEBREW_PREFIX" ]]; then
+    if [[ -f /opt/homebrew/bin/brew ]]; then
+      export HOMEBREW_PREFIX=/opt/homebrew
+      PATH="$HOMEBREW_PREFIX/bin:$PATH"
+    else
+      export HOMEBREW_PREFIX=/usr/local
+    fi
   fi
 
-  if [[ -d "$HOMEBREW_PATH/include" ]]; then
-    C_INCLUDE_PATH="$HOMEBREW_PATH/include"
+  if [[ -d "$HOMEBREW_PREFIX/include" ]]; then
+    C_INCLUDE_PATH="$HOMEBREW_PREFIX/include"
   fi
 
-  if [[ -d "$HOMEBREW_PATH/lib" ]]; then
-    LDFLAGS="$LDFLAGS -L$HOMEBREW_PATH/lib"
-    DYLD_LIBRARY_PATH="$HOMEBREW_PATH/lib"
+  if [[ -d "$HOMEBREW_PREFIX/lib" ]]; then
+    LDFLAGS="$LDFLAGS -L$HOMEBREW_PREFIX/lib"
+    DYLD_LIBRARY_PATH="$HOMEBREW_PREFIX/lib"
   fi
 
-  if [[ -d "$HOMEBREW_PATH/opt/coreutils" ]]; then
-    PATH="$HOMEBREW_PATH/opt/coreutils/libexec/gnubin:$PATH"
-    MANPATH="$HOMEBREW_PATH/opt/coreutils/libexec/gnuman:$MANPATH"
+  if [[ -d "$HOMEBREW_PREFIX/opt/coreutils" ]]; then
+    PATH="$HOMEBREW_PREFIX/opt/coreutils/libexec/gnubin:$PATH"
+    MANPATH="$HOMEBREW_PREFIX/opt/coreutils/libexec/gnuman:$MANPATH"
   else
     alias ls='ls -GF'
     echo "coreutils is not installed" > /dev/stderr
   fi
 
-  if [[ -d "$HOMEBREW_PATH/opt/findutils/libexec" ]]; then
-    PATH="$HOMEBREW_PATH/opt/findutils/libexec/gnubin:$PATH"
-    MANPATH="$HOMEBREW_PATH/opt/findutils/libexec/gnuman:$MANPATH"
+  if [[ -d "$HOMEBREW_PREFIX/opt/findutils/libexec" ]]; then
+    PATH="$HOMEBREW_PREFIX/opt/findutils/libexec/gnubin:$PATH"
+    MANPATH="$HOMEBREW_PREFIX/opt/findutils/libexec/gnuman:$MANPATH"
   else
     echo "findutils is not installed" > /dev/stderr
   fi
 
-  if [[ -d "$HOMEBREW_PATH/opt/grep/libexec" ]]; then
-    PATH="$HOMEBREW_PATH/opt/grep/libexec/gnubin:$PATH"
-    MANPATH="$HOMEBREW_PATH/opt/grep/libexec/gnuman:$MANPATH"
+  if [[ -d "$HOMEBREW_PREFIX/opt/grep/libexec" ]]; then
+    PATH="$HOMEBREW_PREFIX/opt/grep/libexec/gnubin:$PATH"
+    MANPATH="$HOMEBREW_PREFIX/opt/grep/libexec/gnuman:$MANPATH"
   else
     echo "grep is not installed" > /dev/stderr
   fi
 
-  if [[ -d "$HOMEBREW_PATH/opt/gnu-sed/libexec" ]]; then
-    PATH="$HOMEBREW_PATH/opt/gnu-sed/libexec/gnubin:$PATH"
-    MANPATH="$HOMEBREW_PATH/opt/gnu-sed/libexec/gnuman:$MANPATH"
+  if [[ -d "$HOMEBREW_PREFIX/opt/gnu-sed/libexec" ]]; then
+    PATH="$HOMEBREW_PREFIX/opt/gnu-sed/libexec/gnubin:$PATH"
+    MANPATH="$HOMEBREW_PREFIX/opt/gnu-sed/libexec/gnuman:$MANPATH"
   else
     echo "gnu-sed is not installed" > /dev/stderr
   fi
 
-  if [[ -d "$HOMEBREW_PATH/opt/gnu-tar/libexec/gnubin" ]]; then
-    PATH="$HOMEBREW_PATH/opt/gnu-tar/libexec/gnubin:$PATH"
-    MANPATH="$HOMEBREW_PATH/opt/gnu-tar/libexec/gnuman:$MANPATH"
+  if [[ -d "$HOMEBREW_PREFIX/opt/gnu-tar/libexec/gnubin" ]]; then
+    PATH="$HOMEBREW_PREFIX/opt/gnu-tar/libexec/gnubin:$PATH"
+    MANPATH="$HOMEBREW_PREFIX/opt/gnu-tar/libexec/gnuman:$MANPATH"
   else
     echo "gnu-tar is not installed" > /dev/stderr
   fi
 
-  if [[ -d "$HOMEBREW_PATH/opt/openjdk/bin" ]]; then
-    PATH="$HOMEBREW_PATH/opt/openjdk/bin:$PATH"
-    MANPATH="$HOMEBREW_PATH/opt/openjdk/share/man:$MANPATH"
+  if [[ -d "$HOMEBREW_PREFIX/opt/openjdk/bin" ]]; then
+    PATH="$HOMEBREW_PREFIX/opt/openjdk/bin:$PATH"
+    MANPATH="$HOMEBREW_PREFIX/opt/openjdk/share/man:$MANPATH"
   fi
 
-  if [[ -r "$HOMEBREW_PATH/etc/profile.d/bash_completion.sh" ]]; then
-    export BASH_COMPLETION_COMPAT_DIR="$HOMEBREW_PATH/etc/bash_completion.d"
-    . "$HOMEBREW_PATH/etc/profile.d/bash_completion.sh"
+  if [[ -r "$HOMEBREW_PREFIX/etc/profile.d/bash_completion.sh" ]]; then
+    export BASH_COMPLETION_COMPAT_DIR="$HOMEBREW_PREFIX/etc/bash_completion.d"
+    . "$HOMEBREW_PREFIX/etc/profile.d/bash_completion.sh"
   else
     echo "bash-completion2 is not installed" > /dev/stderr
   fi
@@ -160,7 +162,7 @@ if command -v pyenv > /dev/null; then
   fi
 fi
 
-if [[ -d "$HOMEBREW_PATH/opt/python@2.7/bin" ]]; then
+if [[ -d "$HOMEBREW_PREFIX/opt/python@2.7/bin" ]]; then
   export PATH="/opt/homebrew/opt/python@2.7/bin:$PATH"
   export LDFLAGS="$LDFLAGS -L/opt/homebrew/opt/python@2.7/lib"
 fi
