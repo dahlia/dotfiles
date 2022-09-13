@@ -56,6 +56,9 @@ symbol = ""
 format = " [$symbol([$version](italic $style))]($style)"
 style = "red"
 
+[rust]
+disabled = true
+
 [package]
 disabled = true
 
