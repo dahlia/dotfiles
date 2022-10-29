@@ -7,7 +7,15 @@ import locale, sys, unicodedata
 cs = sys.argv[1]
 enc = locale.getpreferredencoding()
 for c in (cs.decode(enc) if isinstance(cs, bytes) else cs):
-  print("U+{0:04X}".format(ord(c)), unicodedata.name(c))
+  cp = "U+{0:04X}".format(ord(c))
+  try:
+    name = unicodedata.name(c)
+  except ValueError as e:
+    if "no such name" in str(e).lower():
+      print(cp)
+      continue
+    raise
+  print(cp, name)
 ' \
     "$1"
 }
