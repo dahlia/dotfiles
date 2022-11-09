@@ -58,4 +58,5 @@ xdg_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}"
 if [[ -d "$xdg_config_dir" ]]; then
   mkdir -p "$xdg_config_dir"
 fi
+mkdir -p "$xdg_config_dir"
 link-files "$(dirname "$0")/.config" "$xdg_config_dir"
