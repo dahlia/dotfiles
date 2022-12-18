@@ -226,6 +226,8 @@ fi
 # Prompt (PS1) ################################################################
 if command -v starship > /dev/null; then
   eval "$(starship init bash)"
+elif [[ -x "$HOME/bin/starship" ]]; then
+  eval "$("$HOME/bin/starship" init bash)"
 else
   echo "starship is not installed; fallback to bare PS1/PS2 & vcprompt..."
   PS1='\[\e[0;35m\]\u\[\e[m\]'
