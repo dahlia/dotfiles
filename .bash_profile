@@ -107,6 +107,8 @@ fi
 # bat (cat alt) ###############################################################
 if command -v bat > /dev/null; then
   alias cat=bat
+elif command -v batcat > /dev/null; then
+  alias cat=batcat
 else
   echo "bat is not installed" > /dev/stderr
 fi
