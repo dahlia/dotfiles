@@ -168,7 +168,11 @@ if [[ -d "$HOMEBREW_PREFIX/opt/python@2.7/bin" ]]; then
 fi
 
 if command -v pipx > /dev/null; then
-  eval "$(register-python-argcomplete pipx)"
+  if command -v register-python-argcomplete3 > /dev/null; then
+    eval "$(register-python-argcomplete3 pipx)"
+  elif command -v register-python-argcomplete > /dev/null; then
+    eval "$(register-python-argcomplete pipx)"
+  fi
 else
   echo "pipx is not installed" > /dev/stderr
 fi
