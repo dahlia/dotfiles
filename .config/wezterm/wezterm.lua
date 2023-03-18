@@ -2,7 +2,11 @@ local wezterm = require "wezterm"
 local act = wezterm.action
 
 return {
-  font = wezterm.font { family = "Fira Code", weight = "Light" },
+  font = wezterm.font_with_fallback {
+    "Sarasa Term K",
+    "Iosevka Term",
+    { family = "Fira Code", weight = "Light" },
+  },
   font_size = 20,
 
   color_scheme = "OneDark (base16)",
