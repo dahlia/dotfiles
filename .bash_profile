@@ -169,6 +169,13 @@ if [[ -d "$HOMEBREW_PREFIX/opt/python@2.7/bin" ]]; then
   export LDFLAGS="$LDFLAGS -L/opt/homebrew/opt/python@2.7/lib"
 fi
 
+for pyv in "" 2 3 2.7 3.4 3.5 3.6 3.7 3.8 3.9 3.10 3.11 3.12 3.13 3.14; do
+  if command -v "pip$pyv" > /dev/null; then
+    eval "$("pip$pyv" completion --bash)"
+  fi
+done
+unset pyv
+
 if command -v pipx > /dev/null; then
   if command -v register-python-argcomplete3 > /dev/null; then
     eval "$(register-python-argcomplete3 pipx)"
