@@ -179,13 +179,17 @@ else
   echo "pipx is not installed" > /dev/stderr
 fi
 
-# Ruby ########################################################################
+# Ruby & rbenv ################################################################
 for rv in ~/.gem/ruby/*; do
   if [[ -d "$rv/bin" ]]; then
     PATH="$rv/bin:$PATH"
   fi
   export PATH
 done
+
+if command -v rbenv > /dev/null; then
+  eval "$(rbenv init - bash)"
+fi
 
 # Rust ########################################################################
 if [[ -f "$HOME/.cargo/env" ]]; then
