@@ -206,6 +206,18 @@ else
 fi
 unset _rust_toolchain
 
+# Node & NVM ##################################################################
+if [[ "$NVM_DIR" = "" && -d "$HOME/.nvm" ]]; then
+  export NVM_DIR="$HOME/.nvm"
+fi
+
+if [[ "$NVM_DIR" != "" && -d "$NVM_DIR" ]]; then
+  [[ -s "/opt/homebrew/opt/nvm/nvm.sh" ]] && . "/opt/homebrew/opt/nvm/nvm.sh"
+  [[ -s "/opt/homebrew/opt/nvm/etc/bash_completion.d/nvm" ]] \
+    && . "/opt/homebrew/opt/nvm/etc/bash_completion.d/nvm"
+fi
+
+
 # .NET Core ###################################################################
 if command -v dotnet > /dev/null; then
   # https://docs.microsoft.com/dotnet/core/tools/enable-tab-autocomplete#bash
