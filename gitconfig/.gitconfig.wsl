@@ -1,0 +1,9 @@
+[include]
+	path = ~/.gitconfig_common
+
+[core]
+	sshCommand = /mnt/c/Windows/System32/OpenSSH/ssh.exe
+[gpg]
+	program = /mnt/c/Program Files (x86)/GnuPG/bin/gpg.exe
+
+# vim: set noet sw=2 ts=2 sts=2 ft=gitconfig ff=unix:

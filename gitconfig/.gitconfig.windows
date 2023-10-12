@@ -1,0 +1,13 @@
+[include]
+	path = ~/.gitconfig_common
+
+[core]
+	sshCommand = C:/Windows/System32/OpenSSH/ssh.exe
+	autocrlf = false
+	symlinks = true
+[credential "helperselector"]
+	selected = manager
+[gpg]
+	program = C:\\Program Files (x86)\\GnuPG\\bin\\gpg.exe
+
+# vim: set noet sw=2 ts=2 sts=2 ft=gitconfig ff=unix:

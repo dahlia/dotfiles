@@ -1,0 +1,98 @@
+#:schema https://schema.dojang.dev/2023-11/manifest.schema.json
+
+[dirs.XDG_CONFIG_HOME]
+posix = "${XDG_CONFIG_HOME:-$HOME/.config}"
+windows = "$UserProfile/.config"
+
+[dirs.AppData]
+posix = "${XDG_CONFIG_HOME:-$HOME/.config}"
+windows = "$AppData"
+
+[dirs.HOME]
+posix = "$HOME"
+windows = "$UserProfile"
+
+[dirs."HOME.posix"]
+posix = "$HOME"
+
+[dirs.STACK_ROOT]
+posix = "${STACK_ROOT:-$HOME/.stack}"
+windows = "${STACK_ROOT:-$LocalAppData/Programs/stack}"
+
+[dirs.PSProfile]
+posix = "${XDG_CONFIG_HOME:-$HOME/.config}/powershell"
+windows = "$UserProfile/Documents/PowerShell"
+
+[files."gitconfig/.gitconfig_common"]
+posix = "$HOME/.gitconfig_common"
+windows = "$UserProfile/.gitconfig_common"
+
+[files."gitconfig/.gitconfig.linux"]
+non-wsl-linux = "$HOME/.gitconfig"
+
+[files."gitconfig/.gitconfig.macos"]
+macos = "$HOME/.gitconfig"
+
+[files."gitconfig/.gitconfig.windows"]
+windows = "$UserProfile/.gitconfig"
+
+[files."gitconfig/.gitconfig.wsl"]
+wsl = "$HOME/.gitconfig"
+
+[files.".psqlrc"]
+posix = "${PSQLRC:-$HOME/.psqlrc}"
+windows = "${PSQLRC:-${AppData:-$UserProfile/AppData/Roaming}/postgresql/psqlrc.conf}"
+
+[files."Microsoft.WindowsTerminal.json"]
+windows = "$LocalAppData/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json"
+
+[monikers.posix]
+os = ["linux", "macos"]
+
+[monikers.linux]
+os = "linux"
+
+[monikers.macos]
+os = "macos"
+
+[monikers.windows]
+os = "windows"
+
+[monikers.wsl]
+when = "os = linux && kernel-release $= '-microsoft-standard-WSL2'"
+
+[monikers.non-wsl-linux]
+when = "os = linux && !(kernel-release $= '-microsoft-standard-WSL2')"
+
+[ignores]
+XDG_CONFIG_HOME = [
+  "alacritty",
+  "containers",
+  "croc",
+  "dconf",
+  "enchant",
+  "ephphany",
+  "gedit",
+  "ghc/ghci_history",
+  "github-*",
+  "gtk-*",
+  "htop",
+  "iterm2",
+  "mc",
+  "mimeapps.list",
+  "neofetch",
+  "nvim",
+  "planetarium",
+  "powershell",
+  "scoop",
+  "rclone",
+  "wireshark",
+  "wslu",
+  "zed/conversations",
+  "zed/embeddings",
+]
+AppData = ["*"]
+"AppData.windows" = ["*"]
+HOME = ["*"]
+"HOME.posix" = ["*"]
+STACK_ROOT = ["*"]

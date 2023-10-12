@@ -1,0 +1,8 @@
+{
+  "theme": "One Light",
+  "buffer_font_size": 15,
+  "vim_mode": true,
+  "copilot": {
+    "enabled": true
+  }
+}

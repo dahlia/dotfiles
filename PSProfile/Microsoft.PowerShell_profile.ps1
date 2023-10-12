@@ -1,0 +1,1 @@
+. $PSScriptRoot\profile.ps1

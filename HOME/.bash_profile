@@ -23,35 +23,35 @@ if [[ "$(uname)" = "Darwin" ]]; then
     MANPATH="$HOMEBREW_PREFIX/opt/coreutils/libexec/gnuman:$MANPATH"
   else
     alias ls='ls -GF'
-    echo "coreutils is not installed" > /dev/stderr
+    echo "coreutils is not installed" >&2
   fi
 
   if [[ -d "$HOMEBREW_PREFIX/opt/findutils/libexec" ]]; then
     PATH="$HOMEBREW_PREFIX/opt/findutils/libexec/gnubin:$PATH"
     MANPATH="$HOMEBREW_PREFIX/opt/findutils/libexec/gnuman:$MANPATH"
   else
-    echo "findutils is not installed" > /dev/stderr
+    echo "findutils is not installed" >&2
   fi
 
   if [[ -d "$HOMEBREW_PREFIX/opt/grep/libexec" ]]; then
     PATH="$HOMEBREW_PREFIX/opt/grep/libexec/gnubin:$PATH"
     MANPATH="$HOMEBREW_PREFIX/opt/grep/libexec/gnuman:$MANPATH"
   else
-    echo "grep is not installed" > /dev/stderr
+    echo "grep is not installed" >&2
   fi
 
   if [[ -d "$HOMEBREW_PREFIX/opt/gnu-sed/libexec" ]]; then
     PATH="$HOMEBREW_PREFIX/opt/gnu-sed/libexec/gnubin:$PATH"
     MANPATH="$HOMEBREW_PREFIX/opt/gnu-sed/libexec/gnuman:$MANPATH"
   else
-    echo "gnu-sed is not installed" > /dev/stderr
+    echo "gnu-sed is not installed" >&2
   fi
 
   if [[ -d "$HOMEBREW_PREFIX/opt/gnu-tar/libexec/gnubin" ]]; then
     PATH="$HOMEBREW_PREFIX/opt/gnu-tar/libexec/gnubin:$PATH"
     MANPATH="$HOMEBREW_PREFIX/opt/gnu-tar/libexec/gnuman:$MANPATH"
   else
-    echo "gnu-tar is not installed" > /dev/stderr
+    echo "gnu-tar is not installed" >&2
   fi
 
   if [[ -d "$HOMEBREW_PREFIX/opt/openjdk/bin" ]]; then
@@ -63,7 +63,7 @@ if [[ "$(uname)" = "Darwin" ]]; then
     export BASH_COMPLETION_COMPAT_DIR="$HOMEBREW_PREFIX/etc/bash_completion.d"
     . "$HOMEBREW_PREFIX/etc/profile.d/bash_completion.sh"
   else
-    echo "bash-completion2 is not installed" > /dev/stderr
+    echo "bash-completion2 is not installed" >&2
   fi
 
   export PATH
@@ -80,7 +80,7 @@ if [[ "$(uname)" = Linux && "$(uname -r)" = *-microsoft-standard-WSL2 ]]; then
   if command -v keychain > /dev/null; then
     eval "$(keychain --eval --agents ssh id_ed25519)"
   else
-    echo "keychain is not installed" > /dev/stderr
+    echo "keychain is not installed" >&2
   fi
 
   if command -v wslview > /dev/null; then
@@ -101,7 +101,7 @@ else
   if [[ "$(type -t ls)" != "alias" ]]; then
     alias ls='ls --color=auto --indicator-style=slash'
   fi
-  echo "exa is not installed" > /dev/stderr
+  echo "exa is not installed" >&2
 fi
 
 # bat (cat alt) ###############################################################
@@ -110,7 +110,7 @@ if command -v bat > /dev/null; then
 elif command -v batcat > /dev/null; then
   alias cat=batcat
 else
-  echo "bat is not installed" > /dev/stderr
+  echo "bat is not installed" >&2
 fi
 
 # Neovim & vi mode ############################################################
@@ -130,17 +130,21 @@ if command -v nvim > /dev/null; then
 
   alias mvim=gvim
 else
-  echo "nvim (i.e., Neovim) is not installed" > /dev/stderr
+  echo "nvim (i.e., Neovim) is not installed" >&2
 fi
 
 set editing-mode vi
 set -o vi
 
-# Haskell Stack ###############################################################
+# Haskell Stack & GHCup #######################################################
 if command -v stack > /dev/null; then
   eval "$(stack --bash-completion-script stack)"
 else
-  echo "stack (i.e., Haskell Stack) is not installed" > /dev/stderr
+  echo "stack (i.e., Haskell Stack) is not installed" >&2
+fi
+
+if [[ -f "$HOME/.ghcup/bin/ghcup" ]]; then
+  PATH="$HOME/.ghcup/bin:$PATH"
 fi
 
 # Deno ########################################################################
@@ -151,7 +155,7 @@ elif [[ -d "$HOME/.deno" ]]; then
   export DENO_HOME="$HOME/.deno"
   PATH="$DENO_HOME/bin:$PATH"
 elif ! command -v deno > /dev/null; then
-  echo "deno is not installed" > /dev/stderr
+  echo "deno is not installed" >&2
 fi
 
 # Python & pyenv ##############################################################
@@ -160,7 +164,7 @@ if command -v pyenv > /dev/null; then
   if command -v pyenv-virtualenv-init > /dev/null; then
     eval "$(pyenv virtualenv-init -)";
   else
-    echo "pyenv-virtualenv is not installed" > /dev/stderr
+    echo "pyenv-virtualenv is not installed" >&2
   fi
 fi
 
@@ -183,7 +187,7 @@ if command -v pipx > /dev/null; then
     eval "$(register-python-argcomplete pipx)"
   fi
 else
-  echo "pipx is not installed" > /dev/stderr
+  echo "pipx is not installed" >&2
 fi
 
 # Ruby & rbenv ################################################################
@@ -249,7 +253,7 @@ if command -v dotnet > /dev/null; then
   }
   complete -f -F _dotnet_bash_complete dotnet
 else
-  echo "dotnet-sdk (i.e., .NET Core SDK) is not installed" > /dev/stderr
+  echo "dotnet-sdk (i.e., .NET Core SDK) is not installed" >&2
 fi
 
 # Prompt (PS1) ################################################################
@@ -268,7 +272,7 @@ else
     export VCPROMPT_FORMAT='<%b%m%u>'
     PS1="$PS1"'\[\e[0;34m\]$(vcprompt)'
   else
-    echo "vcprompt is not installed" > /dev/stderr
+    echo "vcprompt is not installed" >&2
   fi
   PS1="$PS1"'\[\e[m\]\[\e[1;32m\]\$\[\e[m\] '
   export PS1
@@ -283,7 +287,7 @@ if [[ "$TERM_PROGRAM" = "iTerm.app" ]]; then
     {
       echo "$HOME/.iterm2_shell_integration.bash file does not exist."
       echo "See also: iTerm2 -> Install Shell Integration"
-    } > /dev/stderr
+    } >&2
   fi
 fi
 
