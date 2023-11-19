@@ -68,11 +68,13 @@ when = "os = linux && !(kernel-release $= '-microsoft-standard-WSL2')"
 XDG_CONFIG_HOME = [
   "alacritty",
   "containers",
+  "cni",
   "croc",
   "dconf",
   "enchant",
   "ephphany",
   "gedit",
+  "gh",
   "ghc/ghci_history",
   "github-*",
   "gtk-*",
