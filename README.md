@@ -1,9 +1,16 @@
 Hong Minhee's dotfiles
 ======================
 
-The title says it all.  Public domain.
+Here are my settings for my favorite command-line programs (except for Neovim).
+It supports Linux, macOS, and Windows (including WSL2).
 
-It's currently being reorganized, so many things won't work correctly.
+It can be installed using [Dojang]:
+
+~~~~ console
+dojang apply
+~~~~
+
+[Dojang]: https://dojang.dev/
 
 
 Custom settings
