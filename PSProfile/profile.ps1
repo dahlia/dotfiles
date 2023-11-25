@@ -20,3 +20,6 @@ function Invoke-Starship-PreCommand {
   }
   $host.ui.Write($prompt)
 }
+
+Set-Alias -Name vim -Value nvim
+Set-Alias -Name vi -Value nvim
