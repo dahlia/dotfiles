@@ -180,6 +180,10 @@ for pyv in "" 2 3 2.7 3.4 3.5 3.6 3.7 3.8 3.9 3.10 3.11 3.12 3.13 3.14; do
 done
 unset pyv
 
+if [[ -f "$HOME/.rye/env" ]]; then
+  . "$HOME/.rye/env"
+fi
+
 if command -v pipx > /dev/null; then
   if command -v register-python-argcomplete3 > /dev/null; then
     eval "$(register-python-argcomplete3 pipx)"
