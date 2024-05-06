@@ -65,34 +65,7 @@ when = "os = linux && kernel-release $= '-microsoft-standard-WSL2'"
 when = "os = linux && !(kernel-release $= '-microsoft-standard-WSL2')"
 
 [ignores]
-XDG_CONFIG_HOME = [
-  "alacritty",
-  "containers",
-  "cni",
-  "croc",
-  "dconf",
-  "enchant",
-  "ephphany",
-  "gedit",
-  "gh",
-  "ghc/ghci_history",
-  "github-*",
-  "gtk-*",
-  "htop",
-  "iterm2",
-  "mc",
-  "mimeapps.list",
-  "neofetch",
-  "nvim",
-  "planetarium",
-  "powershell",
-  "scoop",
-  "rclone",
-  "wireshark",
-  "wslu",
-  "zed/conversations",
-  "zed/embeddings",
-]
+XDG_CONFIG_HOME = ["*"]
 AppData = ["*"]
 "AppData.windows" = ["*"]
 HOME = ["*"]

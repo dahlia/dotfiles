@@ -323,6 +323,15 @@ if ! command -v delta > /dev/null; then
   echo "delta (Git Delta) is not installed" >&2
 fi
 
+# xsel or xclip ###############################################################
+if command -v xsel > /dev/null; then
+  alias pbcopy='xsel --clipboard --input'
+  alias pbpaste='xsel --clipboard --output'
+elif command -v xclip > /dev/null; then
+  alias pbcopy='xclip -selection clipboard'
+  alias pbpaste='xclip -selection clipboard -o'
+fi
+
 # User-defined commands #######################################################
 if [[ -f "$HOME/.bash_profile_fn" ]]; then
   # shellcheck source=/dev/null
