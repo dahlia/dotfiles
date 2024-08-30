@@ -93,15 +93,15 @@ fi
 # User-local directories ######################################################
 export PATH="$HOME/.local/bin:$PATH"
 
-# exa (ls alt) ################################################################
-if command -v exa > /dev/null; then
-  alias ls='exa --classify --group-directories-first'
-  alias tree='exa --tree'
+# eza (ls alt) ################################################################
+if command -v eza > /dev/null; then
+  alias ls='eza --classify --group-directories-first'
+  alias tree='eza --tree'
 else
   if [[ "$(type -t ls)" != "alias" ]]; then
     alias ls='ls --color=auto --indicator-style=slash'
   fi
-  echo "exa is not installed" >&2
+  echo "eza is not installed" >&2
 fi
 
 # bat (cat alt) ###############################################################
