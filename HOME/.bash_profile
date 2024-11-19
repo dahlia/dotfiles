@@ -240,6 +240,11 @@ if [[ -d "$HOME/.local/share/pnpm" ]]; then
   PATH="$HOME/.local/share/pnpm:$PATH"
 fi
 
+# Bun #########################################################################
+
+if [[ -d "$HOME/.bun/bin" ]]; then
+  PATH="$HOME/.bun/bin:$PATH"
+fi
 
 # .NET Core ###################################################################
 if command -v dotnet > /dev/null; then
