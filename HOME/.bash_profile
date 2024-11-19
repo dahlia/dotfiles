@@ -332,6 +332,10 @@ elif command -v xclip > /dev/null; then
   alias pbpaste='xclip -selection clipboard -o'
 fi
 
+# Wayland #####################################################################
+export WARP_ENABLE_WAYLAND=1
+export ELECTRON_OZONE_PLATFORM_HINT=wayland
+
 # User-defined commands #######################################################
 if [[ -f "$HOME/.bash_profile_fn" ]]; then
   # shellcheck source=/dev/null
