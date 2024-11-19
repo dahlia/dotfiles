@@ -236,6 +236,10 @@ if [[ "$NVM_DIR" != "" && -d "$NVM_DIR" ]]; then
     && . "/opt/homebrew/opt/nvm/etc/bash_completion.d/nvm"
 fi
 
+if [[ -d "$HOME/.local/share/pnpm" ]]; then
+  PATH="$HOME/.local/share/pnpm:$PATH"
+fi
+
 
 # .NET Core ###################################################################
 if command -v dotnet > /dev/null; then
