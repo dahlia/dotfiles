@@ -147,6 +147,14 @@ if [[ -f "$HOME/.ghcup/bin/ghcup" ]]; then
   PATH="$HOME/.ghcup/bin:$PATH"
 fi
 
+# mise ########################################################################
+
+if command -v mise > /dev/null; then
+  eval "$(mise activate bash --shims)"
+else
+  echo "mise is not installed" >&2
+fi
+
 # Deno ########################################################################
 
 if [[ "$DENO_HOME" != "" && -d "$DENO_HOME" ]]; then
