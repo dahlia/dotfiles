@@ -198,7 +198,7 @@ if command -v pipx > /dev/null; then
   elif command -v register-python-argcomplete > /dev/null; then
     eval "$(register-python-argcomplete pipx)"
   fi
-else
+elif ! command -v mise > /dev/null; then
   echo "pipx is not installed" >&2
 fi
 
