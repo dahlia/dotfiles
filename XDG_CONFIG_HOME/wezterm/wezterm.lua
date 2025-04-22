@@ -143,6 +143,7 @@ return {
   font_size = is_macos and 20 or 18,
 
   color_scheme = "OneDark (base16)",
+  window_decorations = "RESIZE",
   window_frame = { font_size = 14 },
 
   default_prog = default_prog,
