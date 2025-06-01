@@ -1,12 +1,25 @@
 {
+  "agent": {
+    "model_parameters": [],
+    "default_model": {
+      "provider": "copilot_chat",
+      "model": "claude-sonnet-4"
+    },
+    "version": "2"
+  },
   "theme": {
-    "light": "One Light",
+    "mode": "system",
     "dark": "One Dark",
-    "mode": "system"
+    "light": "One Light"
   },
   "buffer_font_size": 15,
   "vim_mode": true,
+  "features": {
+    "edit_prediction_provider": "copilot"
+  },
   "copilot": {
     "enabled": true
-  }
+  },
+  "show_wrap_guides": true,
+  "wrap_guides": [80]
 }
