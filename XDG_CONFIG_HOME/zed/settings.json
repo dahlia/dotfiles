@@ -12,7 +12,9 @@
     "dark": "One Dark",
     "light": "One Light"
   },
-  "buffer_font_size": 15,
+  "buffer_font_size": 18,
+  "buffer_font_family": "Sarasa Mono K",
+  "buffer_font_weight": 500,
   "vim_mode": true,
   "features": {
     "edit_prediction_provider": "copilot"
