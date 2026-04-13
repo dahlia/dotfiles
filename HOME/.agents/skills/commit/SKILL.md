@@ -1,7 +1,6 @@
 ---
 name: commit
 description: Make a commit in Git with an appropriate commit message for the currently staged changes.
-disable-model-invocation: true
 allowed-tools: Bash(git *)
 ---
 
