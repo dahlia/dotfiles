@@ -89,9 +89,9 @@ Note any later comments in each thread too: if the reviewer and author have
 already gone back and forth, the latest state of the conversation matters more
 than the original comment.
 
-If there are zero unresolved threads, tell the user and skip ahead to Step 8
-(the bot re-trigger may still apply, e.g. if the user is asking you to re-run
-an automated review on a PR with no human comments).
+If there are zero unresolved threads, tell the user there's nothing to address
+and stop. Don't run Step 8 either: the bot re-trigger only makes sense after a
+new commit, and there is none here.
 
 
 Step 2 — Triage each thread
@@ -269,7 +269,14 @@ it unresolved and let them respond. Use this sparingly — the default is resolv
 Step 8 — Re-trigger Codex / Gemini if they previously reviewed
 --------------------------------------------------------------
 
-List the reviewers and review-comment authors on the PR:
+**Only run this step if you actually pushed at least one new commit in Step 4.**
+If every thread was declined as invalid and no code changed, the bots have
+nothing new to look at; re-running them just produces a duplicate review and
+adds noise to the PR. In that case, skip this step entirely; the workflow ends
+after Step 7.
+
+If you did push commits, list the reviewers and review-comment authors on the
+PR:
 
 ~~~~ bash
 gh api repos/OWNER/REPO/pulls/PR_NUMBER/reviews --jq '.[].user.login' | sort -u
