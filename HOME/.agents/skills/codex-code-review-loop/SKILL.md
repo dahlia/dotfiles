@@ -42,10 +42,9 @@ External Codex review path (running in Claude Code)
 
 ### Look up the current frontier model
 
-Fetch `https://developers.openai.com/api/docs/models` and identify the most
-capable general-purpose frontier model (not a mini, nano, realtime, image, or
-audio specialist). Note its exact model ID — you'll use it for every Codex call
-and for the `Assisted-by` trailer.
+Fetch `https://developers.openai.com/api/docs/guides/latest-model.md` and
+extract the exact model ID of the current frontier model. Note it — you'll use
+it for every Codex call and for the `Assisted-by` trailer.
 
 ### Pre-commit mode
 
