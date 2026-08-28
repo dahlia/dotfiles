@@ -1,6 +1,6 @@
 ---
 name: fable-code-review-loop
-description: Run an iterative code review loop using Claude Code in non-interactive mode with Claude Fable 5 — Fable reviews the code and you apply fixes, repeating until Fable finds nothing more to fix. Use this skill whenever the user asks to "run a Fable review", "do a Fable code review loop", "let Claude review my code", "Fable로 코드 리뷰", "Claude로 코드 리뷰", "코드 리뷰 루프", or wants an independent Claude Fable 5 review of uncommitted changes or a branch followed by iterative fixes.
+description: Narrow, single-reviewer variant that drives the review loop through `claude -p` pinned to Claude Fable 5, with no Codex pass. Do not use for general review requests — the two-reviewer finishing workflow in `code-review-loop` supersedes this. Use only when the user names this skill explicitly, or explicitly asks for a Fable-only review loop.
 ---
 
 Fable Code Review Loop

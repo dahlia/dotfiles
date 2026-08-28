@@ -1,6 +1,6 @@
 ---
 name: codex-code-review-loop
-description: Run an iterative code review loop using the Codex MCP — Codex reviews the code and you apply fixes, repeating until Codex finds nothing more to fix. Use this skill whenever the user asks to "run a Codex review", "do a Codex code review loop", "let Codex review my code", "코드 리뷰 루프", "Codex로 코드 리뷰", or wants to review and iteratively fix uncommitted changes or a branch using the Codex AI agent.
+description: Narrow, single-reviewer variant that drives the review loop through the Codex MCP tool (`mcp__codex__codex`) instead of the `codex review` CLI, and self-reviews when running inside Codex itself. Do not use for general review requests — the two-reviewer finishing workflow in `code-review-loop` supersedes this. Use only when the user names this skill explicitly, or explicitly asks for a Codex-MCP-only loop with no Claude pass.
 ---
 
 Codex Code Review Loop
