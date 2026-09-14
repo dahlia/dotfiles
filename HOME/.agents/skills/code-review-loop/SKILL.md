@@ -359,7 +359,7 @@ stage fails, and the output gives no sign of it.
 
 The last one is what goes in the trailer. `modelUsage` always contains a
 `claude-haiku-*` entry for Claude Code's own internal bookkeeping — ignore it.
-The remaining key is the reviewer, e.g. `claude-fable-5`. If the fallback
+The remaining key is the reviewer, e.g. `claude-fable-5-1`. If the fallback
 engaged you will see `claude-opus-5` there instead; attribute the model that
 actually did the work and mention the fallback in your report.
 
@@ -427,7 +427,7 @@ found nothing does not get a trailer merely for having run:
 
 ~~~~
 Assisted-by: Codex:gpt-5.6-sol
-Assisted-by: Claude Code:claude-fable-5
+Assisted-by: Claude Code:claude-fable-5-1
 ~~~~
 
 Substitute the resolved IDs from Step 2 and Stage B. Codex first, since it

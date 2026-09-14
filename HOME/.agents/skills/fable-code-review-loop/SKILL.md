@@ -1,6 +1,6 @@
 ---
 name: fable-code-review-loop
-description: Narrow, single-reviewer variant that drives the review loop through `claude -p` pinned to Claude Fable 5, with no Codex pass. Do not use for general review requests — the two-reviewer finishing workflow in `code-review-loop` supersedes this. Use only when the user names this skill explicitly, or explicitly asks for a Fable-only review loop.
+description: Narrow, single-reviewer variant that drives the review loop through `claude -p` pinned to Claude Fable 5.1, with no Codex pass. Do not use for general review requests — the two-reviewer finishing workflow in `code-review-loop` supersedes this. Use only when the user names this skill explicitly, or explicitly asks for a Fable-only review loop.
 ---
 
 Fable Code Review Loop
@@ -9,7 +9,7 @@ Fable Code Review Loop
 Fable reviews; you fix. Repeat until the review comes back clean.
 
 This skill invokes Claude Code through `claude -p` and pins the reviewer to
-Claude Fable 5 (`claude-fable-5`). It does not use MCP.
+Claude Fable 5.1 (`claude-fable-5-1`). It does not use MCP.
 
 
 Step 0: Verify prerequisites and locate the repository
@@ -23,9 +23,17 @@ claude --version
 claude auth status
 ~~~~
 
-Claude Fable 5 requires Claude Code 2.1.170 or later. If Claude Code is missing,
-too old, unauthenticated, or Fable 5 is unavailable to the account, stop and
-report the problem. Do not silently substitute another reviewer or self-review.
+Confirm that the account can reach Claude Fable 5.1 before starting a loop. An
+expired login or an unavailable model otherwise surfaces only after the first
+review call, as a 401 or a model error:
+
+~~~~ bash
+claude -p --model claude-fable-5-1 'Reply with exactly: ok'
+~~~~
+
+If Claude Code is missing, unauthenticated, or Fable 5.1 is unavailable to the
+account, stop and report the problem. Do not silently substitute another
+reviewer or self-review.
 
 Note the repository root and run every Claude command from it:
 
@@ -69,7 +77,7 @@ Claude invocation rules
 
 Use these options for every initial review and re-review call:
 
- -  `--model claude-fable-5` pins the exact reviewer model.
+ -  `--model claude-fable-5-1` pins the exact reviewer model.
  -  `--effort high` gives the review a stable, thorough effort level without
     unbounded `max` spending.
  -  `--safe-mode` disables hooks, skills, plugins, auto-memory, automatically
@@ -86,7 +94,7 @@ The canonical initial invocation is:
 
 ~~~~ bash
 claude -p \
-  --model claude-fable-5 \
+  --model claude-fable-5-1 \
   --effort high \
   --session-id "<session-id>" \
   --safe-mode \
@@ -196,7 +204,7 @@ Commit all changes after the review comes back clean, unless the user explicitly
 asked not to commit. If any review-driven fixes were applied, add this trailer:
 
 ~~~~
-Assisted-by: Claude Code:claude-fable-5
+Assisted-by: Claude Code:claude-fable-5-1
 ~~~~
 
 If no fixes were needed, do not add the trailer solely because Fable reviewed
@@ -288,7 +296,7 @@ If Fable reports issues:
     trailer:
 
     ~~~~
-    Assisted-by: Claude Code:claude-fable-5
+    Assisted-by: Claude Code:claude-fable-5-1
     ~~~~
 
 3.  Resume the same Claude session using `--resume "<session-id>"` and all the
@@ -318,7 +326,7 @@ Key rules
 
  -  **Fable reviews; the host agent fixes.** Never ask Claude Code to edit the
     repository during this skill.
- -  **Pin the exact model.** Every call uses `--model claude-fable-5`; do not use
+ -  **Pin the exact model.** Every call uses `--model claude-fable-5-1`; do not use
     the moving `fable` alias for the recorded attribution.
  -  **One Claude session per loop.** Start with `--session-id`, then use
     `--resume` with the same UUID across all review rounds.
@@ -332,7 +340,7 @@ Key rules
     `No issues found.`
  -  **Validate findings.** Fable's findings are advice, not ground truth; inspect
     the code before changing it.
- -  **Trailer format:** `Assisted-by: Claude Code:claude-fable-5`.
+ -  **Trailer format:** `Assisted-by: Claude Code:claude-fable-5-1`.
  -  **Pre-commit:** accumulate all review-driven fixes before one final commit.
  -  **Post-commit:** commit after each fix batch; every such commit gets the
     trailer.
