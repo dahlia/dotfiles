@@ -1,7 +1,7 @@
 Review prompt templates
 =======================
 
-Four templates: an initial and a re-review prompt for each reviewer. Substitute
+Six templates: an initial and a re-review prompt for each reviewer. Substitute
 the bracketed placeholders before sending.
 
  -  `[RANGE]` — a plain-English description of what to review, e.g.
@@ -18,10 +18,97 @@ than triaging them away afterwards.
 
 Contents:
 
+ -  [OpenCode — initial review](#opencode--initial-review)
+ -  [OpenCode — re-review](#opencode--re-review)
  -  [Codex — initial review](#codex--initial-review)
  -  [Codex — re-review](#codex--re-review)
  -  [Claude — initial review](#claude--initial-review)
  -  [Claude — re-review](#claude--re-review)
+
+
+OpenCode — initial review
+-------------------------
+
+The first-pass reviewer is a small, cheap model. Its tool set is narrower than
+the other two reviewers' (see the pre-stage in *SKILL.md*), so the prompt names
+what it can use; a model that keeps trying refused commands wastes its steps
+and ends up reviewing blind. Only its final message is read, so the prompt
+insists the whole review goes there.
+
+~~~~
+Act as a read-only code reviewer doing a fast first pass.
+
+Review scope: [RANGE]
+
+Read the repository yourself with the read, glob, grep and list tools and
+with these git commands only: git status, git diff, git log, git show,
+git blame, git grep, git rev-parse, git rev-list, git merge-base,
+git ls-files, git ls-tree, git cat-file, git describe, git shortlog and
+git branch --show-current. Run each git command on its own, from the
+repository root, without pipes, redirection, `cd` or `git -C`. Every other
+command is refused; do not retry a refused command in another form. Do not
+modify any file.
+
+Also read AGENTS.md, CLAUDE.md and any contributor documentation, and hold
+the change set to the conventions they state.
+
+This change set has a deliberately bounded goal:
+
+Goal: [GOAL]
+In scope: [IN SCOPE]
+Explicit non-goals: [NON-GOALS]
+
+Two stronger reviewers will read this code after you. Your job is to catch
+the clear, concrete defects first: wrong logic, off-by-one errors, wrong
+conditions, unhandled errors, crashes, broken edge cases, typos in
+identifiers, and changed behavior with no test.
+
+Report a finding only when all three hold:
+
+1. It is a defect in code this change set added or modified — not in
+   pre-existing code the diff merely sits next to.
+2. You can state a concrete failure: specific inputs or state that lead to a
+   wrong result, a crash, corrupted or lost data, or a security hole.
+3. Fixing it does not require work listed under the non-goals.
+
+Do not report style or formatting preferences, naming opinions, speculation
+with no failure scenario, or refactors that do not fix a defect. Report
+defects outside the goal separately, under a heading "OUT OF SCOPE".
+
+For each finding give: severity, file and line, what breaks, the concrete
+failure scenario, and the smallest fix that resolves it.
+
+Put the complete review in your final message. If you could not read
+something the review needed, say so there rather than guessing.
+
+If nothing meets the bar, your final message must be exactly:
+NO ACTIONABLE FINDINGS
+~~~~
+
+
+OpenCode — re-review
+--------------------
+
+Sent with `run MODEL 2 "$OC_SESSION"`, which resumes the same OpenCode
+session, so the reviewer still has its first round in context.
+
+~~~~
+I have applied the valid fixes from your review. Findings I did not act on:
+
+[PREVIOUS FINDINGS]
+
+Re-review the same scope: [RANGE]
+
+Confirm the fixes are genuinely resolved and introduced no regressions, then
+check the current state for anything new. Use the same tools and the same git
+commands as before, one command at a time, and do not modify any file. Do not
+re-raise findings marked rejected or deferred above. Apply the same bar and
+the same reporting format, including the separate "OUT OF SCOPE" heading, and
+put the complete review in your final message.
+
+If nothing meets the bar, your final message must be exactly:
+NO ACTIONABLE FINDINGS
+~~~~
 
 
 Codex — initial review
