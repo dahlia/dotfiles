@@ -19,7 +19,7 @@
 	editor = nvim
 	excludesfile = ~/.gitignore_global
 	pager = delta
-	fsmonitor = true
+	fsmonitor = false
 [pull]
 	ff = only
 [init]
