@@ -121,6 +121,12 @@ Read the repository yourself. Also read AGENTS.md, CLAUDE.md and any
 contributor documentation, and hold the change set to the conventions they
 state.
 
+Stay read-only. Do not modify any file, and do not run commands that change
+the repository or working tree, install dependencies, reach the network, or
+produce generated artifacts. Your shell may not be sandboxed, so this is on
+you; the author checks the tree after the review and discards a review that
+changed it.
+
 This change set has a deliberately bounded goal. Work outside it belongs to
 someone else, and reporting it spends the author's attention on decisions they
 have already made:
@@ -173,6 +179,8 @@ This is a follow-up review. In the previous round you raised:
 Confirm that the fixed items are genuinely resolved and that the fixes
 introduced no regressions, then review the current state of the scope for
 anything new.
+
+Stay read-only, as before: do not modify files or run mutating commands.
 
 Do not re-raise findings marked rejected or deferred above; those decisions are
 made. If you believe a rejection was factually mistaken, say so once in a

@@ -125,28 +125,81 @@ and stop.
 Step 2: Resolve the reviewer models
 -----------------------------------
 
-Codex and Claude run on the current top-tier frontier model of their vendor.
-Resolve rather than hardcode, so the skill keeps working after the next release.
+Codex and Claude run on a frontier model family chosen by how much
+subscription quota the connected accounts have left, and always on the newest
+model of that family:
+
+| Quota  | Codex                   | Claude Code                   |
+| ------ | ----------------------- | ----------------------------- |
+| Ample  | newest **Astra** model  | newest **Fable** (`fable`)    |
+| Tight  | newest **Sol** model    | newest **Opus** (`opus`)      |
+
+The top tier is the better reviewer, and a reviewer that misses the defect
+costs more than the round it saved. That holds even when the change was
+implemented on a cheaper model. But a review loop can burn several rounds per
+reviewer, and on a nearly spent weekly quota that leaves the user unable to
+work for the rest of the week; the second tier still finds most of what
+matters. The two quotas are independent, so decide each reviewer separately:
+Codex can be on Sol while Claude stays on Fable.
+
+Resolve rather than hardcode, so the skill keeps working after the next
+release. If the user names a model or family for a reviewer, use that instead
+and skip the quota check for it.
 
 **OpenCode** — the one exception: the first pass is deliberately *not* a
 frontier model, and its model list is fixed in a deterministic preference
 order. See the pre-stage below.
 
-**Codex** — the OpenAI docs publish the current flagship in page frontmatter:
+Run the picker once, before any reviewer:
 
 ~~~~ bash
-CODEX_MODEL=$(curl -sL https://developers.openai.com/api/docs/guides/latest-model.md \
-  | sed -n 's/^ *model: *//p' | head -1)
+PICK_MODELS="<this skill's directory>/scripts/pick-models.sh"
+bash "$PICK_MODELS" > "$WORK/models.txt"
+eval "$(grep -E '^(CODEX|CLAUDE)_[A-Z]+=' "$WORK/models.txt")"
+grep '^NOTE=' "$WORK/models.txt"      # the reasoning, for your report
 ~~~~
 
-That yields an ID like `gpt-5.6-sol`. If the fetch fails, fall back to the
-`model` value in `~/.codex/config.toml`, and say in your report which source you
-used. `codex review` echoes `model:` in its header — confirm it matches before
-trusting the output.
+It takes about 15 seconds and sets `CODEX_MODEL`, `CODEX_QUOTA`,
+`CLAUDE_MODEL`, `CLAUDE_FALLBACK` and `CLAUDE_QUOTA`.
 
-**Claude** — pass the moving aliases and read the exact ID back out of the
-response, which is both simpler and more accurate than guessing the version
-suffix. See Stage B.
+**How quota is read.** Codex: the `account/rateLimits/read` call on
+`codex app-server`, the same numbers `/status` shows. Claude Code: the
+`rate_limit_event` that `claude -p --output-format stream-json` emits, from a
+one-line Haiku probe that costs next to nothing. Both report percent used per
+window (Codex's weekly window; Claude's five-hour and seven-day windows).
+
+**What counts as tight.** A window is tight when it is at least 80% used, or
+at least 50% used and being spent faster than time is passing (used % above
+the share of the window already elapsed), because at that pace it runs out
+before it resets. A quota is tight when any of its windows is, or when a limit
+is already reached. At 75% used with half the week left, Codex is tight; at
+47% with an hour to reset, Claude is ample. If the quota cannot be read, the
+picker reports `unknown` and uses the top tier — the usage-limit fallbacks in
+Stage A and Stage B catch a real shortage, while a guessed “tight” would
+silently downgrade every review.
+
+**Codex** — the picker takes the newest model of the chosen family from Codex's
+own model catalog (`codex debug models`, listed models only, highest version
+first), so it is a model this account can actually run. It yields a slug like
+`gpt-6-astra` or `gpt-6-sol`. If `CODEX_MODEL` comes back empty, fall back to
+the flagship the OpenAI docs publish when the family is Astra:
+
+~~~~ bash
+curl -sL https://developers.openai.com/api/docs/guides/latest-model.md \
+  | sed -n 's/^ *model: *//p' | head -1
+~~~~
+
+and otherwise to the `model` value in `~/.codex/config.toml`, and say in your
+report which source you used. `codex review` echoes `model:` in its header —
+confirm it matches before trusting the output.
+
+**Claude** — the moving aliases `fable` and `opus` always resolve to the
+newest model of their family, so pass the alias and read the exact ID back out
+of the response, which is both simpler and more accurate than guessing the
+version suffix. See Stage B.
+
+Say in your report which family each reviewer ran on and why, quoting the
+`NOTE=` lines.
 
 
 Pre-stage: the OpenCode first pass
@@ -360,18 +413,81 @@ Note two CLI constraints that shape the commands below:
  -  Pass the prompt on stdin with `-` rather than as an argument. Prompts of
     this size are awkward to quote safely.
 
+### Choosing the sandbox
+
+`codex review` runs its shell commands under Codex's own sandbox, `read-only`
+by default. On Linux that sandbox is built on bubblewrap, and on some hosts it
+cannot start at all: every command the reviewer runs, `git diff` included,
+fails with
+
+~~~~
+error building bubblewrap command: cannot establish app-server socket mount isolation
+~~~~
+
+and Codex then writes a “verdict” about a diff it never saw. `workspace-write`
+fails the same way, since it uses the same sandbox; only turning the sandbox
+off gets a real review. Probe once per run, before round 1, instead of
+guessing:
+
 ~~~~ bash
 cd "$REPO_ROOT"
+if codex sandbox -c sandbox_mode=read-only -- git rev-parse HEAD \
+     > "$WORK/codex-sandbox-probe.txt" 2>&1; then
+  CODEX_SANDBOX=read-only
+else
+  CODEX_SANDBOX=danger-full-access
+fi
+~~~~
+
+Keep `read-only` whenever the probe passes; it is the stronger guarantee. When
+it fails, `danger-full-access` is the only mode that works, and three things
+stand in for the missing sandbox:
+
+ -  The Codex prompt templates already tell the reviewer to stay read-only.
+    Keep that paragraph when you fill them in.
+ -  The `snapshot()` check from Stage B runs around every Codex round, exactly
+    as it does for the other reviewers. With the sandbox off it is the only
+    hard guarantee, so it is not optional here.
+ -  Say in your report which sandbox mode the Codex rounds ran under, and if it
+    was `danger-full-access`, quote the probe's error from
+    `$WORK/codex-sandbox-probe.txt` so the user knows why.
+
+Do not work around a failing probe any other way — for example by retrying
+with `workspace-write`, or by pasting the diff into the prompt so the reviewer
+needs no shell. The first fails identically; the second breaks the “never
+paste diffs” rule and leaves the reviewer unable to read surrounding code.
+
+### Running a round
+
+~~~~ bash
+cd "$REPO_ROOT"
+BEFORE=$(snapshot)
 codex review \
   -c model="$CODEX_MODEL" \
   -c model_reasoning_effort="high" \
-  - < "$WORK/codex-prompt.txt"
+  -c sandbox_mode="$CODEX_SANDBOX" \
+  - < "$WORK/codex-prompt.txt" > "$WORK/codex-round-$ROUND.txt" 2>&1
+[ "$BEFORE" = "$(snapshot)" ] || echo "REVIEWER MUTATED THE REPOSITORY"
 ~~~~
 
 Build `$WORK/codex-prompt.txt` from the template in
 `references/review-prompts.md` (section “Codex — initial review”), substituting
 the range and the scope contract. Findings appear at the end of the output; the
 final block is repeated once, so read it, do not count it twice.
+
+If a round on an Astra model fails with a usage limit error, the quota ran
+out mid-loop: switch `CODEX_MODEL` to the newest Sol model (`bash
+"$PICK_MODELS"` would pick it now; or take it from `codex debug models`), re-run
+that round once, and note the switch in your report. If Sol also fails, or the
+loop was already on Sol, end Stage A as failed and report it.
+
+Before trusting a round, check the header's `sandbox:` line matches
+`$CODEX_SANDBOX`, and scan the output for commands that `exited` with a
+sandbox error such as `error building bubblewrap command`. If the reviewer could
+not run its commands, the round failed, whatever its closing text says — even
+`NO ACTIONABLE FINDINGS` means “unknown” here, not “clean”. If this happens
+under `read-only` although the probe passed, re-probe and re-run the round
+once; if the snapshot check trips, stop and show the user as for any reviewer.
 
 Then, for each round:
 
@@ -456,8 +572,8 @@ so if you have not written it the shell fails before `claude` ever starts.
 SESSION_ID=$(uuidgen)
 
 claude -p \
-  --model fable \
-  --fallback-model opus \
+  --model "$CLAUDE_MODEL" \
+  ${CLAUDE_FALLBACK:+--fallback-model "$CLAUDE_FALLBACK"} \
   --effort high \
   --session-id "$SESSION_ID" \
   --safe-mode \
@@ -567,13 +683,17 @@ stage fails, and the output gives no sign of it.
 
 The last one is what goes in the trailer. `modelUsage` always contains a
 `claude-haiku-*` entry for Claude Code's own internal bookkeeping — ignore it.
-The remaining key is the reviewer, e.g. `claude-fable-5-1`. If the fallback
-engaged you will see `claude-opus-5` there instead; attribute the model that
+The remaining key is the reviewer, e.g. `claude-fable-5-1` (or
+`claude-opus-5-5` when the picker chose `opus`). If the fallback engaged you
+will see an Opus ID where you expected Fable; attribute the model that
 actually did the work and mention the fallback in your report.
 
 **On quota exhaustion**, `--fallback-model opus` handles routing automatically
-for overload and unavailability. If the invocation itself fails with a usage
-limit error, retry once with `--model opus`. If that also fails, stop and report
+for overload and unavailability when the run is on Fable. If the invocation
+itself fails with a usage limit error, retry once with `--model opus` (from
+Fable) — on a later round, as a fresh session from the initial template, since
+a different model resuming the session is a different reviewer. If the run
+was already on Opus, or the retry also fails, stop and report
 it. A failed, truncated or permission-blocked run is not a clean review — never
 substitute your own reading of the code and present it as Claude's verdict,
 because the entire value of this stage is that it is a second, independent
@@ -635,7 +755,7 @@ found nothing does not get a trailer merely for having run:
 
 ~~~~
 Assisted-by: OpenCode:deepseek-flash
-Assisted-by: Codex:gpt-5.6-sol
+Assisted-by: Codex:gpt-6-astra
 Assisted-by: Claude Code:claude-fable-5-1
 ~~~~
 
@@ -665,7 +785,8 @@ Close with a short summary the user can act on:
  -  What you rejected, and why (one line each).
  -  **What was deferred**, with the issue it went to and the stopgap you left
     behind, if any.
- -  Which models ran, including any fallback.
+ -  Which models ran, including any fallback, and the quota reading that
+    chose each family (the `NOTE=` lines from `pick-models.sh`).
  -  Any fixes applied after a round cap, which therefore carry no independent
     reviewer pass.
 
@@ -685,8 +806,9 @@ Key rules
 
  -  **The contract comes first.** No reviewer runs before it is written, and
     every finding is measured against it.
- -  **Reviewers review; you fix.** Every reviewer is configured read-only.
-    Never let any of them edit the repository.
+ -  **Reviewers review; you fix.** Every reviewer is configured read-only —
+    Codex through its sandbox when the host supports it, otherwise through its
+    prompt plus the snapshot check. Never let any of them edit the repository.
  -  **Never paste diffs into a prompt.** Every reviewer reads the repository
     itself; give it the range and the contract.
  -  **Verify before applying.** A finding is a hypothesis about the code, and
