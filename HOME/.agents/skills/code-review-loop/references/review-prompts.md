@@ -9,6 +9,7 @@ the bracketed placeholders before sending.
     or “the commits in `a1b2c3d..HEAD` on branch `feature/auth`“.
  -  `[GOAL]`, `[IN SCOPE]`, `[NON-GOALS]` — copied verbatim from the scope
     contract written in Step 0.
+ -  `[OUTPUT PATHS]` — declared disposable repository output directories, or none.
  -  `[PREVIOUS FINDINGS]` — for re-reviews, a terse list of the previous round's
     findings, each marked *fixed*, *rejected* (with the reason) or *deferred*.
 
@@ -29,26 +30,21 @@ Contents:
 OpenCode — initial review
 -------------------------
 
-The first-pass reviewer is a small, cheap model. Its tool set is narrower than
-the other two reviewers' (see the pre-stage in *SKILL.md*), so the prompt names
-what it can use; a model that keeps trying refused commands wastes its steps
-and ends up reviewing blind. Only its final message is read, so the prompt
-insists the whole review goes there.
-
+The first pass can inspect code and run focused checks. Only the final assistant
+message is classified, so put the complete review there.
 ~~~~
-Act as a read-only code reviewer doing a fast first pass.
+Act as a code reviewer doing a fast first pass.
 
 Review scope: [RANGE]
 
-Read the repository yourself with the read, glob, grep and list tools and
-with these git commands only: git status, git diff, git log, git show,
-git blame, git grep, git rev-parse, git rev-list, git merge-base,
-git ls-files, git ls-tree, git cat-file, git describe, git shortlog and
-git branch --show-current. Run each git command on its own, from the
-repository root, without pipes, redirection, `cd` or `git -C`. Every other
-command is refused; do not retry a refused command in another form. Do not
-modify any file.
-
+Read the repository yourself using file tools and shell inspection commands.
+Do not edit source, fixtures, manifests, lockfiles or Git state. You may run
+focused tests, builds and type checks with existing dependencies. Temporary
+files and runtime caches are allowed; repository outputs must stay in these
+declared disposable paths: [OUTPUT PATHS]. Do not install dependencies, update
+snapshots, regenerate protected source or start/change external services. If a
+necessary read or check is blocked, report the limitation instead of guessing.
+The author backs up and checks protected inputs after each attempt.
 Also read AGENTS.md, CLAUDE.md and any contributor documentation, and hold
 the change set to the conventions they state.
 
@@ -90,7 +86,8 @@ OpenCode — re-review
 --------------------
 
 Sent with `run MODEL 2 "$OC_SESSION"`, which resumes the same OpenCode
-session, so the reviewer still has its first round in context.
+session normally. A transient retry starts a fresh session, so this template
+also carries the scope and review criteria.
 
 ~~~~
 I have applied the valid fixes from your review. Findings I did not act on:
@@ -99,9 +96,24 @@ I have applied the valid fixes from your review. Findings I did not act on:
 
 Re-review the same scope: [RANGE]
 
+Read AGENTS.md, CLAUDE.md and contributor documentation yourself.
+Goal: [GOAL]
+In scope: [IN SCOPE]
+Explicit non-goals: [NON-GOALS]
+
+Report only defects introduced by the scoped changes with a concrete failure
+scenario. Reject style preferences and speculative refactors. For each finding,
+give severity, file and line, what breaks, the failure scenario and the smallest
+fix. Put serious unrelated defects under "OUT OF SCOPE".
+Do not edit source, fixtures, manifests, lockfiles or Git state. Focused tests,
+builds and type checks using existing dependencies may produce temporary files
+and caches. Repository outputs must stay in [OUTPUT PATHS]. Do not install
+dependencies, update snapshots, regenerate protected source or start/change
+external services. Report necessary reads or checks that could not run.
+
 Confirm the fixes are genuinely resolved and introduced no regressions, then
-check the current state for anything new. Use the same tools and the same git
-commands as before, one command at a time, and do not modify any file. Do not
+check the current state for anything new. Use the same inspection and test policy as before.
+Do not edit protected inputs. Allowed repository output paths: [OUTPUT PATHS]. Do not
 re-raise findings marked rejected or deferred above. Apply the same bar and
 the same reporting format, including the separate "OUT OF SCOPE" heading, and
 put the complete review in your final message.
@@ -121,11 +133,15 @@ Read the repository yourself. Also read AGENTS.md, CLAUDE.md and any
 contributor documentation, and hold the change set to the conventions they
 state.
 
-Stay read-only. Do not modify any file, and do not run commands that change
-the repository or working tree, install dependencies, reach the network, or
-produce generated artifacts. Your shell may not be sandboxed, so this is on
-you; the author checks the tree after the review and discards a review that
-changed it.
+Do not edit source, fixtures, manifests, lockfiles or Git state. You may run
+focused tests, builds and type checks using existing dependencies. Temporary
+files and runtime caches are allowed; repository outputs must stay in these
+declared disposable paths: [OUTPUT PATHS]. Do not install dependencies, update
+snapshots, regenerate protected source or start/change external services.
+Your shell may not be sandboxed. The author backs up and checks protected
+inputs, but that does not prevent writes outside the repository. Report any
+necessary read or check that could not run; do not claim a complete clean
+review while required evidence is missing.
 
 This change set has a deliberately bounded goal. Work outside it belongs to
 someone else, and reporting it spends the author's attention on decisions they
@@ -180,7 +196,8 @@ Confirm that the fixed items are genuinely resolved and that the fixes
 introduced no regressions, then review the current state of the scope for
 anything new.
 
-Stay read-only, as before: do not modify files or run mutating commands.
+Keep the same inspection and test policy: do not edit protected inputs or Git
+state. Allowed repository output paths: [OUTPUT PATHS]. Report blocked checks.
 
 Do not re-raise findings marked rejected or deferred above; those decisions are
 made. If you believe a rejection was factually mistaken, say so once in a
@@ -207,15 +224,21 @@ Claude reviews after the Codex loop has settled, so this prompt asks for an
 independent read rather than a confirmation of what Codex already covered.
 
 ~~~~
-Act as an independent, read-only code reviewer.
+Act as an independent code reviewer.
 
 Start by reading AGENTS.md, CLAUDE.md and any contributor documentation in this
 repository, and hold the change set to the conventions they state. You are
 running in safe mode, so none of that is loaded for you automatically.
 
-Do not modify any file. Do not run commands that change the repository or
-working tree, install dependencies, reach the network, or produce generated
-artifacts.
+Do not edit source, fixtures, manifests, lockfiles or Git state. You may run
+focused tests, builds and type checks using existing dependencies. Temporary
+files and runtime caches are allowed; repository outputs must stay in these
+declared disposable paths: [OUTPUT PATHS]. Do not install dependencies, update
+snapshots, regenerate protected source or start/change external services.
+Your shell may not be sandboxed. The author backs up and checks protected
+inputs, but that does not prevent writes outside the repository. Report any
+necessary read or check that could not run; do not claim a complete clean
+review while required evidence is missing.
 
 Review scope: [RANGE]
 
@@ -277,7 +300,9 @@ Please re-review the same scope. Confirm the fixes are genuinely resolved and
 that they introduced no regressions, then check the current state for anything
 new.
 
-Stay read-only: do not modify files or run mutating commands. Do not re-raise
+Keep the same inspection and test policy. Do not edit protected inputs or Git
+state. Allowed repository output paths: [OUTPUT PATHS]. Report blocked checks.
+Do not re-raise
 findings marked rejected or deferred above. Apply the same bar and the same
 reporting format as before, including the separate "OUT OF SCOPE" heading.
 

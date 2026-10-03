@@ -1,6 +1,6 @@
 ---
 name: code-review-loop
-description: Finish a rough-but-working change set by running it through independent AI reviewers — a cheap read-only first pass through OpenCode on DeepSeek Flash when OpenCode is available, then an iterative `codex review` loop on OpenAI's frontier model, then a final `claude -p` pass on Claude's frontier model — applying only the fixes that stay inside the original goal, escalating anything that would widen the scope, and committing with the right `Assisted-by` trailers. Use this skill whenever the user asks to "run a code review loop", "review and fix my changes", "polish this before I commit", "마무리 좀 해줘", "코드 리뷰 루프", "리뷰 받고 고쳐줘", "Codex 리뷰", "Claude 리뷰", "OpenCode 리뷰", or otherwise wants a first draft brought up to committable quality by AI review — even when they name only one of the reviewers.
+description: Finish a rough-but-working change set by running it through independent AI reviewers — a cheap first pass with protected inputs through OpenCode on DeepSeek Flash when OpenCode is available, then an iterative `codex review` loop on OpenAI's frontier model, then a final `claude -p` pass on Claude's frontier model — applying only the fixes that stay inside the original goal, escalating anything that would widen the scope, and committing with the right `Assisted-by` trailers. Use this skill whenever the user asks to "run a code review loop", "review and fix my changes", "polish this before I commit", "마무리 좀 해줘", "코드 리뷰 루프", "리뷰 받고 고쳐줘", "Codex 리뷰", "Claude 리뷰", "OpenCode 리뷰", or otherwise wants a first draft brought up to committable quality by AI review — even when they name only one of the reviewers.
 ---
 
 Code Review Loop
@@ -49,7 +49,9 @@ SCOPE_FILE="$WORK/scope.md"
 Every file this skill generates lives in `$WORK`, never in the repository. A
 prompt or a `review.json` written to the working tree shows up as an untracked
 file, which dirties a clean post-commit review and can get swept into the commit
-by a `git add -A` in pre-commit mode. Remove `$WORK` when the loop finishes.
+by a `git add -A` in pre-commit mode. Remove `$WORK` only after a successful loop with no failed, blocked or mutated
+attempts. Otherwise preserve it and report its path; it contains private backups
+and diagnostic logs.
 
 Keep it to four short sections:
 
@@ -202,6 +204,65 @@ Say in your report which family each reviewer ran on and why, quoting the
 `NOTE=` lines.
 
 
+Shared runner: backups and test execution
+------------------------------------------
+
+Use `scripts/review-guard.py` around every reviewer invocation, including retries
+and resumed rounds. The default runs in the original working directory. It
+backs up protected files before the reviewer starts, compares persistent state
+after it exits, and saves stdout, stderr and the command exit code. It does not
+restore automatically or prevent writes outside the repository.
+
+~~~~ bash
+GUARD="<this skill's directory>/scripts/review-guard.py"
+# Declare only disposable output directories needed by this repository's checks.
+# No exclusions by default. Ignored files are still protected.
+export REVIEW_OUTPUT_PATHS='[]'
+~~~~
+
+Set `REVIEW_OUTPUT_PATHS` to a JSON array of relative directories, for example
+`["node_modules/.cache", "dist"]`, after inspecting the repository's checks.
+Tracked files remain protected even inside these directories. Do not exclude
+source, fixtures, manifests, lockfiles, environment files or an entire dependency
+tree merely because Git ignores it. Existing ignored files outside these output
+paths are backed up too; on large trees this costs disk space and time.
+
+Prompts must tell every reviewer the allowed output paths. Permit focused tests,
+builds and type checks, including temporary files and normal runtime caches.
+Keep fixes, source generation that changes protected inputs, dependency installs,
+Git mutations and external service changes with the author. Repository-local
+outputs must stay in the declared directories. Use existing test dependencies;
+report missing prerequisites instead of installing them or starting services.
+
+Each attempt needs a fresh prefix outside the repository. The runner creates
+`PREFIX.backup.tar`, before/after JSON manifests, `PREFIX.guard.json`, `.stdout`,
+`.stderr` and `.exit`. The archive preserves file bytes, modes and symlink targets,
+including untracked/ignored files, plus the index and relevant Git metadata.
+HEAD, refs and merge/rebase state are checked. Git object storage, reflogs, external
+symlink targets and machine-wide state are not backed up. Submodules require
+separate guards and this runner refuses them rather than claiming full coverage.
+Do not edit the repository concurrently with a review. A change during backup
+aborts the attempt; a change during review cannot reliably be attributed to it.
+
+A guard report with `status=mutated` returns exit 40. Without a completed guard
+report, exit 2 means verification failed. Otherwise the runner returns the
+reviewer command exit code, which can also be 40 or 2; inspect the report before
+classifying the exit. Neither is a usable review. Preserve the artifacts,
+show the changed paths, and stop before triage or another reviewer. Never run
+`reset --hard`, `clean`, or automatic archive extraction over the user's work.
+Recover only identified changes after checking for concurrent edits. Backups are
+recovery material and persistent-change detection, not a sandbox or proof that
+no transient write occurred. They can contain secrets; keep `$WORK` private.
+
+An independent temporary copy is an optional execution mode when dependencies
+can be reproduced cheaply. It needs independent Git metadata and the exact
+staged, unstaged and untracked inputs; a plain worktree shares Git metadata and
+does not reproduce dirty state. Do not substitute this mode without verifying
+those inputs. Keep dependencies independent too: hard links or external symlinks
+can let test writes reach the original. The common runner currently supports the
+original-directory mode, not automatic cloning or restoration.
+
+
 Pre-stage: the OpenCode first pass
 ----------------------------------
 
@@ -213,8 +274,8 @@ every finding goes through triage like any other, and nothing about this stage
 shortens, skips or replaces Stage A or Stage B.
 
 All of the mechanics live in `scripts/opencode-review.sh` next to this file.
-Use the script rather than retyping its commands: the read-only guard, the
-repository snapshot and the result checks only hold if every round runs them
+Use the script rather than retyping its commands: the shared runner and
+result checks only hold if every round runs them
 the same way, and shell state does not survive between separate tool calls.
 
 ~~~~ bash
@@ -260,7 +321,9 @@ REPO_ROOT="$REPO_ROOT" WORK="$WORK" bash "$OC_REVIEW" run "$OC_MODEL" 1
 
 The script prints `STATUS=<status> MODEL=<id> SESSION=<id>`, then any `REASON=`
 and `DENIED=` lines, and saves the final answer to
-`$WORK/opencode-r1.review.txt` (`r2` for round 2). Its exit code is the status:
+`LOG_PREFIX.review.txt`. The script prints `LOG_PREFIX` for each attempt and
+uses a new directory per invocation, so provider fallbacks cannot overwrite
+earlier evidence. Its exit code is the status:
 
 | Exit | Status        | Meaning                                                   | What you do                                    |
 | ---- | ------------- | --------------------------------------------------------- | ---------------------------------------------- |
@@ -268,30 +331,28 @@ and `DENIED=` lines, and saves the final answer to
 | 10   | `findings`    | A complete review with findings                           | Triage, fix, re-review (below)                 |
 | 20   | `failed`      | The reviewer ran, but the round is not a usable review    | End the stage; report it as failed             |
 | 21   | `blocked`     | A complete answer, but a tool call was denied             | As `findings`, but never count it as clean     |
-| 30   | `unavailable` | The provider returned nothing (401, unknown model, quota) | Round 1: next model. Later rounds: as `failed` |
+| 31   | `transient`   | Known transient provider/transport error or empty final reply | Retried once automatically; then try next provider in round 1 |
+| 30   | `unavailable` | Known authentication, model or exhausted-quota error | Round 1: next model. Later rounds: as `failed` |
+| 41   | `guard_failed` | Protected inputs could not be verified | Stop the whole loop and preserve evidence |
 | 40   | `mutated`     | The repository changed while the reviewer ran             | Stop and show the user, as for any reviewer    |
 
-On round 1, `unavailable` moves on to the next model in the list, starting a
+On round 1, `unavailable` or exhausted `transient` moves on to the next model in the list, starting a
 fresh session. If every model comes back `unavailable`, the stage is skipped as
 unavailable, and the report lists each model's `REASON=` lines. Once a model has
 served round 1, it is the stage's model: record `MODEL` and `SESSION` from the
-status line and use both for the next round. Never switch models mid-stage;
-a different model resuming the session is a different reviewer.
+status line and use both for the next round. Never resume a session on another model. Later-round provider failures end the
+stage; do not switch silently. Infrastructure retries do not consume the two
+review rounds. The script permits at most two attempts per provider per round;
+with the two configured providers, round 1 has at most four attempts.
 
-`failed` covers everything that looks like an answer but is not one. The script
-treats each of these as a failure:
-
- -  `opencode run` exits non-zero, or `timeout` stops it (`OC_TIMEOUT`,
-    default 900 seconds)
- -  an `error` event in the JSON stream, or an error on an assistant message,
-    such as `APIError 401`
- -  no assistant message in the round
- -  any assistant message whose `providerID/modelID`, variant or agent is not
-    the one requested
- -  a final step that finished with anything but `stop`, such as `length`
- -  an empty final text: DeepSeek models through OpenCode sometimes finish
-    their reasoning and return no answer at all, and an empty reply must never
-    read as “nothing to report”
+The classifier rejects nonzero command exits, stream/assistant errors, missing
+exports or assistant messages, unexpected model/variant/agent, truncated final
+steps and empty final text. Known authentication/model/quota errors become
+`unavailable`; HTTP 429/5xx, known transport failures, timeouts and empty final
+replies become `transient`. Unexpected model substitutions or truncated replies
+remain failed even if another diagnostic suggests retrying. Other local failures
+are `failed`, not provider unavailability. `OC_TIMEOUT` defaults to 900 seconds
+per attempt; `timeout --kill-after=10` bounds a process that ignores termination.
 
 A clean result needs the exact sentinel, so silence can never pass for one.
 `blocked` exists because a reviewer that was refused a read still writes a
@@ -320,45 +381,24 @@ then go on to Stage A; Codex reviews those fixes as part of the range, so they
 do not stay unverified the way post-cap fixes elsewhere do. Say in the report
 that the stage ended at its cap.
 
-When the stage ends as `failed`, `mutated`, or `unavailable` on every model, go
-on to Stage A all the same (after the user has seen a mutation). Never
+When the stage ends as `failed`, exhausted `transient`, or `unavailable` on every
+model, go on to Stage A. A `mutated` or `guard_failed` result stops the whole loop until
+the inputs are verified again. Never
 substitute your own reading and report it as OpenCode's verdict.
 
-### How the script keeps the reviewer read-only
+### Permissions and protected inputs
 
-The guard is enforced by OpenCode's permission system, not by the prompt:
+The dedicated `review-loop-flash` agent denies editing tools, delegation, web
+and MCP tools. Read/glob/grep/list and Bash are allowed so the reviewer can run
+focused checks and ordinary inspection commands, including pipelines and
+`git -C`. Bash permission is intentionally broad; a prompt is not an enforcement
+boundary. The shared runner backs up and checks protected inputs around each
+attempt. `--auto` cannot override an explicit deny and is not needed here.
 
- -  **A dedicated agent**, `review-loop-flash`, passed through
-    `OPENCODE_CONFIG_CONTENT` and pinned with `--agent`. Its permissions start
-    from `"*": "deny"`; OpenCode applies the last matching rule, so everything
-    not allowed afterwards stays denied, including `edit`, `write`, `task`,
-    `webfetch`, `websearch`, `skill`, `lsp` and `question`. OpenCode removes
-    tools denied this way from the model's tool list altogether.
- -  **Reads stay in the repository.** `read`, `glob`, `grep` and `list` are
-    allowed, `.env` files are denied, and `external_directory` is denied except
-    for OpenCode's own `tool-output` directory, where it stores long command
-    output for the reviewer to page through.
- -  **Bash is an allowlist of read-only git commands** (`git status`, `git
-    diff`, `git log`, `git show`, `git blame`, `git grep`, and a few plumbing
-    queries), plus deny rules for `>` redirection, `--output`, `--no-index`,
-    `--contents` and `git grep -O`. This is the opposite of Stage B's deny list,
-    for a reason: OpenCode parses a compound command, pipeline or command
-    substitution into its separate commands and checks each one, including its
-    redirections, so an allowlist does not break on `git diff; git status` the
-    way a Claude Code prefix rule does. `git -C`, `git -c`, `cd`, environment
-    assignments and every non-git command match no allow rule and are refused.
- -  **No outside configuration.** `OPENCODE_DISABLE_PROJECT_CONFIG` ignores the
-    reviewed repository's own *opencode.json* and *.opencode/*, `--pure` loads
-    no plugins, Claude Code prompts and external skills are off, sharing and
-    auto-update are off, and every MCP server in the user's global config is
-    disabled by name, so the reviewer has no GitHub, browser or other tools.
- -  **A preflight check.** Before each round the script asks
-    `opencode debug agent` for the resolved agent and refuses to run unless the
-    catch-all rule is `deny` and the edit, write, task and web tools are off. An
-    unknown or shadowed agent would otherwise run with default permissions.
- -  **The snapshot check** from Stage B runs around every round, and a change
-    ends the round as `mutated` before its output is read. As there, the
-    permission rules are the first line and the snapshot is the guarantee.
+Project config, external plugins, Claude prompts, external skills, sharing and
+auto-update remain disabled. Preflight verifies the dedicated agent and disabled
+edit/write/task/webfetch tools. Keep preflight/configuration stderr under `$WORK`
+when diagnosing a failure; do not print resolved configuration credentials.
 
 **Model evidence** comes from `opencode export <session>`: each assistant
 message records the `providerID`, `modelID`, `variant` and `agent` it ran with.
@@ -413,62 +453,40 @@ Note two CLI constraints that shape the commands below:
  -  Pass the prompt on stdin with `-` rather than as an argument. Prompts of
     this size are awkward to quote safely.
 
-### Choosing the sandbox
+### Choosing execution permissions
 
-`codex review` runs its shell commands under Codex's own sandbox, `read-only`
-by default. On Linux that sandbox is built on bubblewrap, and on some hosts it
-cannot start at all: every command the reviewer runs, `git diff` included,
-fails with
+Use `workspace-write` when it supports the repository's checks. A successful
+`git rev-parse` probe establishes only that basic inspection works, not that tests
+can write their outputs, use caches or reach a required local test dependency.
+Choose the mode from the actual checks and host behavior. Do not use read-only
+execution for a stage that permits tests with filesystem output.
 
-~~~~
-error building bubblewrap command: cannot establish app-server socket mount isolation
-~~~~
-
-and Codex then writes a “verdict” about a diff it never saw. `workspace-write`
-fails the same way, since it uses the same sandbox; only turning the sandbox
-off gets a real review. Probe once per run, before round 1, instead of
-guessing:
-
-~~~~ bash
-cd "$REPO_ROOT"
-if codex sandbox -c sandbox_mode=read-only -- git rev-parse HEAD \
-     > "$WORK/codex-sandbox-probe.txt" 2>&1; then
-  CODEX_SANDBOX=read-only
-else
-  CODEX_SANDBOX=danger-full-access
-fi
-~~~~
-
-Keep `read-only` whenever the probe passes; it is the stronger guarantee. When
-it fails, `danger-full-access` is the only mode that works, and three things
-stand in for the missing sandbox:
-
- -  The Codex prompt templates already tell the reviewer to stay read-only.
-    Keep that paragraph when you fill them in.
- -  The `snapshot()` check from Stage B runs around every Codex round, exactly
-    as it does for the other reviewers. With the sandbox off it is the only
-    hard guarantee, so it is not optional here.
- -  Say in your report which sandbox mode the Codex rounds ran under, and if it
-    was `danger-full-access`, quote the probe's error from
-    `$WORK/codex-sandbox-probe.txt` so the user knows why.
-
-Do not work around a failing probe any other way — for example by retrying
-with `workspace-write`, or by pasting the diff into the prompt so the reviewer
-needs no shell. The first fails identically; the second breaks the “never
-paste diffs” rule and leaves the reviewer unable to read surrounding code.
+On hosts where Codex's sandbox cannot start, or required local checks remain
+blocked, use `danger-full-access` intentionally with the shared runner. Set
+`approval_policy=never` for noninteractive execution. This removes local sandbox
+restrictions, including outside the repository; the backup does not replace
+that boundary. Record the mode and reason in the report. Do not change global
+Codex configuration. Check the installed CLI's options before adapting these
+commands to permission profiles or a newer CLI.
 
 ### Running a round
 
 ~~~~ bash
-cd "$REPO_ROOT"
-BEFORE=$(snapshot)
-codex review \
-  -c model="$CODEX_MODEL" \
-  -c model_reasoning_effort="high" \
-  -c sandbox_mode="$CODEX_SANDBOX" \
-  - < "$WORK/codex-prompt.txt" > "$WORK/codex-round-$ROUND.txt" 2>&1
-[ "$BEFORE" = "$(snapshot)" ] || echo "REVIEWER MUTATED THE REPOSITORY"
+CODEX_SANDBOX=workspace-write   # or danger-full-access for the reason above
+codex --version > "$WORK/codex-version.txt" 2>&1
+python3 "$GUARD" --root "$REPO_ROOT" \
+  --prefix "$WORK/codex-r$ROUND-a$ATTEMPT" \
+  --stdin "$WORK/codex-prompt.txt" -- \
+  codex review \
+    -c model="$CODEX_MODEL" \
+    -c model_reasoning_effort="high" \
+    -c sandbox_mode="$CODEX_SANDBOX" \
+    -c approval_policy=never -
 ~~~~
+
+Set `ROUND` and `ATTEMPT` before invoking the command. Read `.stdout`, `.stderr`,
+`.exit` and `.guard.json` from that prefix. Do not interpret the runner's exit 0
+alone as a clean verdict. Every retry needs a new attempt prefix and backup.
 
 Build `$WORK/codex-prompt.txt` from the template in
 `references/review-prompts.md` (section “Codex — initial review”), substituting
@@ -481,13 +499,12 @@ out mid-loop: switch `CODEX_MODEL` to the newest Sol model (`bash
 that round once, and note the switch in your report. If Sol also fails, or the
 loop was already on Sol, end Stage A as failed and report it.
 
-Before trusting a round, check the header's `sandbox:` line matches
-`$CODEX_SANDBOX`, and scan the output for commands that `exited` with a
-sandbox error such as `error building bubblewrap command`. If the reviewer could
-not run its commands, the round failed, whatever its closing text says — even
-`NO ACTIONABLE FINDINGS` means “unknown” here, not “clean”. If this happens
-under `read-only` although the probe passed, re-probe and re-run the round
-once; if the snapshot check trips, stop and show the user as for any reviewer.
+Before trusting a round, verify the requested model and execution permissions
+in its header and inspect failed/denied tool calls. A blocked necessary read or
+check makes the review incomplete, whatever its closing text says. Correct the
+execution setup and retry the round once. Use `danger-full-access` when a sandbox
+failure is the cause and report why. A protected-input mutation or guard failure
+stops the loop; never continue on unverified inputs.
 
 Then, for each round:
 
@@ -571,109 +588,46 @@ so if you have not written it the shell fails before `claude` ever starts.
 ~~~~ bash
 SESSION_ID=$(uuidgen)
 
-claude -p \
-  --model "$CLAUDE_MODEL" \
-  ${CLAUDE_FALLBACK:+--fallback-model "$CLAUDE_FALLBACK"} \
-  --effort high \
-  --session-id "$SESSION_ID" \
-  --safe-mode \
-  --strict-mcp-config \
-  --permission-mode dontAsk \
-  --output-format json \
-  --tools Read Grep Glob Bash \
-  --disallowedTools Edit Write NotebookEdit "mcp__*" \
-    "Bash(git add *)" "Bash(git am *)" "Bash(git apply *)" \
-    "Bash(git bisect *)" "Bash(git branch *)" "Bash(git checkout *)" \
-    "Bash(git cherry-pick *)" "Bash(git clean *)" "Bash(git clone *)" \
-    "Bash(git commit *)" "Bash(git config *)" "Bash(git fetch *)" \
-    "Bash(git filter-branch *)" "Bash(git gc *)" "Bash(git init *)" \
-    "Bash(git merge *)" "Bash(git mv *)" "Bash(git notes *)" \
-    "Bash(git prune *)" "Bash(git pull *)" "Bash(git push *)" \
-    "Bash(git rebase *)" "Bash(git reflog *)" "Bash(git remote *)" \
-    "Bash(git repack *)" "Bash(git replace *)" "Bash(git reset *)" \
-    "Bash(git restore *)" "Bash(git revert *)" "Bash(git rm *)" \
-    "Bash(git sparse-checkout *)" "Bash(git stash *)" "Bash(git submodule *)" \
-    "Bash(git switch *)" "Bash(git tag *)" "Bash(git update-ref *)" \
-    "Bash(git worktree *)" \
-    "Bash(git archive *)" "Bash(git bundle *)" "Bash(git checkout-index *)" \
-    "Bash(git commit-tree *)" "Bash(git daemon *)" "Bash(git fast-import *)" \
-    "Bash(git format-patch *)" "Bash(git hash-object *)" "Bash(git instaweb *)" \
-    "Bash(git maintenance *)" "Bash(git mktree *)" "Bash(git send-email *)" \
-    "Bash(git symbolic-ref *)" "Bash(git update-index *)" "Bash(git write-tree *)" \
-  --allowedTools "Bash(git *)" \
-  < "$WORK/claude-prompt.txt" > "$WORK/review.json"
+claude --version > "$WORK/claude-version.txt" 2>&1
+python3 "$GUARD" --root "$REPO_ROOT" \
+  --prefix "$WORK/claude-r$ROUND-a$ATTEMPT" \
+  --stdin "$WORK/claude-prompt.txt" -- \
+  claude -p \
+    --model "$CLAUDE_MODEL" \
+    ${CLAUDE_FALLBACK:+--fallback-model "$CLAUDE_FALLBACK"} \
+    --effort high \
+    --session-id "$SESSION_ID" \
+    --safe-mode \
+    --strict-mcp-config \
+    --permission-mode dontAsk \
+    --output-format json \
+    --tools Read Grep Glob Bash \
+    --disallowedTools Edit Write NotebookEdit "mcp__*" \
+    --allowedTools "Bash(*)"
 ~~~~
 
-Why these flags: `--safe-mode` and `--strict-mcp-config` keep the reviewer out
-of your hooks, skills and MCP servers, so it reads the same repository a
-stranger would; `dontAsk` plus the tool set means it cannot edit the tree it is
-judging. The prompt tells it to read `AGENTS.md` / `CLAUDE.md` itself, since
-safe mode does not load them.
+Set `ROUND` and `ATTEMPT` first. The final JSON is in the prefix's `.stdout`;
+set `CLAUDE_RESULT` to that path for the commands below. Bash is allowed for
+inspection and tests; direct editing tools and MCP remain disabled. Safe mode
+keeps hooks, skills and automatic repository instructions out of the session;
+the prompt asks the reviewer to read contributor instructions itself.
 
-Allow `Bash(git *)` as one broad rule and subtract the mutating subcommands,
-rather than allowlisting read-only ones individually. A per-subcommand
-allowlist looks safer but is not: reviewers routinely run
-`git -C <path> diff; git status --porcelain` as a single compound command,
-which matches no `Bash(git diff *)` prefix, so the tool gets denied and the
-reviewer falls back to reading files blind — a much worse review with no
-security gained. Deny rules do bite on compound commands, so the mutation guard
-survives. Only git is allowed; every other shell command is still refused.
+The shared runner protects repository inputs. A broad Bash rule can still write
+files or affect external services, so do not describe `dontAsk` or disabled
+editing tools as a filesystem guarantee. Retain the prompt's limits on source,
+Git state, dependency installation and service changes.
 
-The deny list has to cover every mutating subcommand, not just the obvious
-write commands, because `Bash(git *)` allows anything it does not name. The
-dangerous ones are the plausible-looking reads: a reviewer that runs
-`git switch main` to see what the base looked like has changed the checked-out
-branch, and your next fix and commit land on the wrong branch — from a command
-that was, from its point of view, part of reviewing. `git branch` and `git tag`
-are denied wholesale for the same reason (`-D` and `-d` delete); the reviewer
-gets the branch name from `git rev-parse --abbrev-ref HEAD`, which is a pure
-query. The second block covers the plumbing and file-producing commands —
-`git format-patch` and `git archive -o` write files into the working tree while
-looking every bit like inspection.
+Pass the prompt through the runner's stdin file. Claude's tool-list options are
+variadic and can swallow a trailing prompt argument.
 
-Treat that list as best-effort, not as the guarantee. Git has a large surface
-and a deny list can only name what someone thought of; the guarantee is the
-check below, which catches any mutation regardless of how it happened:
-
-~~~~ bash
-snapshot() {
-  git rev-parse HEAD
-  git for-each-ref --format='%(refname) %(objectname)'
-  git status --porcelain -uall
-  git diff HEAD
-  git ls-files -o --exclude-standard -z | sort -z | xargs -0 -r sha256sum
-}
-
-BEFORE=$(snapshot)
-# ... run the reviewer ...
-[ "$BEFORE" = "$(snapshot)" ] || echo "REVIEWER MUTATED THE REPOSITORY"
-~~~~
-
-Compare content, not status codes. `git status --porcelain` alone reports that
-a file is modified, not what is in it, so a file that was already dirty when the
-review started can be rewritten underneath you and the status line never
-changes. `git diff HEAD` plus hashes of the untracked files closes that gap, and
-`for-each-ref` catches a moved branch or tag. The point of comparing content is
-that you no longer have to reason about which git commands can mutate without
-disturbing a status code — the check does not care how the change happened.
-
-Run it around every reviewer call. If it trips, stop and show the user what
-changed before doing anything else — a reviewer that altered the tree has also
-invalidated its own review, and any fix you build on top of it inherits the
-corruption.
-
-**Pass the prompt on stdin.** `--tools`, `--allowedTools` and
-`--disallowedTools` are all variadic, so a trailing prompt argument gets
-swallowed as another tool name and the command dies with “Input must be
-provided either through stdin or as a prompt argument”.
 
 Read the result:
 
 ~~~~ bash
-jq -r '.result' "$WORK/review.json"                        # the review
-jq -r '.is_error, .subtype, .api_error_status' "$WORK/review.json"
-jq -r '.permission_denials' "$WORK/review.json"            # blocked tools
-jq -r '.modelUsage | keys[]' "$WORK/review.json" | grep -v '^claude-haiku'
+jq -r '.result' "$CLAUDE_RESULT"                        # the review
+jq -r '.is_error, .subtype, .api_error_status' "$CLAUDE_RESULT"
+jq -r '.permission_denials' "$CLAUDE_RESULT"            # blocked tools
+jq -r '.modelUsage | keys[]' "$CLAUDE_RESULT" | grep -v '^claude-haiku'
 ~~~~
 
 Check `permission_denials` every round, not just when something looks wrong. A
@@ -745,7 +699,7 @@ this way, but the rest of the tree is still yours to be careful with.
 Leave `$WORK` in place here. In post-commit mode this stage runs after every fix
 batch, and the next review round still needs the scope contract and the prompt
 files inside it; deleting the directory mid-loop breaks the very next
-redirection. `$WORK` is cleaned up once, at the end of Step 3.
+redirection. `$WORK` is cleaned up after Step 3 only when all attempts were usable.
 
 Then follow the `commit` skill for the message itself.
 
@@ -779,7 +733,7 @@ Step 3: Report
 Close with a short summary the user can act on:
 
  -  What each reviewer found, and how many rounds each took. For OpenCode, say
-    which of the three outcomes it had: skipped as unavailable (with the
+    which of the outcomes it had: skipped as unavailable (with the
     reason), ran and failed (with the `REASON=` lines), or ran to completion.
  -  What you fixed.
  -  What you rejected, and why (one line each).
@@ -790,12 +744,15 @@ Close with a short summary the user can act on:
  -  Any fixes applied after a round cap, which therefore carry no independent
     reviewer pass.
 
-Then remove the scratch directory — this is the only place it gets deleted, and
-only once every round and every commit is behind you:
+Report execution modes, allowed output paths, retries and any validation that
+could not run. If any attempt failed, was blocked, mutated protected inputs or
+lacked verification, preserve `$WORK` and report its path, even when a later
+retry succeeded. Keep version files, stderr, session exports and guard reports
+so failures can be diagnosed without rerunning models. The backup archives can
+contain private files; do not upload them or paste their contents into reports.
 
-~~~~ bash
-rm -rf "$WORK"
-~~~~
+Remove `$WORK` only when every attempt was usable and no recovery is pending,
+after all rounds and authorized commits are finished.
 
 The deferred list matters most. It is the evidence that the loop tightened the
 change set instead of expanding it.
@@ -806,9 +763,8 @@ Key rules
 
  -  **The contract comes first.** No reviewer runs before it is written, and
     every finding is measured against it.
- -  **Reviewers review; you fix.** Every reviewer is configured read-only —
-    Codex through its sandbox when the host supports it, otherwise through its
-    prompt plus the snapshot check. Never let any of them edit the repository.
+ -  **Reviewers inspect and test; you fix.** Allow test outputs in declared paths,
+    protect source and Git state, and do not apply reviewer edits automatically.
  -  **Never paste diffs into a prompt.** Every reviewer reads the repository
     itself; give it the range and the contract.
  -  **Verify before applying.** A finding is a hypothesis about the code, and
@@ -818,9 +774,8 @@ Key rules
     stops being worth the marginal risk.
  -  **Keep every generated file in `$WORK`.** Prompts and JSON output written
     into the repository dirty a clean tree and can be swept into the commit.
- -  **Snapshot the repository around every reviewer call.** The deny list is
-    best-effort; the content comparison is what actually guarantees the reviewer
-    changed nothing.
+ -  **Back up and compare around every attempt.** Persistent changes invalidate
+    the review. A snapshot detects changes; it does not prevent external effects.
  -  **Stage explicitly before committing.** The `commit` skill commits only what
     is already staged, and pre-commit reviews cover unstaged and untracked
     files.

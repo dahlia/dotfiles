@@ -7,14 +7,14 @@
 #       Exit 3, with a one-line reason on stderr, when the stage is
 #       unavailable.
 #   opencode-review.sh run MODEL ROUND [SESSION_ID]
-#       Run one read-only review round with $WORK/opencode-prompt.txt as
+#       Run one review round with protected inputs with $WORK/opencode-prompt.txt as
 #       the prompt, resuming SESSION_ID when given, then classify it.
 #   opencode-review.sh check PREFIX MODEL
 #       Classify the saved output of a round (PREFIX.jsonl, PREFIX.err,
 #       PREFIX.exit, PREFIX.export.json) without calling any model.
 #
 # Environment: REPO_ROOT and WORK are required for `run`; OC_TIMEOUT
-# overrides the per-round time limit in seconds (default 900).
+# overrides the per-attempt time limit in seconds (default 900).
 #
 # `run` and `check` print one line, STATUS=<status> MODEL=<id>
 # SESSION=<id>, followed by any REASON= and DENIED= lines, and exit with:
@@ -22,10 +22,13 @@
 #   10  findings     a complete review with findings in PREFIX.review.txt
 #   20  failed       the reviewer ran but the round is not a usable review
 #   21  blocked      a complete answer, but a tool call was denied
-#   30  unavailable  the provider produced no assistant output at all
-#                    (auth, unknown model, quota); try the next model
+#   30  unavailable  known auth, unknown-model or exhausted-quota error
+#   31  transient    retryable provider/transport error or empty final reply
 #   40  mutated      the repository changed during the round; stop
+#   41  guard_failed protected inputs could not be verified; stop
 set -uo pipefail
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+GUARD="$SCRIPT_DIR/review-guard.py"
 
 PREFERRED_MODELS=(deepseek/deepseek-flash opencode-go/deepseek-v4.1-flash)
 AGENT=review-loop-flash
@@ -75,12 +78,14 @@ cmd_models() {
 
 write_config() {
   local data mcp_off
-  data=$(opencode debug paths 2>/dev/null | sed -n 's/^data  *//p')
+  mkdir -p -- "$WORK" || die "cannot create artifact directory"
+  chmod 700 -- "$WORK" || die "cannot make artifact directory private"
+  data=$(env "${OC_ENV[@]}" opencode debug paths --pure 2> "$WORK/opencode-paths.err" | sed -n 's/^data  *//p')
   [ -n "$data" ] || die "cannot resolve the OpenCode data directory"
   # Disable every MCP server the user's global config would start.  The
   # resolved config holds credentials, so it only ever reaches jq.
   mcp_off=$(cd "$REPO_ROOT" && env "${OC_ENV[@]}" \
-    opencode debug config --pure 2>/dev/null \
+    opencode debug config --pure 2> "$WORK/opencode-config.err" \
     | jq -ce '(.mcp // {}) | map_values({enabled: false})') \
     || die "cannot resolve the OpenCode configuration"
   jq -n --arg tool_output "$data/tool-output/*" --argjson mcp "$mcp_off" '{
@@ -100,30 +105,7 @@ write_config() {
           list: "allow",
           todowrite: "allow",
           external_directory: {"*": "deny", ($tool_output): "allow"},
-          bash: {
-            "*": "deny",
-            "git status *": "allow",
-            "git diff *": "allow",
-            "git log *": "allow",
-            "git show *": "allow",
-            "git blame *": "allow",
-            "git grep *": "allow",
-            "git rev-parse *": "allow",
-            "git rev-list *": "allow",
-            "git merge-base *": "allow",
-            "git ls-files *": "allow",
-            "git ls-tree *": "allow",
-            "git cat-file *": "allow",
-            "git describe *": "allow",
-            "git shortlog *": "allow",
-            "git branch --show-current": "allow",
-            "*>*": "deny",
-            "git *--output*": "deny",
-            "git *--no-index*": "deny",
-            "git *--contents*": "deny",
-            "git grep *-O*": "deny",
-            "git grep *--open-files-in-pager*": "deny"
-          }
+          bash: "allow"
         }
       }
     }
@@ -132,59 +114,69 @@ write_config() {
   # force: an unknown or shadowed agent would run with default permissions.
   (cd "$REPO_ROOT" && env "${OC_ENV[@]}" \
     OPENCODE_CONFIG_CONTENT="$(cat "$WORK/opencode.json")" \
-    opencode debug agent "$AGENT" --pure 2>/dev/null) \
+    opencode debug agent "$AGENT" --pure 2> "$WORK/opencode-preflight.err") \
     | jq -e --arg a "$AGENT" '.name == $a
         and ([.permission[] | select(.permission == "*" and .pattern == "*")]
              | last | .action) == "deny"
         and .tools.edit == false and .tools.write == false
         and .tools.task == false and .tools.webfetch == false' >/dev/null \
-    || die "OpenCode did not resolve the read-only $AGENT agent"
+    || die "OpenCode did not resolve the protected-input $AGENT agent"
 }
 
-snapshot() {
-  git rev-parse HEAD
-  git for-each-ref --format='%(refname) %(objectname)'
-  git status --porcelain -uall
-  git diff HEAD
-  git ls-files -o --exclude-standard -z | sort -z | xargs -0 -r sha256sum
-}
 
 cmd_run() {
   local model=${1:?model} round=${2:?round} session=${3:-}
   : "${REPO_ROOT:?REPO_ROOT is required}" "${WORK:?WORK is required}"
   [ -s "$WORK/opencode-prompt.txt" ] \
     || die "missing $WORK/opencode-prompt.txt"
-  local prefix="$WORK/opencode-r$round" code sid
+  local prefix run_dir code sid attempt=1
+  run_dir=$(mktemp -d "$WORK/opencode-${model//\//-}-r$round.XXXXXX") || die "cannot create attempt directory"
   local -a resume=()
   [ -n "$session" ] && resume=(--session "$session")
   write_config
-  (cd "$REPO_ROOT" && snapshot) > "$prefix.before" 2>&1
-  (
-    cd "$REPO_ROOT" &&
-    env "${OC_ENV[@]}" \
+  opencode --version > "$WORK/opencode-version.txt" 2>&1
+  while :; do
+    prefix="$run_dir/a$attempt"
+    python3 "$GUARD" --root "$REPO_ROOT" --prefix "$prefix" \
+      --stdin "$WORK/opencode-prompt.txt" -- \
+      env "${OC_ENV[@]}" \
       OPENCODE_CONFIG_CONTENT="$(cat "$WORK/opencode.json")" \
-      timeout "${OC_TIMEOUT:-900}" opencode run --pure \
+      timeout --kill-after=10 "${OC_TIMEOUT:-900}" opencode run --pure \
         --agent "$AGENT" --model "$model" --variant high \
-        --format json "${resume[@]}" \
-        < "$WORK/opencode-prompt.txt" > "$prefix.jsonl" 2> "$prefix.err"
-  )
-  code=$?
-  echo "$code" > "$prefix.exit"
-  (cd "$REPO_ROOT" && snapshot) > "$prefix.after" 2>&1
-  if ! cmp -s "$prefix.before" "$prefix.after"; then
-    echo "STATUS=mutated MODEL=$model SESSION=${session:-unknown}"
-    echo "REASON=repository changed during the review; see" \
-      "diff $prefix.before $prefix.after"
-    exit 40
-  fi
-  sid=$(jq -r 'select(.sessionID != null) | .sessionID' "$prefix.jsonl" \
-    2>/dev/null | head -1)
-  [ -n "$sid" ] || sid=$session
-  if [ -n "$sid" ]; then
-    (cd "$REPO_ROOT" && env "${OC_ENV[@]}" opencode export --pure "$sid") \
-      > "$prefix.export.json" 2> "$prefix.export.err"
-  fi
-  cmd_check "$prefix" "$model" "$sid"
+        --format json "${resume[@]}"
+    code=$?
+    # Keep the check subcommand compatible with its existing saved fixtures.
+    [ ! -f "$prefix.stdout" ] || cp "$prefix.stdout" "$prefix.jsonl"
+    [ ! -f "$prefix.stderr" ] || cp "$prefix.stderr" "$prefix.err"
+    if [ -f "$prefix.guard.json" ] && jq -e '.status == "mutated"' "$prefix.guard.json" >/dev/null; then
+      echo "STATUS=mutated MODEL=$model SESSION=${session:-unknown}"
+      echo "REASON=protected inputs changed; preserve $prefix.* and stop"
+      exit 40
+    fi
+    if [ ! -f "$prefix.guard.json" ]; then
+      echo "STATUS=guard_failed MODEL=$model SESSION=${session:-unknown}"
+      echo "REASON=guard could not verify inputs; preserve $prefix.*"
+      exit 41
+    fi
+    sid=$(jq -r 'select(.sessionID != null) | .sessionID' "$prefix.jsonl" 2>/dev/null | head -1)
+    [ -n "$sid" ] || sid=$session
+    if [ -n "$sid" ]; then
+      (cd "$REPO_ROOT" && env "${OC_ENV[@]}" opencode export --pure "$sid") \
+        > "$prefix.export.json" 2> "$prefix.export.err"
+    fi
+    (cmd_check "$prefix" "$model" "$sid") > "$prefix.status"
+    code=$?
+    cat "$prefix.status"
+    echo "LOG_PREFIX=$prefix"
+    if [ "$code" != 31 ] || [ "$attempt" = 2 ]; then
+      exit "$code"
+    fi
+    echo "REASON=retrying transient failure once in a fresh session; logs at $prefix"
+    attempt=2
+    resume=()
+    session=""
+  done
+
 }
 
 cmd_check() {
@@ -197,6 +189,9 @@ cmd_check() {
       2>/dev/null | head -1)
   fi
   add() { reasons+="REASON=$*"$'\n'; }
+
+  jq -e -s 'length > 0 and all(.[]; type == "object")' "$prefix.jsonl" >/dev/null 2>&1 \
+    || add "invalid or empty JSON event stream"
 
   case $code in
     0) ;;
@@ -221,13 +216,9 @@ cmd_check() {
     round_json='[]'
   fi
 
-  local n_assistant n_content
+  local n_assistant
   n_assistant=$(jq '[.[] | select(.info.role == "assistant")] | length' \
     <<<"$round_json")
-  # Any assistant part at all (even a step or reasoning part) means the
-  # model was reached; only a round with none is a provider failure.
-  n_content=$(jq '[.[] | select(.info.role == "assistant") | .parts[]]
-    | length' <<<"$round_json")
   [ "$n_assistant" -gt 0 ] || add "no assistant message in this round"
 
   while IFS= read -r line; do
@@ -270,8 +261,15 @@ cmd_check() {
     <<<"$round_json")
 
   if [ -n "$reasons" ]; then
-    if [ "$n_content" = 0 ] && [ "$code" != 124 ]; then
+    # A missing export or local CLI failure is not provider unavailability.
+    # Retry only known transient errors or a completed, empty assistant reply.
+    local diagnostics="$reasons $(cat "$prefix.err" 2>/dev/null)"
+    if grep -Eq 'invalid or empty JSON event stream|model mismatch|final step finished with.*length' <<<"$reasons"; then
+      status=failed exit_code=20
+    elif grep -Eiq '401|403|unknown model|model not found|insufficient.quota|quota.exceeded' <<<"$diagnostics"; then
       status=unavailable exit_code=30
+    elif grep -Eiq '429|500|502|503|504|ECONNRESET|ETIMEDOUT|connection reset|timed out|empty final answer' <<<"$diagnostics"; then
+      status=transient exit_code=31
     else
       status=failed exit_code=20
     fi
