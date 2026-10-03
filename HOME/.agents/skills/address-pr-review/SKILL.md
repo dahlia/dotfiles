@@ -35,12 +35,12 @@ If the PR state is `CLOSED` or `MERGED`, stop and ask the user — pushing more
 commits won't do what they want.
 
 
-Step 1 — Fetch unresolved review threads
-----------------------------------------
+Step 1 — Fetch review threads and review bodies
+----------------------------------------------
 
 The REST review-comments endpoint cannot tell you whether a thread is resolved,
-so use GraphQL. One call gets you everything you need (thread node IDs for
-resolving, comment databaseIds for replying, comment URLs for permalinks in
+so use GraphQL for inline threads. This call gets their metadata (thread node
+IDs for resolving, comment databaseIds for replying, comment URLs for permalinks in
 commit messages, file/line for reading the code in context):
 
 ~~~~ bash
@@ -49,11 +49,13 @@ query($owner: String!, $repo: String!, $pr: Int!) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $pr) {
       reviewThreads(first: 100) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           id
           isResolved
           isOutdated
           comments(first: 50) {
+            pageInfo { hasNextPage endCursor }
             nodes {
               id
               databaseId
@@ -73,6 +75,9 @@ query($owner: String!, $repo: String!, $pr: Int!) {
 }'
 ~~~~
 
+Follow `pageInfo.hasNextPage` with `after: endCursor` for both threads and
+comments; the first page is not necessarily the complete review.
+
 Filter to threads where `isResolved == false`. For each unresolved thread,
 remember:
 
@@ -89,16 +94,56 @@ Note any later comments in each thread too: if the reviewer and author have
 already gone back and forth, the latest state of the conversation matters more
 than the original comment.
 
-If there are zero unresolved threads, tell the user there's nothing to address
-and stop. Don't run Step 8 either: the bot re-trigger only makes sense after a
-new commit, and there is none here.
+### CodeRabbit findings in the review body
+
+Also fetch the PR reviews themselves, even when there are zero unresolved
+inline threads:
+
+~~~~ bash
+gh api --paginate repos/OWNER/REPO/pulls/PR_NUMBER/reviews \
+  --jq '.[] | {id, author: .user.login, body, html_url, submitted_at, commit_id, state}'
+~~~~
+
+CodeRabbit (`coderabbitai`, also `coderabbitai[bot]`) can put **Outside diff
+range comments** in the overall review's `body`. This is a `PullRequestReview`
+body, not a `reviewThreads.comments[].body` or a PR conversation comment.
+`reviewThreads` and REST `pulls/.../comments` alone do not contain these
+findings. Read the complete CodeRabbit review bodies, including nested
+`<details>` sections; a summary count or login-only query is not enough.
+
+Extract each individual finding in that section, preserving its parent review
+`id`/`html_url`, file path, line range, and full feedback. Treat it as a review
+item alongside inline threads. Do not treat walkthroughs, statistics, or
+non-actionable summaries as findings. Inspect all review pages, not only the
+latest review: a later review without the section does not close older items.
+
+Deduplicate repeated findings across reviews and inline threads by the actual
+concern and location. Check current code, subsequent discussion, and existing
+fixes/replies before deciding whether an older finding still needs work; review
+state (including `DISMISSED`) is not a per-finding resolution flag. To check
+earlier body-only replies, fetch top-level PR discussion as well:
+
+~~~~ bash
+gh api --paginate repos/OWNER/REPO/issues/PR_NUMBER/comments
+~~~~
+
+Keep an explicit disposition for each finding: fix, decline with evidence,
+already addressed with evidence, or pending. For body-only items, use the parent
+review's `html_url` as the commit reference and record path/line or a short
+finding label to distinguish items sharing that URL.
+
+Only report nothing to address after checking **both** unresolved inline
+threads and outstanding review-body findings. If either fetch fails or is
+incomplete, report that limitation instead of claiming the PR is clear. If
+neither source has outstanding items, stop without re-triggering bots.
 
 
 Step 2 — Triage each thread
 ---------------------------
 
-For each unresolved thread, read the surrounding code (`path` + `line` +
-`diffHunk`) and decide:
+For each unresolved thread or outstanding review-body finding, read the
+surrounding code and decide. Body-only findings may have no `diffHunk`; use
+their path/line range and inspect the current file directly:
 
  -  **Valid** — the reviewer is right, or there's a reasonable interpretation
     under which they're right, or you can address the underlying concern even
@@ -119,8 +164,8 @@ doing anything irreversible. Don't guess on judgment calls.
 Step 3 — Make the fixes and commit
 ----------------------------------
 
-Apply edits for the valid threads. Group commits by **topical relatedness**,
-not by reviewer or by thread:
+Apply edits for the valid review items, including body-only findings. Group
+commits by **topical relatedness**, not by reviewer or by thread:
 
  -  Multiple threads converging on the same issue → **one** commit.
  -  Unrelated fixes → **separate** commits.
@@ -140,9 +185,10 @@ For each commit:
     `Assisted-by` trailer stay consistent. After the skill commits, you'll add
     the `Addresses:` block; see the next bullet for how.
 
-3.  The commit message body **must** include the permalink (`url` field from
-    the GraphQL response in Step 1) of every comment that commit resolves, one
-    URL per line, as bare URLs in the body. No section header (no `Addresses:`
+3.  The commit message body **must** include the permalink of every review
+    item the commit addresses (`url` for inline comments, `html_url` for parent
+    reviews of body-only findings from Step 1), one distinct URL per line,
+    as bare URLs in the body. No section header (no `Addresses:`
     line); no `-` bullet prefix; just the URLs themselves, separated from the
     rest of the body by a blank line. This matches the `commit` skill's
     convention of putting bare reference URLs in the body. Pass this
@@ -216,6 +262,17 @@ why. Be concrete and non-defensive: name the constraint, convention, or intent
 that makes the suggestion not apply. Match the language of the surrounding
 conversation; if the reviewer wrote in Korean, reply in Korean.
 
+### Replying to body-only findings
+
+A review body has a review ID, not an original inline comment `databaseId`.
+Do not pass its ID to the inline reply endpoint. If the finding also has an
+inline thread, reply there and track both occurrences as one item. Otherwise,
+post a top-level PR comment using `gh pr comment PR_NUMBER --body-file FILE`.
+Link the parent review and identify each finding by path/line or a short label;
+state its fix with a verified bare commit hash, reasoned decline, or evidence
+that it was already addressed. Group body-only replies when useful, but give
+each finding an explicit outcome. Check existing replies to avoid duplicates.
+
 ### Two formatting rules for replies
 
 **1. Bare commit hashes, no backticks.** GitHub auto-links commit hashes in
@@ -261,6 +318,10 @@ mutation($threadId: ID!) {
 }'
 ~~~~
 
+Body-only findings have no thread node ID and cannot be resolved with
+`resolveReviewThread`. Record their disposition and reply instead; do not
+invent IDs or claim GitHub marked them resolved.
+
 The one judgment exception: if you posted a decline reply on a thread where the
 reviewer is likely to push back and the conversation feels live, you can leave
 it unresolved and let them respond. Use this sparingly — the default is resolve.
@@ -272,8 +333,7 @@ Step 8 — Re-trigger Codex / Gemini if they previously reviewed
 **Only run this step if you actually pushed at least one new commit in Step 4.**
 If every thread was declined as invalid and no code changed, the bots have
 nothing new to look at; re-running them just produces a duplicate review and
-adds noise to the PR. In that case, skip this step entirely; the workflow ends
-after Step 7.
+adds noise to the PR. In that case, skip this step entirely and continue to Step 9.
 
 If you did push commits, list the reviewers and review-comment authors on the
 PR:
@@ -301,9 +361,20 @@ Both apply if both bots reviewed. Neither applies if neither did — skip the
 step entirely. These are top-level PR comments (`gh pr comment`), not replies
 on specific threads.
 
-This is the end of the workflow. Briefly summarize to the user what you did:
-how many threads addressed, how many declined, which commits you pushed,
-whether you re-triggered any bots.
+
+Step 9 — Verify remaining feedback and summarize
+------------------------------------------------
+
+Before reporting completion, fetch review threads and CodeRabbit review
+bodies again using Step 1, including pagination. Reconcile them with your
+dispositions and check for newly posted or edited findings. Zero unresolved
+threads alone does not prove that review-body findings were handled. Report
+any remaining or newly arrived items as pending; do not loop indefinitely
+waiting for bots.
+
+Briefly summarize how many inline threads and body-only findings you addressed
+or declined, which commits you pushed, whether you re-triggered bots, and any
+pending findings or incomplete fetches.
 
 
 Common failure modes
@@ -312,6 +383,9 @@ Common failure modes
  -  **Treating REST `pulls/.../comments` as the source of truth for resolved
     status.** It doesn't expose `isResolved`. Always use GraphQL
     `reviewThreads`.
+ -  **Stopping at zero unresolved threads.** CodeRabbit outside-diff findings
+    can exist only in a review body. Fetch paginated `pulls/.../reviews`, read
+    the nested sections, and track their outcomes separately.
  -  **Replying to the latest comment in a thread instead of the original.** The
     reply endpoint takes the *original* review comment's `databaseId`; that's
     how GitHub knows which thread to attach the reply to.
