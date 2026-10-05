@@ -40,11 +40,24 @@ def record(path):
 
 
 def tree(root, allowed, tracked):
-    result = {}
+    """Record the working tree, and list nested repositories found in it.
+
+    A directory holding its own `.git` (a submodule, or any repository nested
+    inside this one) is still walked like any other directory, but its `.git`
+    directory is left to `metadata()`, which records the same Git state for
+    it as for the top-level repository and, like there, skips object storage.
+    A `.git` file (a gitdir pointer, as in submodules) is recorded as a file.
+    """
+    result, nested = {}, []
     def visit(directory):
+        marker = directory / '.git'
+        if directory != root and (marker.exists() or marker.is_symlink()):
+            nested.append(directory.relative_to(root).as_posix())
         for path in sorted(directory.iterdir()):
             rel = path.relative_to(root).as_posix()
             if rel == '.git':
+                continue
+            if path.name == '.git' and path.is_dir() and not path.is_symlink():
                 continue
             excluded = any(rel == p or rel.startswith(p + '/') for p in allowed)
             protected = rel in tracked or any(t.startswith(rel + '/') for t in tracked)
@@ -54,11 +67,12 @@ def tree(root, allowed, tracked):
             if result[rel][0] == 'dir':
                 visit(path)
     visit(root)
-    return result
+    return result, nested
 
 
-def metadata(root):
-    # Git paths can live outside the working directory in a linked worktree.
+def metadata(root, marker=True):
+    # Git paths can live outside the working directory in a linked worktree,
+    # and a submodule's live in the superproject's .git/modules.
     names = ['HEAD', 'index', 'refs', 'config', 'config.worktree', 'packed-refs',
              'MERGE_HEAD', 'MERGE_MSG', 'MERGE_MODE', 'ORIG_HEAD',
              'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'AUTO_MERGE',
@@ -78,11 +92,34 @@ def metadata(root):
             if path.is_dir() and not path.is_symlink():
                 for child in sorted(path.rglob('*')):
                     result[name + '/' + child.relative_to(path).as_posix()] = record(child)
-    marker = root / '.git'
-    if marker.is_file():
-        result['git-marker'] = record(marker)
+    if marker and (root / '.git').is_file():
+        result['git-marker'] = record(root / '.git')
     result['refs-list'] = os.fsdecode(git(root, 'for-each-ref', '--format=%(refname) %(objectname) %(symref)'))
     return result, paths
+
+
+def snapshot(root, allowed, tracked):
+    """Return the comparable state and the Git metadata paths to back up.
+
+    The state has a `tree` area, a `git` area for the repository itself, and
+    one `git[<path>]` area per nested repository (submodule or otherwise).
+    Gitlinks without a repository behind them (uninitialized submodules, or
+    stray gitlinks with no .gitmodules entry) need nothing extra: the index
+    already records their commits, and the tree records their directories.
+    """
+    files, nested = tree(root, allowed, tracked)
+    state, paths = {'tree': files}, {}
+    state['git'], paths[''] = metadata(root)
+    for rel in nested:
+        repo = root / rel
+        try:
+            top = Path(os.fsdecode(git(repo, 'rev-parse', '--show-toplevel')).strip()).resolve()
+        except subprocess.CalledProcessError:
+            top = None
+        if top != repo.resolve():
+            raise ValueError(f'cannot resolve the Git directory of nested repository {rel}')
+        state[f'git[{rel}]'], paths[rel] = metadata(repo, marker=False)
+    return state, paths
 
 
 def main():
@@ -95,8 +132,6 @@ def main():
     root = Path(args.root).resolve()
     if Path(os.fsdecode(git(root, 'rev-parse', '--show-toplevel')).strip()).resolve() != root:
         raise ValueError('--root must be the repository root')
-    if any(entry.startswith(b'160000 ') for entry in git(root, 'ls-files', '--stage', '-z').split(b'\0')):
-        raise ValueError('submodules need separate guards; this runner does not support them')
     prefix = Path(args.prefix).resolve()
     if prefix.is_relative_to(root):
         raise ValueError('artifacts must live outside the repository')
@@ -109,7 +144,7 @@ def main():
             Path(p).is_absolute() or any(c in ('', '.', '..', '.git') for c in p.split('/')) for p in allowed):
         raise ValueError('REVIEW_OUTPUT_PATHS must be a JSON array of relative directory paths without .git or traversal')
     tracked = set(os.fsdecode(p) for p in git(root, 'ls-files', '-z').split(b'\0') if p)
-    before = {'tree': tree(root, allowed, tracked), 'git': metadata(root)[0]}
+    before, git_paths = snapshot(root, allowed, tracked)
     def save(suffix, data):
         path = Path(str(prefix) + suffix)
         with path.open('x', encoding='utf-8') as f:
@@ -123,14 +158,16 @@ def main():
         with tarfile.open(fileobj=output, mode='w', dereference=False) as archive:
             for rel in before['tree']:
                 archive.add(root / rel, arcname='tree/' + rel, recursive=False)
-            for name, path in metadata(root)[1].items():
-                if path.exists() or path.is_symlink():
-                    archive.add(path, arcname='git/' + name, recursive=True)
+            for repo, named in git_paths.items():
+                base = 'nested/' + repo + '/' if repo else 'git/'
+                for name, path in named.items():
+                    if path.exists() or path.is_symlink():
+                        archive.add(path, arcname=base + name, recursive=True)
             marker = root / '.git'
             if marker.is_file():
                 archive.add(marker, arcname='git-marker', recursive=False)
     # Detect a concurrent edit during backup instead of launching on mixed inputs.
-    if before != {'tree': tree(root, allowed, tracked), 'git': metadata(root)[0]}:
+    if before != snapshot(root, allowed, tracked)[0]:
         raise ValueError('repository changed during backup; preserve artifacts and retry after edits stop')
     for suffix in ('.stdout', '.stderr', '.exit'):
         if Path(str(prefix) + suffix).exists():
@@ -143,12 +180,15 @@ def main():
     Path(str(prefix) + '.exit').write_text(str(code) + '\n')
     # Keep the original tracked set: removing a path from the index cannot make
     # it become an allowed build output during the after-snapshot.
-    after = {'tree': tree(root, allowed, tracked), 'git': metadata(root)[0]}
+    after = snapshot(root, allowed, tracked)[0]
     save('.after.json', after)
     changes = []
-    for area in before:
-        for key in sorted(before[area].keys() | after[area].keys()):
-            if before[area].get(key) != after[area].get(key):
+    # Areas can appear or disappear when a nested repository is created or
+    # removed during the review.
+    for area in sorted(before.keys() | after.keys()):
+        old, new = before.get(area, {}), after.get(area, {})
+        for key in sorted(old.keys() | new.keys()):
+            if old.get(key) != new.get(key):
                 changes.append(area + ':' + key)
     save('.guard.json', {'command_exit': code, 'allowed_outputs': allowed, 'changes': changes,
                          'status': 'mutated' if changes else 'unchanged'})

@@ -83,6 +83,93 @@ class GuardTests(unittest.TestCase):
     def test_new_ignored_file_is_detected(self):
         self.assertEqual(self.run_guard("from pathlib import Path; Path('cache').mkdir(); Path('cache/new').write_text('unexpected')"), 40)
 
+    def changes(self):
+        return json.loads(Path(str(self.prefix) + '.guard.json').read_text())['changes']
+
+    def add_submodule(self):
+        upstream = self.base / 'upstream'
+        upstream.mkdir()
+        for args in (('init', '-q'), ('config', 'user.email', 'test@example.invalid'),
+                     ('config', 'user.name', 'Test')):
+            subprocess.check_output(['git', '-C', str(upstream), *args])
+        (upstream / 'file').write_text('submodule file')
+        subprocess.check_output(['git', '-C', str(upstream), 'add', 'file'])
+        subprocess.check_output(['git', '-C', str(upstream), 'commit', '-qm', 'initial'])
+        self.git('-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(upstream), 'sub')
+        self.git('commit', '-qm', 'add submodule')
+
+    def test_orphan_gitlink_is_allowed(self):
+        # A gitlink with no .gitmodules entry and no repository behind it has
+        # no Git state of its own; the index already protects its commit.
+        head = self.git('rev-parse', 'HEAD').decode().strip()
+        self.git('update-index', '--add', '--cacheinfo', f'160000,{head},orphan')
+        (self.root / 'orphan').mkdir()
+        self.assertEqual(self.run_guard('pass'), 0)
+
+    def test_uninitialized_submodule_is_allowed(self):
+        self.add_submodule()
+        self.git('submodule', '--quiet', 'deinit', '-f', 'sub')
+        self.assertEqual(self.run_guard('pass'), 0)
+
+    def test_submodule_is_backed_up_and_unchanged_run_passes(self):
+        self.add_submodule()
+        self.assertEqual(self.run_guard('pass'), 0)
+        with tarfile.open(str(self.prefix) + '.backup.tar') as archive:
+            names = archive.getnames()
+        self.assertIn('tree/sub/file', names)
+        self.assertIn('nested/sub/HEAD', names)
+        self.assertIn('nested/sub/index', names)
+        self.assertFalse(any('/objects/' in name for name in names))
+
+    def test_submodule_commit_is_detected(self):
+        self.add_submodule()
+        code = ("import subprocess; from pathlib import Path; Path('sub/file').write_text('x'); "
+                "subprocess.run(['git','-C','sub','-c','user.email=a@b.invalid','-c','user.name=A',"
+                "'commit','-qam','sneaky'],check=True); "
+                "subprocess.run(['git','-C','sub','checkout','-q','HEAD~1','--','file'],check=True)")
+        self.assertEqual(self.run_guard(code), 40)
+        # The working tree is back to its original bytes; only the
+        # submodule's own Git state reveals the commit.
+        self.assertNotIn('tree:sub/file', self.changes())
+        self.assertTrue(any(change.startswith('git[sub]:') for change in self.changes()))
+
+    def test_submodule_branch_switch_is_detected(self):
+        self.add_submodule()
+        self.assertEqual(self.run_guard("import subprocess; subprocess.run(['git','-C','sub','checkout','-qb','other'],check=True)"), 40)
+        self.assertIn('git[sub]:HEAD', self.changes())
+
+    def test_submodule_working_tree_change_is_detected(self):
+        self.add_submodule()
+        self.assertEqual(self.run_guard("from pathlib import Path; Path('sub/file').write_text('changed')"), 40)
+        self.assertIn('tree:sub/file', self.changes())
+
+    def test_nested_repository_metadata_without_objects(self):
+        nested = self.root / 'nested'
+        nested.mkdir()
+        for args in (('init', '-q'), ('config', 'user.email', 'test@example.invalid'),
+                     ('config', 'user.name', 'Test')):
+            subprocess.check_output(['git', '-C', str(nested), *args])
+        (nested / 'file').write_text('nested file')
+        subprocess.check_output(['git', '-C', str(nested), 'add', 'file'])
+        subprocess.check_output(['git', '-C', str(nested), 'commit', '-qm', 'initial'])
+        self.assertEqual(self.run_guard("import subprocess; subprocess.run(['git','-C','nested','branch','unexpected'],check=True)"), 40)
+        self.assertTrue(any(change.startswith('git[nested]:') for change in self.changes()))
+        with tarfile.open(str(self.prefix) + '.backup.tar') as archive:
+            names = archive.getnames()
+        self.assertIn('tree/nested/file', names)
+        self.assertIn('nested/nested/HEAD', names)
+        self.assertFalse(any('/objects/' in name for name in names))
+
+    def test_new_nested_repository_is_detected(self):
+        self.assertEqual(self.run_guard("import subprocess; subprocess.run(['git','init','-q','fresh'],check=True)"), 40)
+
+    def test_unresolvable_nested_repository_is_refused(self):
+        broken = self.root / 'broken'
+        broken.mkdir()
+        (broken / '.git').write_text('gitdir: ../does-not-exist\n')
+        self.assertEqual(self.run_guard('pass'), 2)
+        self.assertFalse(Path(str(self.prefix) + '.stdout').exists())
+
 
     def test_opencode_retry_keeps_evidence_and_fresh_session(self):
         work = self.base / 'work'

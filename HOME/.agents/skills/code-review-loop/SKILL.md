@@ -239,8 +239,14 @@ Each attempt needs a fresh prefix outside the repository. The runner creates
 `.stderr` and `.exit`. The archive preserves file bytes, modes and symlink targets,
 including untracked/ignored files, plus the index and relevant Git metadata.
 HEAD, refs and merge/rebase state are checked. Git object storage, reflogs, external
-symlink targets and machine-wide state are not backed up. Submodules require
-separate guards and this runner refuses them rather than claiming full coverage.
+symlink targets and machine-wide state are not backed up. Submodules and other
+nested repositories get the same treatment: their working trees are walked like
+any directory, and their Git state (HEAD, index, refs, config) is checked in a
+`git[<path>]` area of the guard report, even when it lives under the
+superproject's `.git/modules/`, so a reviewer committing or switching branches
+inside a submodule is caught. Gitlinks with no repository behind them, such as
+uninitialized submodules, need nothing extra. If a nested `.git` cannot be
+resolved to a repository, the runner refuses rather than claim coverage.
 Do not edit the repository concurrently with a review. A change during backup
 aborts the attempt; a change during review cannot reliably be attributed to it.
 
