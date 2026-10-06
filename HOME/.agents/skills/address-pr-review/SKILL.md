@@ -233,13 +233,13 @@ re-commit. `git log` is the only authority. Run it after pushing:
 
 ~~~~ bash
 BASE=$(git merge-base "origin/$(gh pr view --json baseRefName -q .baseRefName)" HEAD)
-git log --oneline "$BASE"..HEAD
+git log --format='%H %s' "$BASE"..HEAD
 ~~~~
 
-For each commit you just made, copy the hash directly from this output — full
-40-char hash or short hash (7+ chars) both work as long as the short form is
-unambiguous. Map each hash to the set of comment IDs / URLs it addresses;
-you'll use this map in Step 6.
+For each commit you just made, copy the full hash directly from this output.
+Prefer the full hash in replies; use a short, unambiguous hash only when there
+is a reason, such as a repository convention. Map each hash to the set of
+comment IDs / URLs it addresses; you'll use this map in Step 6.
 
 **Do not skip this step.** Posting a wrong hash makes the reply useless and the
 PR confusing.
@@ -248,13 +248,14 @@ PR confusing.
 Step 6 — Reply on each thread
 -----------------------------
 
-For each thread you addressed, post a reply naming the commit that fixed it.
+Prepare every reply using the writing and formatting guidance below before
+posting. For each thread you addressed, name the commit that fixed it.
 Use the original comment's `databaseId` from Step 1 — replies always thread off
 the original, even when the conversation has continued:
 
 ~~~~ bash
 gh api repos/OWNER/REPO/pulls/PR_NUMBER/comments/COMMENT_DATABASE_ID/replies \
-  -X POST -f body="Addressed in abc1234."
+  -X POST -F body=@REPLY_FILE
 ~~~~
 
 For each thread you're declining, post a short reply (1–2 sentences) explaining
@@ -273,33 +274,84 @@ state its fix with a verified bare commit hash, reasoned decline, or evidence
 that it was already addressed. Group body-only replies when useful, but give
 each finding an explicit outcome. Check existing replies to avoid duplicates.
 
-### Two formatting rules for replies
+### Writing and formatting replies
 
-**1. Bare commit hashes, no backticks.** GitHub auto-links commit hashes in
-comments only when they are plain text. Wrapping a hash in backticks blocks the
-auto-link and the reader loses the click-through. Other Markdown (bold,
-italics, links, lists, fenced code blocks for actual code) is fine; just never
-put the hash itself inside backticks or a code span.
+Apply this guidance to inline thread replies and top-level PR comments about
+body-only findings, whether fixing, declining, or documenting an existing fix.
+First inspect repository guidance for issue/PR writing, such as *AGENTS.md*,
+*CONTRIBUTING.md*, linked style guides, and *.github/* templates. Follow any
+applicable repository rules first; the defaults below apply only where they
+do not conflict with those rules.
 
- -  Good: `Addressed in abc1234: split the cache key as you suggested.`
- -  Good: `**Addressed in abc1234.** Tests added in def5678.`
- -  Bad: `` Addressed in `abc1234`. ``  (backticks defeat auto-linking)
- -  Bad: ```` Addressed in ```abc1234```. ```` (same problem)
+ -  Write commit hashes as plain text, without backticks or other Markdown
+    wrappers, so GitHub can auto-link them. Prefer the full hash verified in
+    Step 5.
+ -  Italicize filenames, filesystem paths, extensions, and simple glob patterns
+    in prose: *parser.ts*, *src/parser.ts*, *.ts*, and *\*.test.ts*. Escape
+    literal Markdown metacharacters so the rendered glob remains intact.
+    URL paths are different: use code spans, such as `/api/users`, rather than
+    italics. Keep code identifiers and actual code in code spans/blocks.
+ -  Avoid em dashes within sentences; use a colon, semicolon, comma,
+    parentheses, or separate sentences. An em dash may join an item label to
+    its content, but prefer a colon even there.
+ -  Prefer italics to bold for emphasis in sentences, and emphasize sparingly.
+    Bold is acceptable for item labels and key columns in tables.
+ -  Draft with straight quotes and straight apostrophes. Let Hongdown apply
+    the configured typography; do not manually introduce curly characters or
+    undo its punctuation formatting afterward.
+ -  Do not hard-wrap prose. Keep each paragraph on one source line; preserve
+    meaningful breaks for lists and code blocks.
 
-**2. No em dashes (—) in replies.** Use a semicolon, colon, comma, or
-parentheses instead, or break into two sentences. This applies to every reply
-you post on a review thread, both the “addressed in X” replies and the
-decline-with-explanation replies.
+Use [Wikipedia's Signs of AI writing] as a reference when reviewing the draft,
+rather than as a mechanical banned-word list. Keep replies specific to the
+finding: state the change and relevant validation, or the concrete evidence
+for declining it. Remove inflated claims, generic praise, vague attribution,
+formulaic contrasts, filler transitions, and redundant summaries. Do not
+claim tests or checks that you did not run, or add elaborate headings and
+lists to a reply that needs only a sentence or two.
 
- -  Good: `Addressed in abc1234; the request ID is no longer part of the key.`
- -  Good: `Addressed in abc1234: the request ID is no longer part of the key.`
- -  Good:
-    `Declined: this path is intentionally synchronous because the caller holds a transaction.`
- -  Bad: `Addressed in abc1234 — the request ID is no longer part of the key.`
- -  Bad: `Declined — this path is intentionally synchronous.`
+[Wikipedia's Signs of AI writing]: https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing
 
-Re-read each reply before posting and check both rules: every hash bare, no em
-dashes anywhere.
+### Format the final body with Hongdown
+
+Save the draft to a UTF-8 Markdown file and format it with Hongdown before
+posting. Always include `--no-line-width` to prevent hard wrapping:
+
+~~~~ bash
+hongdown --no-line-width --write REPLY_FILE
+hongdown --no-line-width --check REPLY_FILE
+~~~~
+
+Run from the repository directory so its Hongdown configuration applies. If
+repository writing rules require different formatter settings, use a
+comment-specific configuration with `--config` instead of changing repository
+or global configuration. Keep `--no-line-width` in the invocation; if an
+explicit repository rule requires wrapping, honor that higher-priority rule
+in the final body.
+
+If `hongdown` is absent from PATH or its shim cannot run, use mise:
+
+~~~~ bash
+mise x aqua:dahlia/hongdown -- hongdown --no-line-width --write REPLY_FILE
+mise x aqua:dahlia/hongdown -- hongdown --no-line-width --check REPLY_FILE
+~~~~
+
+If mise is unavailable or cannot provide Hongdown, download the latest
+platform/architecture-appropriate binary from [Hongdown's latest release],
+extract it into a temporary directory, and invoke that binary with
+`--no-line-width`. Consult the [Hongdown README] for current usage and
+configuration details. If formatting still fails, retain the draft and report
+the failure rather than posting an unformatted body.
+
+Read the formatted file before posting: verify the hashes against Step 5,
+the rendered path/glob emphasis, URL code spans, repository conventions, and
+factual claims. Any subsequent edit must go through Hongdown again. Publish
+the exact formatted file using `-F body=@REPLY_FILE` for an inline REST reply
+or `gh pr comment PR_NUMBER --body-file REPLY_FILE` for a body-only finding;
+do not reconstruct the body in a shell string.
+
+[Hongdown's latest release]: https://github.com/dahlia/hongdown/releases/latest
+[Hongdown README]: https://raw.githubusercontent.com/dahlia/hongdown/refs/heads/main/README.md
 
 
 Step 7 — Resolve the threads
