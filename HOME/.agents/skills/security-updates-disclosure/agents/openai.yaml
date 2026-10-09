@@ -1,0 +1,3 @@
+interface:
+  display_name: "Security update disclosures"
+  short_description: "Draft public security updates from published GHSAs"
