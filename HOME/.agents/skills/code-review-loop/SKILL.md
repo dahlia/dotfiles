@@ -9,7 +9,7 @@ Code Review Loop
 Three reviewers, one scope contract.
 
 The work is already done and roughly correct; this skill is the finishing pass
-that raises it to committable quality. When OpenCode is installed, a cheap
+that raises it to committable quality. When OpenCode v2 or later is installed, a cheap
 DeepSeek Flash pass catches the obvious defects first. Codex then reviews and
 you iterate with it, Claude gives the final independent read, then you commit.
 
@@ -302,14 +302,20 @@ bash "$OC_REVIEW" models
 DeepSeek's first-party API comes first because it is one hop with no proxy in
 between. OpenCode Go has had bugs of its own with DeepSeek models (dropped
 tool-call names, a second turn failing with a missing-field 400), and that is
-exactly the path a multi-round, tool-heavy review exercises. Both passed a
-resumed two-round review with tool calls on OpenCode 1.18.31, so Go is a real
-fallback, not a placeholder. Never add a legacy alias such as
+exactly the path a multi-round, tool-heavy review exercises. Use OpenCode v2 or later for both providers. Never add a legacy alias such as
 `deepseek-v4-flash` to the list: DeepSeek routes old IDs to whatever is
 current, so a pinned legacy ID records a model that did not run.
 
-If `opencode` is not installed, or neither model is configured, `models` exits
-3 with a one-line reason on stderr. Say “OpenCode pre-stage skipped: <reason>”
+Before discovery or execution, the script checks `opencode --version`. OpenCode
+below v2 is unavailable: show its `WARNING` to the user, tell them to
+upgrade to OpenCode v2 or later, and skip this pre-stage. Continue Stage A and
+Stage B. Do not upgrade software automatically or try legacy v1 commands.
+An unreadable or unrecognized version is also unavailable and needs the same
+compatibility warning. Direct `run` calls repeat this check and return
+`unavailable` (exit 30) without starting a review.
+
+If `opencode` is not installed, below v2, has an unverifiable version, or neither
+model is configured, `models` exits 3 with a reason on stderr. Say “OpenCode pre-stage skipped: <reason>”
 in one line and go straight to Stage A. That is the *unavailable* outcome, and
 it is not a failure of anything.
 
@@ -395,27 +401,40 @@ substitute your own reading and report it as OpenCode's verdict.
 ### Permissions and protected inputs
 
 The dedicated `review-loop-flash` agent denies editing tools, delegation, web
-and MCP tools. Read/glob/grep/list and Bash are allowed so the reviewer can run
+and MCP tools. Read/glob/grep and shell are allowed so the reviewer can run
 focused checks and ordinary inspection commands, including pipelines and
-`git -C`. Bash permission is intentionally broad; a prompt is not an enforcement
+`git -C`. Shell permission is intentionally broad; a prompt is not an enforcement
 boundary. The shared runner backs up and checks protected inputs around each
 attempt. `--auto` cannot override an explicit deny and is not needed here.
 
-Project config, external plugins, Claude prompts, external skills, sharing and
-auto-update remain disabled. Preflight verifies the dedicated agent and disabled
-edit/write/task/webfetch tools. Keep preflight/configuration stderr under `$WORK`
-when diagnosing a failure; do not print resolved configuration credentials.
+The runner uses v2 `agents` and ordered `permissions` rules.
+`scripts/opencode-private.py` starts an owned, authenticated loopback server and
+uses `--server` for discovery and review, with project config disabled and a private
+`OPENCODE_CONFIG_DIR`. Authentication/session storage stays in the normal data
+directory. Global custom provider settings are excluded along with extensions;
+a provider available only through those settings may be unavailable here.
+Integration policies deny external plugins, MCP servers and skills. Sharing,
+auto-update and snapshots are disabled. The helper first lists models to wait
+for plugin activation, then queries `agent.list` on that same server. V2.1.3's
+agent endpoint alone can race initialization and return an empty list. Preflight
+verifies the configured ordered permissions, allowing builtin defaults before
+them and extra denies after them; later grants fail verification. The helper
+closes only its own server. A background service does not receive per-process
+config, so do not substitute a service-backed call. Keep diagnostic output under `$WORK`;
+do not print configuration credentials.
 
-**Model evidence** comes from `opencode export <session>`: each assistant
-message records the `providerID`, `modelID`, `variant` and `agent` it ran with.
-The JSON event stream does not carry the model, which is why the script exports
-the session after every round. That record is the model OpenCode requested from
-the provider; an alias resolved on the provider's side is not visible, which is
-one more reason to keep only canonical IDs in the preference list.
+**Model evidence** comes from `opencode session export --standalone <session>`.
+Normalize the export payload with `.data // .` (v2.1.3 uses a `data` wrapper).
+V2 assistant messages have `type: "assistant"`, `model.providerID`, `model.id`,
+`model.variant`, `agent`, `content`, `finish` and `time.completed`. The script
+checks only the messages after the latest user message. The JSON event stream
+does not establish the model, which is why every round is exported. This is the
+model OpenCode requested; provider-side alias resolution remains opaque.
 
-The reviewer runs with `--variant high` on both models. OpenCode keeps each
-review session in its own session list; the script never deletes them, so
-`opencode export <session>` still works if you need to look at a round again.
+Select high effort with `--model "$OC_MODEL#high"`, not the removed `--variant`
+flag. V2 also removes `--pure` and moves `export` under `session`. OpenCode keeps
+review sessions in its session list; the script never deletes them, so
+`opencode session export --standalone <session>` remains available for inspection.
 
 ### Attribution
 

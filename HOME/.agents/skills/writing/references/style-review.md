@@ -25,7 +25,7 @@ claude_cmd=(claude)
 opencode_cmd=(opencode)
 command -v codex >/dev/null || codex_cmd=(mise x github:openai/codex -- codex)
 command -v claude >/dev/null || claude_cmd=(mise x claude -- claude)
-command -v opencode >/dev/null || opencode_cmd=(mise x opencode -- opencode)
+command -v opencode >/dev/null || opencode_cmd=(mise x opencode@2 -- opencode)
 ```
 
 `mise x` can obtain a missing executable, not credentials. If `mise` is absent,
@@ -60,7 +60,37 @@ model documentation. Never guess a model ID. Claude's moving aliases resolve
 the newest family model; record the actual ID from `modelUsage`, excluding its
 internal Haiku bookkeeping entry.
 
-For OpenCode, query `opencode models --refresh --pure` and select the latest
+Only when reaching the OpenCode candidate, check the resolved executable before
+model discovery, configuration, or execution. An installed v1 must not be
+silently replaced through `mise x`:
+
+```bash
+# Pin an installed mise shim before changing to the private review directory.
+if [ "${#opencode_cmd[@]}" = 1 ]; then
+  oc_binary=$(command -v "${opencode_cmd[0]}") || oc_binary=""
+  if [[ $oc_binary == */shims/opencode ]] && command -v mise >/dev/null; then
+    oc_binary=$(mise which opencode 2>/dev/null) || oc_binary=""
+  fi
+  opencode_cmd=("$oc_binary")
+fi
+oc_version=$("${opencode_cmd[@]}" --version 2>/dev/null) || oc_version=""
+oc_usable=false
+if [[ $oc_version =~ ^(opencode[[:space:]]+)?v?([0-9]+)\.[0-9]+\.[0-9]+([-+][[:alnum:].-]+)?$ ]]; then
+  (( 10#${BASH_REMATCH[2]} >= 2 )) && oc_usable=true
+fi
+if [ "$oc_usable" != true ]; then
+  printf 'WARNING: OpenCode v2 or later is required (found: %s). Upgrade OpenCode; skipping this reviewer.\n' "${oc_version:-unknown}" >&2
+fi
+```
+
+Surface that warning to the user outside the draft, then try the next eligible
+vendor; use self-review only under the completion rules. Do not run any further
+OpenCode commands for this attempt when `oc_usable` is false. A missing binary
+may use `mise x opencode@2`; a failed download/version probe is unavailable.
+Do not automatically upgrade an existing installation.
+
+For usable OpenCode v2, apply the isolated configuration below, then query
+`models --server @SERVER@` through the private runner below and select the latest
 DeepSeek Flash entry from connected providers, preferring DeepSeek's first-party
 API, then OpenCode Go. Currently the canonical first-party ID is
 `deepseek/deepseek-flash`; the Go entry is `opencode-go/deepseek-v4.1-flash`.
@@ -115,57 +145,98 @@ permission-blocked response clean, even when it contains the clean sentinel.
 
 ## OpenCode
 
-OpenCode accepts stdin with `run --format json`; use a dedicated tool-free
-agent and disable project configuration, extensions, and sharing. Preserve
-provider authentication. First resolve global MCP server names into disabled
-entries, without printing configuration that may contain credentials:
+OpenCode v2 accepts stdin with `run --format json`. After the version gate,
+use a dedicated agent with all tool permissions denied. Locate
+`code-review-loop/scripts/opencode-private.py` through the skill catalog and set
+`OC_PRIVATE` to its absolute path. Reuse only this transport/preflight helper;
+do not invoke the code review workflow. If it is unavailable, try the next
+eligible vendor.
+
+The helper starts an authenticated loopback server, warms plugins with
+`model.list` (no inference), validates the configured agent, runs the requested
+command on that server, then closes its own server. This avoids v2.1.3's race:
+`agent.list` can return an empty list before plugin activation finishes.
+A background service cannot receive this process's inline config. Keep these
+settings in the attempt's subshell.
 
 ```bash
-export OPENCODE_DISABLE_PROJECT_CONFIG=1
-export OPENCODE_DISABLE_CLAUDE_CODE=1
-export OPENCODE_DISABLE_EXTERNAL_SKILLS=1
-export OPENCODE_DISABLE_AUTOUPDATE=1
-export OPENCODE_DISABLE_SHARE=1
-export OPENCODE_DISABLE_LSP_DOWNLOAD=1
-(cd "$review_dir" && "${opencode_cmd[@]}" debug config --pure) \
-  2> "$review_dir/config.stderr.log" \
-  | jq -ce '(.mcp // {}) | map_values({enabled: false})' \
-  > "$review_dir/mcp-off.json"
-jq -n --slurpfile mcp "$review_dir/mcp-off.json" '{
-  share: "disabled", autoupdate: false, mcp: $mcp[0],
-  agent: {"writing-review": {
+oc_cli_json=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "${opencode_cmd[@]}")
+mkdir -p "$review_dir/config"
+export OPENCODE_CONFIG_DIR="$review_dir/config"
+export OPENCODE_CONFIG_PROJECT_DISABLE=1
+export OPENCODE_CONFIG=   # do not inherit another explicit config file
+export OPENCODE_DISABLE_FILEWATCHER=1
+export OPENCODE_DISABLE_FFF=1
+jq -n '{
+  share: "disabled", update: "disable", snapshots: false,
+  plugins: ["-opencode.config.instruction", "-opencode.config.skill"],
+  policies: [
+    {action: "integration.use", resource: "plugin:*", effect: "deny"},
+    {action: "integration.use", resource: "mcp:*", effect: "deny"},
+    {action: "integration.use", resource: "skill:*", effect: "deny"}
+  ],
+  agents: {"writing-review": {
     description: "Tool-free prose reviewer", mode: "primary",
-    permission: {"*": "deny"},
-    tools: {"*": false}
+    system: "Review the supplied prose only. Use no tools, delegation, or recursive reviews.",
+    permissions: [{action: "*", resource: "*", effect: "deny"}]
   }}
 }' > "$review_dir/opencode.json"
 export OPENCODE_CONFIG_CONTENT="$(cat "$review_dir/opencode.json")"
 ```
 
-Stop this attempt if config resolution fails. Preflight with
-`(cd "$review_dir" && "${opencode_cmd[@]}" debug agent writing-review --pure)`:
-verify the resolved agent name,
-default deny permission, and that no tool is enabled. Do not assume a custom
-agent resolved correctly. Use these environment changes only for this review
-process, not later unrelated work.
-
-Set `review_model` to the selected provider/model ID:
+Use the helper for model discovery after setup. It accepts the command array,
+including `mise x` when needed, and substitutes the private URL for `@SERVER@`:
 
 ```bash
-(cd "$review_dir" && "${opencode_cmd[@]}" run --pure \
-  --agent writing-review --model "$review_model" --variant high --format json \
-  < prompt.txt > events.jsonl 2> stderr.log)
+python3 "$OC_PRIVATE" --directory "$review_dir" \
+  --config "$review_dir/opencode.json" --agent writing-review \
+  --diagnostics "$review_dir/discovery" --cli-json "$oc_cli_json" \
+  -- models --server @SERVER@ > "$review_dir/models.txt"
 ```
 
-Require exit 0, no error or denied-tool events, a completed final step, and
-nonempty final assistant text. Any tool invocation invalidates the attempt.
-Get the session ID from the events and run
-`(cd "$review_dir" && "${opencode_cmd[@]}" export "$review_session" --pure
-> session.json)`.
-Check assistant metadata for providerID/modelID, agent and variant, errors,
-and completion. Read the final assistant text from that session. Reject
-unexpected substitutions or truncation. Event JSON alone does not establish
-the model. Do not use `--auto` to bypass denials.
+Stop this attempt on setup or preflight failure. The helper checks the primary
+agent ID and the configured ordered deny rules. It allows builtin defaults
+before those rules and additional denies afterward; later grants invalidate
+the attempt. Diagnostics stay in the private output directory.
+
+A private config directory excludes global configuration and extensions without
+moving the authentication/session database. Providers that need custom global
+settings may be unavailable. Integration policies block external plugins, MCP
+and skills; the two disabled builtin plugins prevent ambient instructions and
+skill discovery. Do not use v1 `--pure`, `debug agent`, `.tools`, or legacy
+disable environment variables as evidence of isolation.
+
+Set `review_model` to the selected provider/model ID, without a variant suffix:
+
+```bash
+python3 "$OC_PRIVATE" --directory "$review_dir" \
+  --config "$review_dir/opencode.json" --agent writing-review \
+  --diagnostics "$review_dir/review" --cli-json "$oc_cli_json" \
+  -- run --server @SERVER@ --agent writing-review \
+  --model "$review_model#high" --format json \
+  < "$review_dir/prompt.txt" > "$review_dir/events.jsonl" \
+  2> "$review_dir/stderr.log"
+```
+
+Require exit 0, valid JSONL, no error or denied-tool events, and nonempty final
+assistant text. Any tool invocation invalidates the attempt. Get the session ID
+from the events and run:
+
+```bash
+(cd "$review_dir" && "${opencode_cmd[@]}" session export --standalone \
+  "$review_session" > session.json 2> export.stderr.log)
+```
+
+Require export exit 0 and valid JSON. Normalize an export with `.data // .`:
+v2.1.3 wraps the session payload in `data`. The payload contains `info` and
+`messages`; messages use `type: "user"`/`"assistant"`, not v1 `info.role`. Inspect only the
+messages after the latest user message. Every assistant must have the requested
+`model.providerID`, `model.id`, `model.variant == "high"`,
+`agent == "writing-review"`, no `error`, and a non-null `time.completed`.
+Reject any `content` item with `type: "tool"`. The final assistant must have
+`finish == "stop"`; read its `content` items of `type: "text"`. Reject empty,
+truncated or substituted responses, even if they contain the clean sentinel.
+Event JSON alone does not establish the model. Do not use `--auto`.
 
 ## Fallback and completion
 
@@ -190,10 +261,12 @@ briefly outside the prose, including the actual reviewer and any model identity
 that could not be verified; do not append a workflow report to the draft itself.
 OpenCode retains the draft in its session storage. After export and review,
 delete only the session created for this attempt with
-`(cd "$review_dir" && "${opencode_cmd[@]}" session delete "$review_session" --pure)`
+`(cd "$review_dir" && "${opencode_cmd[@]}" session delete --standalone "$review_session")`
 when supported. If deletion is unavailable or fails, disclose the retained
 session. Never delete pre-existing sessions.
 Delete private draft, prompt, and output files when no longer needed. Keep only
 the minimum diagnostics needed for an unresolved failure and disclose their path.
 
-CLI reference: [OpenCode CLI](https://opencode.ai/docs/cli/).
+V2 references: [CLI commands](https://opencode.ai/v2/docs/cli/commands),
+[permissions](https://opencode.ai/v2/docs/permissions), and
+[configuration](https://opencode.ai/v2/docs/config).

@@ -29,41 +29,83 @@
 set -uo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 GUARD="$SCRIPT_DIR/review-guard.py"
+PRIVATE="$SCRIPT_DIR/opencode-private.py"
 
 PREFERRED_MODELS=(deepseek/deepseek-flash opencode-go/deepseek-v4.1-flash)
 AGENT=review-loop-flash
 SENTINEL="NO ACTIONABLE FINDINGS"
 # Renders an OpenCode error object as "Name [HTTP status]: message".
-ERROR_JQ='(.name // "error")
-  + (if .data.statusCode then " \(.data.statusCode)" else "" end)
+ERROR_JQ='(.type // .name // "error")
+  + (if (.status // .data.statusCode) then " \(.status // .data.statusCode)" else "" end)
   + ": " + ((.data.message // .message // .) | tostring)'
 
-# Isolate the reviewer from project and user extensions: no project
-# opencode.json or .opencode/, no Claude Code prompts or skills, no
-# external plugins (--pure), no sharing, no self-update, no LSP
-# downloads, and no optional index writes from git status.
-OC_ENV=(
-  OPENCODE_DISABLE_PROJECT_CONFIG=1
-  OPENCODE_DISABLE_CLAUDE_CODE=1
-  OPENCODE_DISABLE_EXTERNAL_SKILLS=1
-  OPENCODE_DISABLE_AUTOUPDATE=1
-  OPENCODE_DISABLE_SHARE=1
-  OPENCODE_DISABLE_LSP_DOWNLOAD=1
-  GIT_OPTIONAL_LOCKS=0
-)
+# V2 reads configuration in the server process. The private runner owns a
+# loopback server and passes --server so the user's daemon is never used.
+OC_ENV=(OPENCODE_CONFIG_PROJECT_DISABLE=1 OPENCODE_DISABLE_FILEWATCHER=1
+  OPENCODE_DISABLE_FFF=1 GIT_OPTIONAL_LOCKS=0)
 
 die() { echo "opencode-review: $*" >&2; exit 2; }
 
-cmd_models() {
+require_v2() {
+  local version
   if ! command -v opencode >/dev/null 2>&1; then
     echo "unavailable: opencode is not installed" >&2
-    exit 3
+    return 3
   fi
-  local listed found=0 m
-  listed=$(env "${OC_ENV[@]}" opencode models --pure 2>/dev/null) || {
+  OC_BIN=$(command -v opencode)
+  # A mise shim can select a different version after chdir into the repository.
+  # Resolve it now without installing/upgrading anything.
+  if [[ $OC_BIN == */shims/opencode ]] && command -v mise >/dev/null 2>&1; then
+    OC_BIN=$(mise which opencode 2>/dev/null) || OC_BIN=""
+  fi
+  version=$("$OC_BIN" --version 2>/dev/null) || version=""
+  # Accept both `2.1.3` and `opencode v2.1.3`; reject unknown/dev labels.
+  if [[ ! $version =~ ^(opencode[[:space:]]+)?v?([0-9]+)\.[0-9]+\.[0-9]+([-+][[:alnum:].-]+)?$ ]]; then
+    echo "WARNING: cannot verify OpenCode v2 compatibility ($version); upgrade to OpenCode v2 or later. Skipping OpenCode." >&2
+    return 3
+  fi
+  if (( 10#${BASH_REMATCH[2]} < 2 )); then
+    echo "WARNING: OpenCode $version is below v2; upgrade to OpenCode v2 or later. Skipping OpenCode." >&2
+    return 3
+  fi
+}
+
+# Keep saved auth/database paths, but exclude global configuration/extensions.
+# Custom providers defined only in global config are unavailable in this mode.
+prepare_env() {
+  mkdir -p -- "$WORK/config" || die "cannot create private config directory"
+  chmod 700 -- "$WORK" "$WORK/config" || die "cannot make artifact directory private"
+  OC_ENV+=(OPENCODE_CONFIG_DIR="$WORK/config" OPENCODE_CONFIG=)
+}
+
+base_config() {
+  jq -n '{
+    share: "disabled", update: "disable", snapshots: false,
+    plugins: ["-opencode.config.instruction", "-opencode.config.skill"],
+    policies: [
+      {action: "integration.use", resource: "plugin:*", effect: "deny"},
+      {action: "integration.use", resource: "mcp:*", effect: "deny"},
+      {action: "integration.use", resource: "skill:*", effect: "deny"}
+    ]
+  }'
+}
+
+cmd_models() {
+  require_v2 || exit 3
+  local listed found=0 m private
+  private=$(mktemp -d -t opencode-models.XXXXXX) || die "cannot create private directory"
+  # Model discovery needs no session and leaves no configuration behind.
+  base_config > "$private/opencode.json"
+  listed=$(timeout --kill-after=10 150 python3 "$PRIVATE" \
+    --directory "$PWD" --config "$private/opencode.json" \
+    --diagnostics "$private/discovery" \
+    --cli-json "$(jq -nc --arg cli "$OC_BIN" '[$cli]')" -- models --server @SERVER@ 2>/dev/null)
+  local result=$?
+  rm -rf -- "$private"
+  if [ "$result" != 0 ]; then
     echo "unavailable: opencode models failed" >&2
     exit 3
-  }
+  fi
   for m in "${PREFERRED_MODELS[@]}"; do
     if grep -Fxq -- "$m" <<<"$listed"; then
       echo "$m"
@@ -77,55 +119,40 @@ cmd_models() {
 }
 
 write_config() {
-  local data mcp_off
-  mkdir -p -- "$WORK" || die "cannot create artifact directory"
-  chmod 700 -- "$WORK" || die "cannot make artifact directory private"
-  data=$(env "${OC_ENV[@]}" opencode debug paths --pure 2> "$WORK/opencode-paths.err" | sed -n 's/^data  *//p')
+  local data
+  prepare_env
+  data=$("$OC_BIN" debug paths 2> "$WORK/opencode-paths.err" | sed -n 's/^data  *//p')
   [ -n "$data" ] || die "cannot resolve the OpenCode data directory"
-  # Disable every MCP server the user's global config would start.  The
-  # resolved config holds credentials, so it only ever reaches jq.
-  mcp_off=$(cd "$REPO_ROOT" && env "${OC_ENV[@]}" \
-    opencode debug config --pure 2> "$WORK/opencode-config.err" \
-    | jq -ce '(.mcp // {}) | map_values({enabled: false})') \
-    || die "cannot resolve the OpenCode configuration"
-  jq -n --arg tool_output "$data/tool-output/*" --argjson mcp "$mcp_off" '{
-    "$schema": "https://opencode.ai/config.json",
-    share: "disabled",
-    autoupdate: false,
-    mcp: $mcp,
-    agent: {
+  base_config | jq --arg tool_output "$data/tool-output/*" '. + {
+    agents: {
       "review-loop-flash": {
-        description: "Read-only first-pass code reviewer",
+        description: "First-pass code reviewer with protected inputs",
         mode: "primary",
-        permission: {
-          "*": "deny",
-          read: {"*": "allow", "*.env": "deny", "*.env.*": "deny"},
-          glob: "allow",
-          grep: "allow",
-          list: "allow",
-          todowrite: "allow",
-          external_directory: {"*": "deny", ($tool_output): "allow"},
-          bash: "allow"
-        }
+        permissions: [
+          {action: "*", resource: "*", effect: "deny"},
+          {action: "read", resource: "*", effect: "allow"},
+          {action: "read", resource: "*.env", effect: "deny"},
+          {action: "read", resource: "*.env.*", effect: "deny"},
+          {action: "glob", resource: "*", effect: "allow"},
+          {action: "grep", resource: "*", effect: "allow"},
+          {action: "external_directory", resource: "*", effect: "deny"},
+          {action: "external_directory", resource: $tool_output, effect: "allow"},
+          {action: "shell", resource: "*", effect: "allow"}
+        ]
       }
     }
   }' > "$WORK/opencode.json" || die "cannot write $WORK/opencode.json"
-  # Refuse to run unless OpenCode resolves the agent with its guard in
-  # force: an unknown or shadowed agent would run with default permissions.
-  (cd "$REPO_ROOT" && env "${OC_ENV[@]}" \
-    OPENCODE_CONFIG_CONTENT="$(cat "$WORK/opencode.json")" \
-    opencode debug agent "$AGENT" --pure 2> "$WORK/opencode-preflight.err") \
-    | jq -e --arg a "$AGENT" '.name == $a
-        and ([.permission[] | select(.permission == "*" and .pattern == "*")]
-             | last | .action) == "deny"
-        and .tools.edit == false and .tools.write == false
-        and .tools.task == false and .tools.webfetch == false' >/dev/null \
-    || die "OpenCode did not resolve the protected-input $AGENT agent"
+
 }
 
 
 cmd_run() {
   local model=${1:?model} round=${2:?round} session=${3:-}
+  if ! require_v2; then
+    echo "STATUS=unavailable MODEL=$model SESSION=${session:-unknown}"
+    echo "REASON=OpenCode v2 or later is required; skip this pre-stage"
+    exit 30
+  fi
   : "${REPO_ROOT:?REPO_ROOT is required}" "${WORK:?WORK is required}"
   [ -s "$WORK/opencode-prompt.txt" ] \
     || die "missing $WORK/opencode-prompt.txt"
@@ -134,18 +161,19 @@ cmd_run() {
   local -a resume=()
   [ -n "$session" ] && resume=(--session "$session")
   write_config
-  opencode --version > "$WORK/opencode-version.txt" 2>&1
+  "$OC_BIN" --version > "$WORK/opencode-version.txt" 2>&1
   while :; do
     prefix="$run_dir/a$attempt"
     python3 "$GUARD" --root "$REPO_ROOT" --prefix "$prefix" \
       --stdin "$WORK/opencode-prompt.txt" -- \
-      env "${OC_ENV[@]}" \
-      OPENCODE_CONFIG_CONTENT="$(cat "$WORK/opencode.json")" \
-      timeout --kill-after=10 "${OC_TIMEOUT:-900}" opencode run --pure \
-        --agent "$AGENT" --model "$model" --variant high \
+      timeout --kill-after=10 "${OC_TIMEOUT:-900}" python3 "$PRIVATE" \
+        --directory "$REPO_ROOT" --config "$WORK/opencode.json" --agent "$AGENT" \
+        --diagnostics "$prefix" \
+        --cli-json "$(jq -nc --arg cli "$OC_BIN" '[$cli]')" -- run --server @SERVER@ \
+        --agent "$AGENT" --model "$model#high" \
         --format json "${resume[@]}"
     code=$?
-    # Keep the check subcommand compatible with its existing saved fixtures.
+    # Keep saved artifacts available to the offline check subcommand.
     [ ! -f "$prefix.stdout" ] || cp "$prefix.stdout" "$prefix.jsonl"
     [ ! -f "$prefix.stderr" ] || cp "$prefix.stderr" "$prefix.err"
     if [ -f "$prefix.guard.json" ] && jq -e '.status == "mutated"' "$prefix.guard.json" >/dev/null; then
@@ -161,7 +189,8 @@ cmd_run() {
     sid=$(jq -r 'select(.sessionID != null) | .sessionID' "$prefix.jsonl" 2>/dev/null | head -1)
     [ -n "$sid" ] || sid=$session
     if [ -n "$sid" ]; then
-      (cd "$REPO_ROOT" && env "${OC_ENV[@]}" opencode export --pure "$sid") \
+      (cd "$REPO_ROOT" && env "${OC_ENV[@]}" OPENCODE_CONFIG_CONTENT="$(cat "$WORK/opencode.json")" \
+        timeout --kill-after=10 60 "$OC_BIN" session export --standalone "$sid") \
         > "$prefix.export.json" 2> "$prefix.export.err"
     fi
     (cmd_check "$prefix" "$model" "$sid") > "$prefix.status"
@@ -206,8 +235,8 @@ cmd_check() {
 
   local export="$prefix.export.json" round_json
   round_json=$(jq -c '
-      .messages as $m
-      | ([range(0; $m | length) | select($m[.].info.role == "user")]
+      (.data // .) | .messages as $m
+      | ([range(0; $m | length) | select($m[.].type == "user")]
          | last) as $u
       | if $u == null then null else $m[($u + 1):] end' \
     "$export" 2>/dev/null)
@@ -217,33 +246,37 @@ cmd_check() {
   fi
 
   local n_assistant
-  n_assistant=$(jq '[.[] | select(.info.role == "assistant")] | length' \
+  n_assistant=$(jq '[.[] | select(.type == "assistant")] | length' \
     <<<"$round_json")
   [ "$n_assistant" -gt 0 ] || add "no assistant message in this round"
 
   while IFS= read -r line; do
     [ -n "$line" ] && add "model mismatch: expected $model, got $line"
   done < <(jq -r --arg p "$provider" --arg id "$model_id" --arg a "$AGENT" '
-      .[] | select(.info.role == "assistant")
-      | select(.info.providerID != $p or .info.modelID != $id
-               or .info.variant != "high" or .info.agent != $a)
-      | "\(.info.providerID)/\(.info.modelID) variant=\(.info.variant)"
-        + " agent=\(.info.agent)"' <<<"$round_json" | sort -u)
+      .[] | select(.type == "assistant")
+      | select(.model.providerID != $p or .model.id != $id
+               or .model.variant != "high" or .agent != $a)
+      | "\(.model.providerID)/\(.model.id) variant=\(.model.variant)"
+        + " agent=\(.agent)"' <<<"$round_json" | sort -u)
 
   while IFS= read -r line; do
     [ -n "$line" ] && add "assistant error: $line"
-  done < <(jq -r ".[] | select(.info.role == \"assistant\" and .info.error)
-      | .info.error | $ERROR_JQ" <<<"$round_json")
+  done < <(jq -r ".[] | select(.type == \"assistant\" and .error)
+      | .error | $ERROR_JQ" <<<"$round_json")
+
+  if ! jq -e 'all(.[] | select(.type == "assistant"); .time.completed != null)' <<<"$round_json" >/dev/null; then
+    add "assistant message is incomplete"
+  fi
 
   local finish
-  finish=$(jq -r '[.[] | select(.info.role == "assistant")] | last
-      | .info.finish // "none"' <<<"$round_json")
+  finish=$(jq -r '[.[] | select(.type == "assistant")] | last
+      | .finish // "none"' <<<"$round_json")
   if [ "$n_assistant" -gt 0 ] && [ "$finish" != stop ]; then
     add "final step finished with '$finish', not 'stop'"
   fi
 
-  jq -r '[.[] | select(.info.role == "assistant")] | last
-      | [(.parts // [])[] | select(.type == "text") | .text] | join("\n")' \
+  jq -r '[.[] | select(.type == "assistant")] | last
+      | [(.content // [])[] | select(.type == "text") | .text] | join("\n")' \
     <<<"$round_json" > "$prefix.review.txt"
   local text
   text=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
@@ -252,11 +285,11 @@ cmd_check() {
     add "empty final answer (reasoning-only or truncated reply)"
   fi
 
-  denied=$(jq -r '.[] | select(.info.role == "assistant") | .parts[]
+  denied=$(jq -r '.[] | select(.type == "assistant") | .content[]
       | select(.type == "tool" and .state.status == "error")
-      | select((.state.error // "")
+      | select(((.state.error // "") | tostring)
           | test("rule which prevents|permission|denied"; "i"))
-      | "DENIED=\(.tool): \((.state.input.command // .state.input.filePath
+      | "DENIED=\(.name): \((.state.input.command // .state.input.filePath
           // .state.input.pattern // .state.input.path // "") | tostring)"' \
     <<<"$round_json")
 

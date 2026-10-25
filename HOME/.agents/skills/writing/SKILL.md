@@ -185,6 +185,13 @@ Codex, then Claude Code. If the author vendor is unknown, choose an available
 reviewer and disclose that cross-vendor independence could not be established.
 A different CLI running the author's model is not a cross-vendor review.
 
+OpenCode requires v2 or later. Before using it, check `opencode --version`.
+If it is below v2, warn the user to upgrade to OpenCode v2 or later and skip
+that candidate; try the next eligible vendor. Do not run v1 commands or upgrade
+the installation automatically. Treat an unreadable version as unavailable and
+warn that v2 compatibility could not be verified. If no eligible vendor remains,
+use the self-review/unmet-gate rules below.
+
 Read [references/style-review.md](references/style-review.md) for CLI commands,
 quota-aware model selection, `mise x` execution when a CLI is missing, output
 validation, and vendor fallbacks. This is a prose review, not the code review
