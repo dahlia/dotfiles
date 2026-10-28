@@ -128,3 +128,30 @@ opencode run --standalone \
   --auto \
   < <followup-prompt-file> > <events.jsonl> 2> <stderr.log>
 ~~~~
+
+
+Execution postures used by `scripts/run.py`
+--------------------------------------------
+
+Read-only execution writes `OPENCODE_CONFIG_CONTENT` with ordered `permissions`
+that deny edit/write/patch and, by default, shell/bash. Two postures extend it:
+
+ -  `--allow-shell`: adds `{"action":"shell","effect":"allow"}` and the same
+    for `bash`, and injects a dedicated `review-shell` agent with ordered
+    permissions (deny all, allow read/glob/grep/shell, deny `.env` reads and
+    external directories). A builtin agent can carry its own restrictions, so
+    the dedicated agent is what actually makes shell available. Editing tools
+    stay denied.
+ -  `--isolate`: disables `share`, `update`, and `snapshots`, adds the
+    `-opencode.config.instruction` and `-opencode.config.skill` plugins, and
+    denies `plugin:*`, `mcp:*`, and `skill:*` integration use.
+OpenCode v1 has no per-agent configuration, so `--no-tools` and `--allow-shell`
+are rejected on v1 with a permission error instead of reporting enforcement
+that was never established.
+
+ -  `--no-tools`: implies `--isolate`, denies `webfetch` too, and injects a
+    dedicated `tools-off` primary agent whose only permission rule denies
+    everything. `run.py` selects it with `--agent tools-off` instead of the
+    builtin `plan` agent, and verifies the agent and permission list before
+    execution. This is the only OpenCode posture where "no tool call" is
+    enforced by configuration rather than by prompt.

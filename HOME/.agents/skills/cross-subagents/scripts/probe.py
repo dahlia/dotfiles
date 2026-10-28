@@ -108,6 +108,7 @@ def cache_cli_help_and_recipe(agent: str, binary: str, version: str | None) -> d
             "has_skip_git_repo_check": "--skip-git-repo-check" in all_help or not all_help,
             "has_json": "--json" in all_help or not all_help,
             "has_dangerously_bypass": "--dangerously-bypass-approvals-and-sandbox" in all_help or not all_help,
+            "has_ignore_rules": "--ignore-rules" in all_help or not all_help,
         }
     elif agent == "claude-code":
         flags = {
@@ -119,6 +120,8 @@ def cache_cli_help_and_recipe(agent: str, binary: str, version: str | None) -> d
             "has_allowed_tools": "--allowedTools" in all_help or "--allowed-tools" in all_help or not all_help,
             "has_disallowed_tools": "--disallowedTools" in all_help or "--disallowed-tools" in all_help or not all_help,
             "has_dangerously_skip_permissions": "--dangerously-skip-permissions" in all_help or not all_help,
+            "has_safe_mode": "--safe-mode" in all_help or not all_help,
+            "has_strict_mcp_config": "--strict-mcp-config" in all_help or not all_help,
         }
     elif agent == "opencode":
         flags = {

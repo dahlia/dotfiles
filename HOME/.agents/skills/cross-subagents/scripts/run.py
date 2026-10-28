@@ -13,6 +13,12 @@ Features:
     with effective working-directory persistence and caller override precedence.
   - Integrates versioned CLI recipes (`recipes.json`) with one bounded adapted retry on
     `no_option`/`format` errors, and failure-specific cross-bucket/same-bucket fallback routing.
+  - Applies explicit execution postures: `--no-tools` (tool-free, enforced by Claude Code and
+    OpenCode), `--allow-shell` (read-only plus shell for tests), and `--isolate` (no ambient
+    hooks, instructions, MCP, or execpolicy rules). `meta.json` records `tool_policy` and
+    `tools_enforced`.
+  - Offers an opt-in protected-input guard (`--guard`) that hashes the working tree and Git
+    state before the attempt and fails the task when they changed.
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from typing import Any
 
 from common import (
@@ -53,6 +60,7 @@ from common import (
     validate_official_model_id,
     validate_safe_identifier,
 )
+from guard import snapshot as guard_snapshot, verify as guard_verify
 from models import collect_all_models, repair_codex_models, resolve_official_model_id
 from probe import cache_cli_help_and_recipe, get_agent_recipe, parse_semver, probe_all, strip_ansi
 from quota import collect_quota, record_quota_observation
@@ -70,6 +78,75 @@ DEFAULT_QUEUE_TIMEOUT_SECONDS = 300
 HEARTBEAT_INTERVAL_SECONDS = 30.0
 COST_GATE_MAX_CALLS = 5
 COST_GATE_MAX_COST_INDEX = 1.5
+# A terminal finish reason that means the final assistant message is complete.
+# Anything else (`length`, `tool-calls`, `content-filter`, unknown) is truncated.
+OPENCODE_SUCCESS_FINISH = frozenset({"stop", "end_turn", "completed", "finish", "done"})
+
+
+def _epoch_ms(value: Any) -> int | None:
+    """Normalize a second- or millisecond-epoch timestamp to milliseconds."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    return int(number * 1000) if number < 10**12 else int(number)
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    """Extract visible text from a session-export message in either v1 or v2 shape."""
+    chunks: list[str] = []
+    for item in message.get("parts") or message.get("content") or []:
+        if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+            chunks.append(str(item["text"]))
+    if not chunks:
+        for key in ("text", "content"):
+            value = message.get(key)
+            if isinstance(value, str) and value:
+                chunks.append(value)
+    return "".join(chunks)
+
+
+def _tool_denial(part: dict[str, Any]) -> str | None:
+    """Return a denial description when a tool part reports a permission failure."""
+    state = part.get("state") if isinstance(part.get("state"), dict) else {}
+    state_meta = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+    outputs = [
+        part.get("error"),
+        part.get("output"),
+        part.get("aggregated_output"),
+        state.get("error"),
+        state.get("output"),
+        state_meta.get("error"),
+        state_meta.get("output"),
+    ]
+    detail = " ".join(str(value) for value in outputs if value)
+    text = detail.lower()
+    status = str(state.get("status") or part.get("status") or "").lower()
+    exit_code = part.get("exit_code")
+    if exit_code is None:
+        exit_code = state.get("exit_code")
+    if exit_code is None:
+        exit_code = state_meta.get("exit")
+    failed = status in ("error", "failed") or exit_code not in (None, 0, "0")
+    tool = part.get("tool") or part.get("name") or part.get("command") or "tool"
+    if status in ("denied", "declined"):
+        return f"{tool}: denied"
+    if failed and any(
+        key in text
+        for key in (
+            "permission",
+            "denied",
+            "not allowed",
+            "forbidden",
+            "operation not permitted",
+            "eperm",
+            "eacces",
+        )
+    ):
+        return f"{tool}: {detail[:160]}"
+    return None
 
 
 def get_run_dir(run_id: str) -> Path:
@@ -132,7 +209,7 @@ def classify_failure(exit_code: int, stdout_text: str, stderr_text: str, timed_o
     if exit_code == 127:
         return "not_installed"
     combined = f"{stdout_text}\n{stderr_text}".lower()
-    if any(
+    rate_limited = any(
         k in combined
         for k in (
             "rate limit",
@@ -145,7 +222,51 @@ def classify_failure(exit_code: int, stdout_text: str, stderr_text: str, timed_o
             "credit balance is too low",
             "hit your limit",
         )
+    )
+    # Explicit exhaustion markers win over retry hints: a daily quota reset
+    # (`retry-after: 86400`) is exhausted, not a temporary throttle.
+    if rate_limited and any(
+        k in combined
+        for k in (
+            "insufficient_quota",
+            "exceeded your current quota",
+            "usage limit reached",
+            "credit balance is too low",
+            "hit your limit",
+            "quota exceeded",
+        )
     ):
+        return "quota"
+    # Request/token throttling is temporary even when the provider does not
+    # spell out "retry after". Exhaustion markers above still win.
+    if any(
+        k in combined
+        for k in (
+            "rate_limit_exceeded",
+            "tokens per min",
+            "requests per min",
+            "tokens/min",
+            "requests/min",
+            "tpm limit",
+            "rpm limit",
+        )
+    ) or re.search(r"\b(tpm|rpm)\b", combined):
+        return "transient"
+    # A temporary throttle carries a retry hint; account exhaustion does not.
+    if rate_limited and any(
+        k in combined
+        for k in ("retry-after", "retry after", "try again", "temporarily", "overloaded", "please wait")
+    ):
+        return "transient"
+    if (
+        any(
+            k in combined
+            for k in ("overloaded", "service unavailable", "bad gateway", "gateway timeout")
+        )
+        or re.search(r"\b(502|503|504)\b", combined)
+    ):
+        return "transient"
+    if rate_limited:
         return "quota"
     if any(
         k in combined
@@ -182,6 +303,8 @@ def classify_failure(exit_code: int, stdout_text: str, stderr_text: str, timed_o
             "invalid model",
             "does not exist or you do not have access",
             "unsupported model",
+            "model_not_supported",
+            "model is not supported",
         )
     ):
         return "model_unavailable"
@@ -244,9 +367,11 @@ def _verify_model_match(
     if "#" in req_mod:
         req_mod, parsed_req_var = req_mod.split("#", 1)
         req_var = req_var or parsed_req_var
-    if "/" in req_mod:
+    if req_prov is None and "/" in req_mod:
+        # Without an explicit provider, a leading segment is provider syntax.
+        # With one, a slash is part of a namespaced model ID (e.g. OpenRouter).
         parsed_req_prov, req_mod = req_mod.split("/", 1)
-        req_prov = req_prov or parsed_req_prov
+        req_prov = parsed_req_prov
 
     if obs_prov and req_prov and obs_prov != req_prov:
         return False
@@ -260,6 +385,31 @@ def _verify_model_match(
     norm_req = _strip_date_and_normalize(req_mod)
     norm_canon = _strip_date_and_normalize(canonical_key)
     return norm_obs == norm_req or (norm_req == norm_canon and norm_obs == norm_canon)
+
+
+def _model_identity(model: str) -> tuple[str | None, str, str | None]:
+    """Split `provider/model#variant` into comparable components."""
+    raw = model.strip().lower()
+    variant: str | None = None
+    provider: str | None = None
+    if "#" in raw:
+        raw, variant = raw.split("#", 1)
+    if "/" in raw:
+        provider, raw = raw.split("/", 1)
+    return provider, raw, variant
+
+
+def _models_compatible(models: list[str]) -> bool:
+    """True when every observation names the same model/provider/variant.
+
+    A missing provider or variant does not conflict with an otherwise identical
+    observation; two different explicit values do.
+    """
+    identities = [_model_identity(model) for model in models if model]
+    names = {name for _provider, name, _variant in identities}
+    providers = {provider for provider, _name, _variant in identities if provider}
+    variants = {variant for _provider, _name, variant in identities if variant}
+    return len(names) <= 1 and len(providers) <= 1 and len(variants) <= 1
 
 
 def run_process_with_timeout(
@@ -291,10 +441,12 @@ def run_process_with_timeout(
     proc = subprocess.Popen(cmd, **kwargs)
     timed_out = False
     cleanup_verified = True
+    pipes_ok = True
     try:
         stdout_data, stderr_data = proc.communicate(input=stdin_text, timeout=timeout_sec)
     except subprocess.TimeoutExpired:
         timed_out = True
+        killed = True
         if os.name != "nt":
             pgid = proc.pid
             try:
@@ -307,14 +459,6 @@ def run_process_with_timeout(
             except OSError:
                 pass
             time.sleep(0.2)
-            # Verify entire process group is gone
-            try:
-                os.killpg(pgid, 0)
-                cleanup_verified = False
-            except ProcessLookupError:
-                cleanup_verified = True
-            except PermissionError:
-                cleanup_verified = False
         else:
             tk_ok = False
             try:
@@ -333,25 +477,44 @@ def run_process_with_timeout(
                 except Exception:
                     pass
             time.sleep(0.2)
-            cleanup_verified = tk_ok and not is_pid_alive(proc.pid)
+            killed = tk_ok
 
         try:
             stdout_data, stderr_data = proc.communicate(timeout=3)
         except Exception:
-            # If final pipe drain times out or fails, a descendant process may still hold stdio pipes open
+            # A descendant may still hold the stdio pipes open.
             stdout_data, stderr_data = "", ""
-            cleanup_verified = False
+            pipes_ok = False
 
+        # Recompute from the final state. The leader has been reaped here, so
+        # a successful group probe means no descendant survived; an earlier
+        # probe that saw the unreaped leader is no longer evidence of failure.
+        if os.name != "nt":
+            try:
+                os.killpg(proc.pid, 0)
+                group_gone = False
+            except ProcessLookupError:
+                group_gone = True
+            except PermissionError:
+                group_gone = False
+            cleanup_verified = group_gone and pipes_ok
+        else:
+            cleanup_verified = pipes_ok and killed and not is_pid_alive(proc.pid)
+    else:
+        # A normal exit can still leave a background descendant in the same
+        # process group. Check the group before treating cleanup as verified.
         if os.name != "nt":
             try:
                 os.killpg(proc.pid, 0)
                 cleanup_verified = False
             except ProcessLookupError:
-                pass
+                cleanup_verified = True
             except PermissionError:
                 cleanup_verified = False
-        elif is_pid_alive(proc.pid):
-            cleanup_verified = False
+        else:
+            # Windows has no process-group probe without a Job Object; guarded
+            # execution is rejected before launch there.
+            cleanup_verified = not is_pid_alive(proc.pid)
 
     return (
         proc.returncode if proc.returncode is not None else -1,
@@ -377,7 +540,9 @@ def invoke_codex(
     recipe_flags: dict[str, Any] | None = None,
     allow_gh: bool = False,
     allow_network: bool = False,
+    policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    policy = policy or {}
     result_file = attempt_dir / "result.md"
     if result_file.exists():
         result_file.unlink()
@@ -385,6 +550,14 @@ def invoke_codex(
     stderr_file = attempt_dir / "stderr.log"
 
     flags = recipe_flags if recipe_flags is not None else get_agent_recipe("codex")
+    if policy.get("no_tools"):
+        prompt_text = apply_tool_free_instruction(prompt_text, policy)
+        print(
+            "WARNING: Codex has no CLI switch that disables tools. The tool-free posture is "
+            "enforced by prompt instruction and the read-only sandbox only; meta.json records "
+            "tools_enforced=false. Use Claude Code or OpenCode when tool use must be impossible.",
+            file=sys.stderr,
+        )
     model_id = route.get("resolved_model_id") or route["model_id"]
     eff = effort or route.get("variant")
     cmd: list[str] = [binary]
@@ -400,6 +573,8 @@ def invoke_codex(
 
     if flags.get("has_skip_git_repo_check", True):
         cmd.append("--skip-git-repo-check")
+    if policy.get("isolate") and flags.get("has_ignore_rules", True):
+        cmd.append("--ignore-rules")
     if flags.get("has_json", True):
         cmd.append("--json")
     cmd.extend(["-m", model_id])
@@ -439,6 +614,8 @@ def invoke_codex(
     usage = {"input_tokens": 0, "output_tokens": 0}
     last_agent_msg = ""
     stream_errors: list[str] = []
+    permission_denials: list[str] = []
+    stream_models: list[str] = []
     saw_turn_completed = False
     observed_model: str | None = None
 
@@ -451,8 +628,10 @@ def invoke_codex(
         except Exception:
             continue
         ev_type = ev.get("type")
-        if ev.get("model") and not observed_model:
-            observed_model = str(ev["model"])
+        if ev.get("model"):
+            stream_models.append(str(ev["model"]))
+            if not observed_model:
+                observed_model = str(ev["model"])
         if ev_type == "thread.started" and ev.get("thread_id"):
             session_id = ev["thread_id"]
         elif ev_type == "turn.completed":
@@ -465,8 +644,17 @@ def invoke_codex(
             item = ev.get("item") or {}
             if item.get("type") == "agent_message" and item.get("text"):
                 last_agent_msg = item["text"]
+            elif item.get("type") in ("command_execution", "mcp_tool_call", "tool_call"):
+                denial = _tool_denial(item if isinstance(item, dict) else {})
+                if denial:
+                    permission_denials.append(denial)
         elif ev_type in ("error", "turn.failed"):
             stream_errors.append(json.dumps(ev))
+
+    if stream_models and not _models_compatible(stream_models):
+        stream_errors.append(
+            "model changed within the stream: " + ", ".join(sorted(set(stream_models)))
+        )
 
     if saw_turn_completed and (not result_file.is_file() or not result_file.read_text(encoding="utf-8").strip()) and last_agent_msg:
         result_file.write_text(last_agent_msg.strip() + "\n", encoding="utf-8")
@@ -486,6 +674,7 @@ def invoke_codex(
             "observed_model": observed_model,
             "session_cleaned_up": ephemeral_used,
             "cleanup_verified": cleanup_verified,
+            "permission_denials": permission_denials,
             "error_class": "timeout",
             "error": "Execution timed out.",
         }
@@ -501,13 +690,16 @@ def invoke_codex(
             "observed_model": observed_model,
             "session_cleaned_up": ephemeral_used,
             "cleanup_verified": cleanup_verified,
+            "permission_denials": permission_denials,
             "error_class": "model_unavailable",
             "error": f"Model substitution detected: requested '{model_id}', observed '{observed_model}'.",
         }
 
-    if code != 0 or stream_errors or not saw_turn_completed or not final_text:
+    if code != 0 or stream_errors or permission_denials or not saw_turn_completed or not final_text:
         err_class = classify_failure(code, out, err_combined, timed_out=False)
-        if code == 0 and not stream_errors and (not saw_turn_completed or not final_text):
+        if permission_denials:
+            err_class = "permission"
+        elif code == 0 and not stream_errors and (not saw_turn_completed or not final_text):
             err_class = "format"
         return {
             "status": "quota" if err_class == "quota" else "failed",
@@ -519,6 +711,7 @@ def invoke_codex(
             "observed_model": observed_model,
             "session_cleaned_up": ephemeral_used,
             "cleanup_verified": cleanup_verified,
+            "permission_denials": permission_denials,
             "error_class": err_class,
             "error": err_combined.strip()[:500]
             or ("Codex stream ended before turn.completed." if not saw_turn_completed else "Empty result from Codex."),
@@ -534,8 +727,104 @@ def invoke_codex(
         "observed_model": observed_model,
         "session_cleaned_up": ephemeral_used,
         "cleanup_verified": cleanup_verified,
+        "permission_denials": permission_denials,
         "error_class": None,
     }
+
+
+TOOL_FREE_INSTRUCTION = (
+    "Tool-free task: do not run shell commands, read files, fetch URLs, or spawn subagents. "
+    "Answer only from the instruction and material in this prompt.\n\n"
+)
+
+
+def apply_tool_free_instruction(prompt_text: str, policy: dict[str, Any] | None) -> str:
+    """Prepend the prompt-only tool-free rule for CLIs that cannot deny tools."""
+    if (policy or {}).get("no_tools"):
+        return TOOL_FREE_INSTRUCTION + prompt_text
+    return prompt_text
+
+
+def tools_enforcement(
+    agent: str, policy: dict[str, Any] | None, status: str = "ok"
+) -> bool | None:
+    """Report whether the CLI actually prevented tool use.
+
+    `None` means a tool-free posture was not requested, or the attempt did not
+    complete so enforcement cannot be confirmed. Claude Code and OpenCode can
+    deny every tool; Codex and Antigravity can only be told not to use them in
+    the prompt, so they report `False` and the caller decides whether that is
+    acceptable.
+    """
+    if not (policy or {}).get("no_tools"):
+        return None
+    if agent not in ("claude-code", "opencode"):
+        return False
+    return True if status == "ok" else None
+
+
+def claude_read_only_tool_args(
+    flags: dict[str, Any],
+    *,
+    no_tools: bool = False,
+    allow_shell: bool = False,
+    allow_gh: bool = False,
+    allow_network: bool = False,
+    isolate: bool = False,
+) -> list[str]:
+    """Build the Claude Code read-only tool/permission arguments.
+
+    `no_tools` is the tool-free posture used for prose review: no tool may run.
+    `allow_shell` permits shell commands (inspection and focused tests) while
+    edit/write/notebook tools stay denied. `isolate` adds safe mode and strict
+    MCP isolation so hooks, project instructions, and MCP servers cannot change
+    the reviewer's behavior.
+    """
+    args: list[str] = []
+    if flags.get("has_permission_mode", True):
+        args.extend(["--permission-mode", "dontAsk"])
+    if flags.get("has_permission_prompts", True):
+        args.extend(["--permission-prompts", "none"])
+    if isolate or no_tools:
+        if flags.get("has_safe_mode", True):
+            args.append("--safe-mode")
+        if flags.get("has_strict_mcp_config", True):
+            args.append("--strict-mcp-config")
+
+    disallowed = ["Edit", "Write", "NotebookEdit"]
+    shell_allowed = (allow_shell or allow_gh) and not no_tools
+    if no_tools:
+        tools: list[str] = []
+    else:
+        tools = ["Read", "Grep", "Glob"]
+        if allow_network:
+            tools.extend(["WebFetch", "WebSearch"])
+        if shell_allowed:
+            tools.append("Bash")
+    if not shell_allowed:
+        disallowed.append("Bash")
+
+    args.extend(["--tools", ",".join(tools), "--disallowedTools", ",".join(disallowed)])
+    if not no_tools and shell_allowed and flags.get("has_allowed_tools", True):
+        allowed_specs = ["Read", "Grep", "Glob"]
+        if allow_network:
+            allowed_specs.extend(["WebFetch", "WebSearch"])
+        if allow_shell:
+            allowed_specs.append("Bash(*)")
+        if allow_gh:
+            allowed_specs.extend(
+                [
+                    "Bash(gh issue view:*)",
+                    "Bash(gh issue list:*)",
+                    "Bash(gh pr view:*)",
+                    "Bash(gh pr diff:*)",
+                    "Bash(gh pr list:*)",
+                    "Bash(gh search:*)",
+                    "Bash(gh repo view:*)",
+                ]
+            )
+        args.extend(["--allowedTools", ",".join(allowed_specs)])
+    return args
 
 
 def invoke_claude_code(
@@ -553,7 +842,9 @@ def invoke_claude_code(
     recipe_flags: dict[str, Any] | None = None,
     allow_gh: bool = False,
     allow_network: bool = False,
+    policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    policy = policy or {}
     result_file = attempt_dir / "result.md"
     if result_file.exists():
         result_file.unlink()
@@ -590,34 +881,16 @@ def invoke_claude_code(
                 "error_class": "permission",
                 "error": "Installed Claude Code CLI does not support --tools/--disallowedTools required for read-only enforcement.",
             }
-        if flags.get("has_permission_mode", True):
-            cmd.extend(["--permission-mode", "dontAsk"])
-        if flags.get("has_permission_prompts", True):
-            cmd.extend(["--permission-prompts", "none"])
-        ro_tools = ["Read", "Grep", "Glob"]
-        if allow_network:
-            ro_tools.extend(["WebFetch", "WebSearch"])
-        if allow_gh:
-            ro_tools.append("Bash")
-        disallowed = ["Edit", "Write", "NotebookEdit"]
-        if not allow_gh:
-            disallowed.append("Bash")
-        cmd.extend(["--tools", ",".join(ro_tools), "--disallowedTools", ",".join(disallowed)])
-        if (allow_gh or allow_network) and flags.get("has_allowed_tools", True):
-            allowed_specs = ["Read", "Grep", "Glob"]
-            if allow_network:
-                allowed_specs.extend(["WebFetch", "WebSearch"])
-            if allow_gh:
-                allowed_specs.extend([
-                    "Bash(gh issue view:*)",
-                    "Bash(gh issue list:*)",
-                    "Bash(gh pr view:*)",
-                    "Bash(gh pr diff:*)",
-                    "Bash(gh pr list:*)",
-                    "Bash(gh search:*)",
-                    "Bash(gh repo view:*)",
-                ])
-            cmd.extend(["--allowedTools", ",".join(allowed_specs)])
+        cmd.extend(
+            claude_read_only_tool_args(
+                flags,
+                no_tools=bool(policy.get("no_tools")),
+                allow_shell=bool(policy.get("allow_shell")),
+                allow_gh=allow_gh,
+                allow_network=allow_network,
+                isolate=bool(policy.get("isolate")),
+            )
+        )
     elif sandbox_mode == "workspace-write":
         if flags.get("has_permission_mode", True):
             cmd.extend(["--permission-mode", "acceptEdits"])
@@ -673,6 +946,44 @@ def invoke_claude_code(
         observed_primary = non_haiku[0] if non_haiku else (observed_models[0] if observed_models else None)
     else:
         observed_primary = observed_models[0] if observed_models else None
+
+    # modelUsage can list more than the answering model; reject any unexpected
+    # non-bookkeeping entry rather than trusting only the first. For a Haiku
+    # request, Haiku entries are the bookkeeping exception, not the answer.
+    if "haiku" in route_key:
+        mismatched = [model for model in observed_models if "haiku" not in model.lower()]
+    else:
+        mismatched = [
+            model
+            for model in observed_models
+            if "haiku" not in model.lower()
+            and not _verify_model_match(
+                resolved_model,
+                route["canonical_key"],
+                model,
+                expected_provider=route.get("provider"),
+                expected_variant=eff,
+            )
+        ]
+    if mismatched:
+            return {
+                "status": "failed",
+                "exit_code": code or 1,
+                "session_id": session_id,
+                "usage": usage,
+                "requested_model": requested_model,
+                "resolved_model": resolved_model,
+                "observed_model": observed_primary,
+                "observed_models": observed_models,
+                "permission_denials": permission_denials,
+                "session_cleaned_up": no_persist,
+                "cleanup_verified": cleanup_verified,
+                "error_class": "model_unavailable",
+                "error": (
+                    f"Claude reported unexpected model(s): {', '.join(mismatched)}; "
+                    f"requested '{resolved_model}'."
+                ),
+            }
 
     if timed_out:
         return {
@@ -754,6 +1065,124 @@ def invoke_claude_code(
     }
 
 
+def opencode_read_only_config(
+    existing_cfg: dict[str, Any],
+    *,
+    major_ver: int,
+    no_tools: bool = False,
+    allow_shell: bool = False,
+    allow_network: bool = False,
+    isolate: bool = False,
+) -> tuple[dict[str, Any], bool]:
+    """Apply and verify the OpenCode read-only permission config for one attempt."""
+    cfg = dict(existing_cfg or {})
+    shell_allowed = allow_shell and not no_tools
+    net_allowed = allow_network and not no_tools
+
+    if major_ver == 1:
+        # v1 has no per-agent configuration, so neither a tool-free posture nor
+        # the dedicated shell-review agent can be established.
+        if no_tools or allow_shell:
+            return cfg, False
+        cfg.pop("permissions", None)
+        cfg["permission"] = {
+            "edit": "deny",
+            "bash": "allow" if shell_allowed else "deny",
+            "write": "deny",
+            "patch": "deny",
+            "webfetch": "allow" if net_allowed else "deny",
+        }
+        perm = cfg["permission"]
+        verified = all(perm.get(key) == "deny" for key in ("edit", "write", "patch")) and (
+            perm.get("bash") == ("allow" if shell_allowed else "deny")
+        )
+        return cfg, verified
+
+    cfg.pop("permission", None)
+    perm_rules: list[dict[str, str]] = [
+        {"action": "edit", "resource": "*", "effect": "deny"},
+        {"action": "write", "resource": "*", "effect": "deny"},
+        {"action": "patch", "resource": "*", "effect": "deny"},
+    ]
+    if shell_allowed:
+        perm_rules.extend(
+            [
+                {"action": "shell", "resource": "*", "effect": "allow"},
+                {"action": "bash", "resource": "*", "effect": "allow"},
+            ]
+        )
+    else:
+        perm_rules.extend(
+            [
+                {"action": "shell", "resource": "*", "effect": "deny"},
+                {"action": "bash", "resource": "*", "effect": "deny"},
+            ]
+        )
+    if net_allowed:
+        perm_rules.append({"action": "webfetch", "resource": "*", "effect": "allow"})
+    elif no_tools:
+        perm_rules.append({"action": "webfetch", "resource": "*", "effect": "deny"})
+    cfg["permissions"] = perm_rules
+
+    if isolate or no_tools:
+        cfg["share"] = "disabled"
+        cfg["update"] = "disable"
+        cfg["snapshots"] = False
+        plugins = [p for p in (cfg.get("plugins") or []) if isinstance(p, str)]
+        for plugin in ("-opencode.config.instruction", "-opencode.config.skill"):
+            if plugin not in plugins:
+                plugins.append(plugin)
+        cfg["plugins"] = plugins
+        policies = [p for p in (cfg.get("policies") or []) if isinstance(p, dict)]
+        for resource in ("plugin:*", "mcp:*", "skill:*"):
+            entry = {"action": "integration.use", "resource": resource, "effect": "deny"}
+            if entry not in policies:
+                policies.append(entry)
+        cfg["policies"] = policies
+
+    agents = cfg.get("agents") if isinstance(cfg.get("agents"), dict) else {}
+    if no_tools:
+        agents["tools-off"] = {
+            "description": "Tool-free subagent",
+            "mode": "primary",
+            "system": "Answer from the supplied prompt only. Do not use tools, delegation, or recursive reviews.",
+            "permissions": [{"action": "*", "resource": "*", "effect": "deny"}],
+        }
+        cfg["agents"] = agents
+    elif shell_allowed:
+        # A builtin agent can carry its own restrictions, so an ordered
+        # permission list on a dedicated agent is what actually permits shell.
+        shell_permissions = [
+            {"action": "*", "resource": "*", "effect": "deny"},
+            {"action": "read", "resource": "*", "effect": "allow"},
+            {"action": "read", "resource": "*.env", "effect": "deny"},
+            {"action": "read", "resource": "*.env.*", "effect": "deny"},
+            {"action": "glob", "resource": "*", "effect": "allow"},
+            {"action": "grep", "resource": "*", "effect": "allow"},
+            {"action": "external_directory", "resource": "*", "effect": "deny"},
+            {"action": "shell", "resource": "*", "effect": "allow"},
+        ]
+        if net_allowed:
+            shell_permissions.append({"action": "webfetch", "resource": "*", "effect": "allow"})
+        agents["review-shell"] = {
+            "description": "Read-only reviewer permitted to run shell commands",
+            "mode": "primary",
+            "permissions": shell_permissions,
+        }
+        cfg["agents"] = agents
+
+    required = {"edit", "write", "patch"}
+    denied = {rule["action"] for rule in perm_rules if rule.get("effect") == "deny"}
+    verified = required.issubset(denied) and (
+        ("shell" in denied and "bash" in denied) if not shell_allowed else True
+    )
+    if no_tools:
+        verified = verified and isinstance(cfg.get("agents"), dict) and "tools-off" in cfg["agents"]
+    elif shell_allowed:
+        verified = verified and isinstance(cfg.get("agents"), dict) and "review-shell" in cfg["agents"]
+    return cfg, verified
+
+
 def invoke_opencode(
     binary: str,
     route: dict[str, Any],
@@ -769,7 +1198,9 @@ def invoke_opencode(
     recipe_flags: dict[str, Any] | None = None,
     allow_gh: bool = False,
     allow_network: bool = False,
+    policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    policy = policy or {}
     result_file = attempt_dir / "result.md"
     if result_file.exists():
         result_file.unlink()
@@ -798,11 +1229,19 @@ def invoke_opencode(
         cmd.extend(["--format", "json"])
 
     if sandbox_mode == "read-only":
-        ver_str = str(flags.get("version") or "")
-        ver_tuple = parse_semver(ver_str)
-        major_ver = ver_tuple[0] if ver_tuple is not None else 2
+        major_flag = flags.get("cli_major")
+        if isinstance(major_flag, int) and not isinstance(major_flag, bool):
+            major_ver = major_flag
+        else:
+            ver_tuple = parse_semver(str(flags.get("version") or ""))
+            major_ver = ver_tuple[0] if ver_tuple is not None else 2
 
-        if major_ver >= 2 and not has_agent_flag and flags.get("read_only_supported") is False:
+        # `--no-tools` and `--allow-shell` depend on a dedicated agent; without
+        # agent selection the builtin agent's own policy would still apply and
+        # the reported enforcement would be a claim the run cannot support.
+        if major_ver >= 2 and not has_agent_flag and (
+            policy.get("no_tools") or policy.get("allow_shell")
+        ):
             return {
                 "status": "failed",
                 "exit_code": 2,
@@ -814,7 +1253,10 @@ def invoke_opencode(
                 "session_cleaned_up": True,
                 "cleanup_verified": True,
                 "error_class": "permission",
-                "error": "Installed OpenCode CLI does not support verified read-only permission restrictions.",
+                "error": (
+                    "Installed OpenCode CLI does not support --agent, which --no-tools and "
+                    "--allow-shell require to apply a dedicated permission profile."
+                ),
             }
 
         existing_cfg: dict[str, Any] = {}
@@ -824,7 +1266,7 @@ def invoke_opencode(
             except Exception:
                 existing_cfg = {}
 
-        if allow_gh:
+        if allow_gh and not policy.get("allow_shell"):
             print(
                 "WARNING: OpenCode does not support granular read-only command whitelisting. "
                 "Shell execution remains strictly denied in read-only sandbox for safety; "
@@ -832,31 +1274,14 @@ def invoke_opencode(
                 file=sys.stderr,
             )
 
-        if major_ver == 1:
-            existing_cfg.pop("permissions", None)
-            existing_cfg["permission"] = {
-                "edit": "deny",
-                "bash": "deny",
-                "write": "deny",
-                "patch": "deny",
-                "webfetch": "allow" if allow_network else "deny",
-            }
-            verified_ro = isinstance(existing_cfg.get("permission"), dict) and all(
-                existing_cfg["permission"].get(k) == "deny" for k in ("edit", "write", "patch", "bash")
-            )
-        else:
-            existing_cfg.pop("permission", None)
-            perm_rules: list[dict[str, str]] = [
-                {"action": "edit", "resource": "*", "effect": "deny"},
-                {"action": "write", "resource": "*", "effect": "deny"},
-                {"action": "patch", "resource": "*", "effect": "deny"},
-                {"action": "shell", "resource": "*", "effect": "deny"},
-                {"action": "bash", "resource": "*", "effect": "deny"},
-            ]
-            if allow_network:
-                perm_rules.append({"action": "webfetch", "resource": "*", "effect": "allow"})
-            existing_cfg["permissions"] = perm_rules
-            verified_ro = isinstance(existing_cfg.get("permissions"), list) and len(existing_cfg["permissions"]) >= 5
+        configured, verified_ro = opencode_read_only_config(
+            existing_cfg,
+            major_ver=major_ver,
+            no_tools=bool(policy.get("no_tools")),
+            allow_shell=bool(policy.get("allow_shell")),
+            allow_network=allow_network,
+            isolate=bool(policy.get("isolate")),
+        )
 
         if not verified_ro:
             return {
@@ -873,15 +1298,27 @@ def invoke_opencode(
                 "error": "Failed to verify OpenCode read-only permission configuration before execution.",
             }
 
-        env_for_proc["OPENCODE_CONFIG_CONTENT"] = json.dumps(existing_cfg)
+        env_for_proc["OPENCODE_CONFIG_CONTENT"] = json.dumps(configured)
         if has_agent_flag:
-            cmd.extend(["--agent", "plan"])
+            if policy.get("no_tools"):
+                agent_name = "tools-off"
+            elif policy.get("allow_shell"):
+                agent_name = "review-shell"
+            else:
+                agent_name = "plan"
+            cmd.extend(["--agent", agent_name])
     elif has_auto:
         cmd.append("--auto")
 
     if resume_session_id:
         cmd.extend(["-s", resume_session_id])
 
+    # An invocation-specific marker proves the exported user message belongs to
+    # this run, not to an older pending turn that finished during a resume.
+    turn_nonce = f"[cross-subagents turn: {uuid.uuid4().hex}]"
+    prompt_text = f"{prompt_text.rstrip()}\n\n{turn_nonce}\n"
+
+    turn_started_ms = int(time.time() * 1000)
     code, out, err, timed_out, cleanup_verified = run_process_with_timeout(
         cmd, prompt_text, cwd, timeout_sec, env=env_for_proc
     )
@@ -889,11 +1326,14 @@ def invoke_opencode(
     stderr_file.write_text(err, encoding="utf-8")
 
     session_id = resume_session_id
-    stream_text_parts: list[str] = []
+    stream_step_text: list[str] = []
+    stream_final_text = ""
     stream_errors: list[str] = []
+    permission_denials: list[str] = []
+    stream_models: list[str] = []
     usage = {"input_tokens": 0, "output_tokens": 0}
     observed_model: str | None = None
-    saw_stream_finish = False
+    last_finish_reason = ""
 
     for line in out.splitlines():
         line = line.strip()
@@ -906,20 +1346,46 @@ def invoke_opencode(
         if ev.get("sessionID") and not session_id:
             session_id = ev["sessionID"]
         ev_type = ev.get("type")
-        if ev_type == "text":
+        if ev.get("model"):
+            stream_models.append(str(ev["model"]))
+            if not observed_model:
+                observed_model = str(ev["model"])
+        if ev_type in ("step_start", "step-start", "message.started"):
+            # A new step invalidates any earlier finish. Only a successful
+            # finish for the final step can complete the run.
+            stream_step_text = []
+            stream_final_text = ""
+            last_finish_reason = ""
+        elif ev_type == "text":
             part = ev.get("part") or {}
             if part.get("text"):
-                stream_text_parts.append(part["text"])
+                stream_step_text.append(part["text"])
         elif ev_type in ("step_finish", "step-finish", "finish", "message.completed"):
             part = ev.get("part") or ev
-            reason = str(part.get("reason") or part.get("finish") or "").lower()
-            if reason not in ("error", "failed", "cancelled", "canceled", "aborted"):
-                saw_stream_finish = True
+            last_finish_reason = str(part.get("reason") or part.get("finish") or "").lower()
+            if last_finish_reason in OPENCODE_SUCCESS_FINISH:
+                stream_final_text = "".join(stream_step_text)
+        elif ev_type in ("tool", "tool-result", "tool-invocation"):
+            part = ev.get("part") or ev
+            denial = _tool_denial(part if isinstance(part, dict) else {})
+            if denial:
+                permission_denials.append(denial)
         elif ev_type == "error":
             stream_errors.append(json.dumps(ev.get("error") or ev))
 
+    if stream_models and not _models_compatible(stream_models):
+        stream_errors.append(
+            "model changed within the stream: " + ", ".join(sorted(set(stream_models)))
+        )
+
     export_verified = False
-    export_text_parts: list[str] = []
+    export_final_text = ""
+    turn_models: list[str] = []
+    turn_missing_model = False
+    turn_missing_provider = False
+    last_assistant_had_model = False
+    last_user_text = ""
+    user_message_id = ""
     session_cleaned_up = False
     cleanup_warning: str | None = None
 
@@ -930,19 +1396,13 @@ def invoke_opencode(
                 if has_standalone:
                     exp_cmd.append("--standalone")
                 exp_cmd.append(session_id)
-                exp_proc = subprocess.run(
-                    exp_cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    cwd=cwd,
-                    env=env_for_proc,
-                    timeout=20,
+                exp_code, exp_stdout, _exp_stderr, exp_timed_out, exp_cleanup = run_process_with_timeout(
+                    exp_cmd, "", cwd, 20, env=env_for_proc
                 )
-                if exp_proc.returncode == 0 and exp_proc.stdout.strip():
-                    (attempt_dir / "session_export.json").write_text(exp_proc.stdout, encoding="utf-8")
-                    exp_json = json.loads(exp_proc.stdout)
+                cleanup_verified = cleanup_verified and exp_cleanup and not exp_timed_out
+                if exp_code == 0 and exp_stdout.strip():
+                    (attempt_dir / "session_export.json").write_text(exp_stdout, encoding="utf-8")
+                    exp_json = json.loads(exp_stdout)
                     data_root = exp_json.get("data") if isinstance(exp_json.get("data"), dict) else exp_json
                     info = data_root.get("info") or {}
                     tokens = info.get("tokens") or {}
@@ -958,6 +1418,8 @@ def invoke_opencode(
                         m_info = m.get("info") if isinstance(m.get("info"), dict) else m
                         if m_info.get("role") == "user" or m.get("type") == "user":
                             last_user_idx = idx
+                            last_user_text = _message_text(m)
+                            user_message_id = str(m.get("id") or m_info.get("id") or "")
 
                     turn_msgs = msgs[last_user_idx + 1 :] if last_user_idx >= 0 else []
                     assistant_finishes: list[tuple[Any, str]] = []
@@ -985,7 +1447,6 @@ def invoke_opencode(
                                 or nested_model.get("provider")
                                 or nested_prov.get("id")
                                 or (m_info.get("provider") if isinstance(m_info.get("provider"), str) else None)
-                                or route["provider"]
                             )
                             raw_var = (
                                 m_info.get("variant")
@@ -993,12 +1454,28 @@ def invoke_opencode(
                                 or nested_model.get("effort")
                                 or m.get("variant")
                             )
-                            if raw_mid and not observed_model:
+                            last_assistant_had_model = bool(raw_mid)
+                            if not raw_mid:
+                                turn_missing_model = True
+                            parent_id = m_info.get("parentID") or m.get("parentID")
+                            if parent_id and (
+                                not user_message_id or str(parent_id) != user_message_id
+                            ):
+                                stream_errors.append(
+                                    "assistant message does not belong to the current user turn"
+                                )
+                            if raw_mid:
+                                if "/" not in str(raw_mid) and not raw_pid:
+                                    turn_missing_provider = True
                                 obs_str = str(raw_mid)
                                 if "/" not in obs_str and raw_pid:
                                     obs_str = f"{raw_pid}/{obs_str}"
                                 if raw_var and "#" not in obs_str:
                                     obs_str = f"{obs_str}#{raw_var}"
+                                # The final message supplies the answer, so
+                                # keep the last model. Any change within the
+                                # turn is a substitution, not a fallback.
+                                turn_models.append(obs_str)
                                 observed_model = obs_str
                             if m_info.get("error") or m.get("error"):
                                 stream_errors.append(json.dumps(m_info.get("error") or m.get("error")))
@@ -1008,14 +1485,48 @@ def invoke_opencode(
                             finish_val = str(m_info.get("finish") or m.get("finish") or "").lower()
                             assistant_finishes.append((completed_ts, finish_val))
                             for c in m.get("parts") or m.get("content") or []:
-                                if isinstance(c, dict) and c.get("type") == "text" and c.get("text"):
-                                    export_text_parts.append(c["text"])
+                                if isinstance(c, dict):
+                                    denial = _tool_denial(c)
+                                    if denial:
+                                        permission_denials.append(denial)
+                            # Keep the text of the last assistant message only;
+                            # earlier steps may be partial tool-call turns.
+                            export_final_text = "".join(
+                                c["text"]
+                                for c in (m.get("parts") or m.get("content") or [])
+                                if isinstance(c, dict)
+                                and c.get("type") == "text"
+                                and c.get("text")
+                            )
 
                     if last_user_idx >= 0 and assistant_finishes:
                         final_completed_ts, final_finish_val = assistant_finishes[-1]
-                        if final_completed_ts is not None and final_finish_val in ("stop", "end_turn", "completed"):
+                        completed_ms = _epoch_ms(final_completed_ts)
+                        if (
+                            completed_ms is not None
+                            and completed_ms >= turn_started_ms
+                            and final_finish_val in OPENCODE_SUCCESS_FINISH
+                            and export_final_text.strip()
+                            and turn_nonce in last_user_text
+                            and last_assistant_had_model
+                            and not turn_missing_model
+                        ):
                             export_verified = True
+                    if turn_missing_model:
+                        stream_errors.append(
+                            "assistant message without model metadata in the current turn"
+                        )
+                    if turn_missing_provider:
+                        stream_errors.append(
+                            "assistant message without provider metadata in the current turn"
+                        )
+                    if turn_models and not _models_compatible(turn_models):
+                        stream_errors.append(
+                            "model changed within the current turn: "
+                            + ", ".join(sorted(set(turn_models)))
+                        )
             except Exception as exp_exc:
+                cleanup_verified = False
                 cleanup_warning = f"session export error: {exp_exc}"[:200]
 
         # Always attempt session delete for one-shot invocations, even after timeout or failure
@@ -1025,24 +1536,53 @@ def invoke_opencode(
                 if has_standalone:
                     del_cmd.append("--standalone")
                 del_cmd.append(session_id)
-                del_proc = subprocess.run(
-                    del_cmd,
-                    capture_output=True,
-                    text=True,
-                    cwd=cwd,
-                    env=env_for_proc,
-                    timeout=15,
+                del_code, del_stdout, del_stderr, del_timed_out, del_cleanup = run_process_with_timeout(
+                    del_cmd, "", cwd, 15, env=env_for_proc
                 )
-                session_cleaned_up = del_proc.returncode == 0
+                cleanup_verified = cleanup_verified and del_cleanup and not del_timed_out
+                session_cleaned_up = del_code == 0
                 if not session_cleaned_up:
-                    cleanup_warning = (del_proc.stderr or del_proc.stdout or "session delete returned non-zero").strip()[:200]
+                    cleanup_warning = (
+                        del_stderr or del_stdout or "session delete returned non-zero"
+                    ).strip()[:200]
             except Exception as exc:
+                cleanup_verified = False
                 cleanup_warning = str(exc)[:200]
+
+    # Stream and export are independent evidence. Every model either reports
+    # must match the requested identity; one source cannot mask the other.
+    if export_verified:
+        evidence_models = [model for model in stream_models if model] + turn_models
+        conflicts = [
+            model
+            for model in evidence_models
+            if not _verify_model_match(
+                resolved_model,
+                route["canonical_key"],
+                model,
+                expected_provider=route.get("provider"),
+                expected_variant=variant,
+            )
+        ]
+        if conflicts or not _models_compatible(evidence_models):
+            stream_errors.append(
+                "conflicting model evidence: " + ", ".join(sorted(set(evidence_models)))
+            )
 
     # Retain session_id in metadata whenever --keep-session, --resume, or cleanup did not succeed
     retained_session_id = session_id if (keep_session or resume_session_id or not session_cleaned_up) else None
-    final_text = "".join(stream_text_parts or export_text_parts).strip()
-    saw_completion = export_verified if has_session_cmd else saw_stream_finish
+    # The verified export is authoritative; streamed text may be a partial
+    # step before the final answer. Without an export, use the stream only when
+    # its last finish reason was successful.
+    stream_answer = (
+        stream_final_text
+        if last_finish_reason in OPENCODE_SUCCESS_FINISH
+        else "".join(stream_step_text)
+    ).strip()
+    final_text = export_final_text.strip() if export_verified else stream_answer
+    saw_completion = (
+        export_verified if has_session_cmd else last_finish_reason in OPENCODE_SUCCESS_FINISH
+    )
 
     err_combined = err + ("\n" + "\n".join(stream_errors) if stream_errors else "")
     if timed_out:
@@ -1057,8 +1597,40 @@ def invoke_opencode(
             "session_cleaned_up": session_cleaned_up,
             "cleanup_verified": cleanup_verified,
             "cleanup_warning": cleanup_warning,
+            "permission_denials": permission_denials,
             "error_class": "timeout",
             "error": "Execution timed out.",
+        }
+
+    # Without session export there is no way to prove the turn is current or
+    # that the executed model is the requested one. Fail closed on a resumed
+    # stream and on any stream that does not report its model.
+    if not has_session_cmd and (
+        resume_session_id or not observed_model or "/" not in observed_model
+    ):
+        if not observed_model:
+            stream_error = "OpenCode stream did not report the executed model."
+            stream_class = "model_unavailable"
+        elif "/" not in observed_model:
+            stream_error = "OpenCode stream did not report the model provider."
+            stream_class = "model_unavailable"
+        else:
+            stream_error = "A resumed OpenCode turn requires session-export verification."
+            stream_class = "format"
+        return {
+            "status": "failed",
+            "exit_code": code or 1,
+            "session_id": retained_session_id,
+            "usage": usage,
+            "requested_model": route.get("requested_model") or model_spec,
+            "resolved_model": model_spec,
+            "observed_model": observed_model,
+            "session_cleaned_up": session_cleaned_up,
+            "cleanup_verified": cleanup_verified,
+            "cleanup_warning": cleanup_warning,
+            "permission_denials": permission_denials,
+            "error_class": stream_class,
+            "error": stream_error,
         }
 
     if observed_model and not _verify_model_match(
@@ -1079,15 +1651,18 @@ def invoke_opencode(
             "session_cleaned_up": session_cleaned_up,
             "cleanup_verified": cleanup_verified,
             "cleanup_warning": cleanup_warning,
+            "permission_denials": permission_denials,
             "error_class": "model_unavailable",
             "error": f"OpenCode model substitution detected: requested '{model_spec}', observed '{observed_model}'.",
         }
 
-    if code != 0 or stream_errors or not saw_completion or not final_text:
+    if code != 0 or stream_errors or not saw_completion or not final_text or permission_denials:
         if final_text:
             (attempt_dir / "partial_result.md").write_text(final_text + "\n", encoding="utf-8")
         err_class = classify_failure(code, out, err_combined, timed_out=False)
-        if code == 0 and not stream_errors and (not saw_completion or not final_text):
+        if permission_denials:
+            err_class = "permission"
+        elif code == 0 and not stream_errors and (not saw_completion or not final_text):
             err_class = "format"
         return {
             "status": "quota" if err_class == "quota" else "failed",
@@ -1100,6 +1675,7 @@ def invoke_opencode(
             "session_cleaned_up": session_cleaned_up,
             "cleanup_verified": cleanup_verified,
             "cleanup_warning": cleanup_warning,
+            "permission_denials": permission_denials,
             "error_class": err_class,
             "error": err_combined.strip()[:500] or "OpenCode produced no verified completed output.",
         }
@@ -1116,6 +1692,7 @@ def invoke_opencode(
         "session_cleaned_up": session_cleaned_up,
         "cleanup_verified": cleanup_verified,
         "cleanup_warning": cleanup_warning,
+        "permission_denials": permission_denials,
         "error_class": None,
     }
 
@@ -1133,8 +1710,17 @@ def invoke_antigravity(
     timeout_sec: int,
     child_env: dict[str, str],
     recipe_flags: dict[str, Any] | None = None,
+    policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Invoke Antigravity (`agy`) using stream-json stdin so arbitrary prompt lengths work safely."""
+    policy = policy or {}
+    if policy.get("no_tools"):
+        prompt_text = apply_tool_free_instruction(prompt_text, policy)
+        print(
+            "WARNING: Antigravity cannot disable tools through the CLI; the tool-free posture is "
+            "prompt-enforced only and meta.json records tools_enforced=false.",
+            file=sys.stderr,
+        )
     result_file = attempt_dir / "result.md"
     if result_file.exists():
         result_file.unlink()
@@ -1204,6 +1790,8 @@ def invoke_antigravity(
     result_status = None
     result_error = None
     observed_model: str | None = None
+    stream_models: list[str] = []
+    permission_denials: list[str] = []
 
     for line in out.splitlines():
         line = line.strip()
@@ -1215,15 +1803,25 @@ def invoke_antigravity(
             continue
         if ev.get("conversation_id") and not session_id:
             session_id = ev["conversation_id"]
-        if ev.get("model") and not observed_model:
-            observed_model = str(ev["model"])
+        for key in ("step", "tool", "result"):
+            candidate = ev.get(key)
+            if isinstance(candidate, dict):
+                denial = _tool_denial(candidate)
+                if denial:
+                    permission_denials.append(denial)
+        if ev.get("model"):
+            stream_models.append(str(ev["model"]))
+            if not observed_model:
+                observed_model = str(ev["model"])
         if ev.get("event") == "result" and isinstance(ev.get("result"), dict):
             res_obj = ev["result"]
             session_id = res_obj.get("conversation_id") or session_id
             result_status = res_obj.get("status")
             result_error = res_obj.get("error")
-            if res_obj.get("model") and not observed_model:
-                observed_model = str(res_obj["model"])
+            if res_obj.get("model"):
+                stream_models.append(str(res_obj["model"]))
+                if not observed_model:
+                    observed_model = str(res_obj["model"])
             response_text = (res_obj.get("response") or "").strip()
             u = res_obj.get("usage") or {}
             usage["input_tokens"] = int(u.get("input_tokens", 0))
@@ -1236,6 +1834,13 @@ def invoke_antigravity(
     )
 
     err_combined = f"{err}\n{result_error or ''}".strip()
+    model_changed = bool(stream_models) and not _models_compatible(stream_models)
+    if model_changed:
+        err_combined = (
+            err_combined
+            + " model changed within the stream: "
+            + ", ".join(sorted(set(stream_models)))
+        ).strip()
     if timed_out:
         return {
             "status": "timeout",
@@ -1248,6 +1853,7 @@ def invoke_antigravity(
             "session_cleaned_up": False,
             "cleanup_verified": cleanup_verified,
             "cleanup_note": cleanup_note,
+            "permission_denials": permission_denials,
             "error_class": "timeout",
             "error": "Execution timed out.",
         }
@@ -1263,14 +1869,19 @@ def invoke_antigravity(
             "session_cleaned_up": False,
             "cleanup_verified": cleanup_verified,
             "cleanup_note": cleanup_note,
+            "permission_denials": permission_denials,
             "error_class": "model_unavailable",
             "error": f"Antigravity model substitution detected: requested '{resolved_model}', observed '{observed_model}'.",
         }
-    if code != 0 or result_status != "SUCCESS" or not response_text:
+    if code != 0 or result_status != "SUCCESS" or not response_text or model_changed or permission_denials:
         if response_text:
             (attempt_dir / "partial_result.md").write_text(response_text + "\n", encoding="utf-8")
         err_class = classify_failure(code, out, err_combined, timed_out=False)
-        if code == 0 and result_status == "SUCCESS" and not response_text:
+        if permission_denials:
+            err_class = "permission"
+        elif model_changed:
+            err_class = "model_unavailable"
+        elif code == 0 and result_status == "SUCCESS" and not response_text:
             err_class = "format"
         return {
             "status": "quota" if err_class == "quota" else "failed",
@@ -1283,6 +1894,7 @@ def invoke_antigravity(
             "session_cleaned_up": False,
             "cleanup_verified": cleanup_verified,
             "cleanup_note": cleanup_note,
+            "permission_denials": permission_denials,
             "error_class": err_class,
             "error": err_combined[:500] or "Antigravity invocation failed.",
         }
@@ -1299,6 +1911,7 @@ def invoke_antigravity(
         "session_cleaned_up": False,
         "cleanup_verified": cleanup_verified,
         "cleanup_note": cleanup_note,
+        "permission_denials": permission_denials,
         "error_class": None,
     }
 
@@ -1570,6 +2183,9 @@ def _adapt_recipe_from_error(
         "--print-timeout": "has_print_timeout",
         "--json": "has_json",
         "--format": "has_format_json",
+        "--safe-mode": "has_safe_mode",
+        "--strict-mcp-config": "has_strict_mcp_config",
+        "--ignore-rules": "has_ignore_rules",
     }
     for cli_flag, key in flag_map.items():
         if cli_flag in lower_err and updated.get(key, True):
@@ -1760,6 +2376,9 @@ def execute_task(
     min_headroom: float | None = None,
     exclude_vendors: list[str] | None = None,
     exclude_agents: list[str] | None = None,
+    include_vendors: list[str] | None = None,
+    max_tier: int | None = None,
+    exclude_route_ids: list[str] | None = None,
     no_fallback: bool = False,
     force_route: bool = False,
     dry_run: bool = False,
@@ -1768,6 +2387,12 @@ def execute_task(
     recommend_inspect: bool = False,
     allow_gh: bool = False,
     allow_network: bool = False,
+    no_tools: bool = False,
+    allow_shell: bool = False,
+    isolate: bool = False,
+    guard_enabled: bool = False,
+    guard_excludes: list[str] | None = None,
+    guard_max_files: int = 100_000,
     task_summary: str | None = None,
     outcome_summary: str | None = None,
     significant: bool | None = None,
@@ -1794,6 +2419,11 @@ def execute_task(
     caller_supplied_sandbox = sandbox_mode
     effective_sandbox = sandbox_mode or "workspace-write"
     effective_cwd = str(Path(cwd).resolve()) if cwd else str(Path.cwd().resolve())
+    execution_policy = {
+        "no_tools": bool(no_tools),
+        "allow_shell": bool(allow_shell) and not no_tools,
+        "isolate": bool(isolate),
+    }
 
     eff_req_mods = [m.strip().lower() for m in (require_modalities or []) if m.strip()]
     if require_vision and "image" not in eff_req_mods:
@@ -1824,6 +2454,21 @@ def execute_task(
             elif resume_session_id and (not route_str or route_str.lower() == "auto"):
                 raise ValueError(
                     "When resuming a raw --resume <session_id> without --resume-task, you must specify --route <agent>/<provider>/<model>."
+                )
+
+            if execution_policy["no_tools"]:
+                if caller_supplied_sandbox is None and not resume_task_id:
+                    effective_sandbox = "read-only"
+                if effective_sandbox != "read-only":
+                    raise ValueError(
+                        "--no-tools requires --sandbox read-only; a tool-free prompt cannot be "
+                        "combined with workspace-write or bypass execution."
+                    )
+
+            if guard_enabled and os.name == "nt":
+                raise ValueError(
+                    "--guard requires POSIX process-group semantics to confirm that no descendant "
+                    "survived the attempt; it is not available on Windows."
                 )
 
             eff_prompt_text = prompt_text
@@ -1872,6 +2517,7 @@ def execute_task(
                         eff_pin_model=eff_pin_model,
                         excl_agents=excl_agents_set,
                         excl_vendors=excl_vendors_set,
+                        incl_vendors={v.strip().lower() for v in (include_vendors or []) if v.strip()},
                         quality_floor=None,
                         is_explicit_route=True,
                     )
@@ -1914,6 +2560,9 @@ def execute_task(
                         min_headroom=min_headroom,
                         exclude_vendors=exclude_vendors,
                         exclude_agents=exclude_agents,
+                        include_vendors=include_vendors,
+                        max_tier=max_tier,
+                        exclude_route_ids=exclude_route_ids,
                         run_id=eff_run_id,
                     )
                     exp_buckets = set(explicit_route.get("applicable_buckets") or [explicit_route["quota_bucket"]])
@@ -1936,6 +2585,9 @@ def execute_task(
                     min_headroom=min_headroom,
                     exclude_vendors=exclude_vendors,
                     exclude_agents=exclude_agents,
+                    include_vendors=include_vendors,
+                    max_tier=max_tier,
+                    exclude_route_ids=exclude_route_ids,
                     run_id=eff_run_id,
                 )
                 if sel["status"] != "ok" or not sel.get("selected"):
@@ -1992,6 +2644,9 @@ def execute_task(
                 "cwd": effective_cwd,
                 "keep_session": keep_session,
                 "resume_session_id": resume_session_id,
+                "tool_policy": execution_policy,
+                "tools_enforced": tools_enforcement(planned["agent"], execution_policy, "dry_run"),
+                "guard_enabled": guard_enabled,
             }
 
         inst_id = make_bounded_instance_id("task", eff_task_id)
@@ -2094,6 +2749,22 @@ def execute_task(
             child_env["CROSS_SUBAGENTS_PARENT_INSTANCE"] = lease["instance_id"]
             child_env["CROSS_SUBAGENTS_PARENT_TASK_ID"] = eff_task_id
 
+            # The guard's own artifacts live under the run directory. When the
+            # cache is inside --cwd, writing them between snapshot and verify
+            # would otherwise look like a mutation.
+            guard_patterns = list(guard_excludes or [])
+            if guard_enabled:
+                cwd_path = Path(effective_cwd).resolve()
+                for owned in (Path(run_dir), get_cache_dir()):
+                    try:
+                        owned_rel = owned.resolve().relative_to(cwd_path).as_posix()
+                    except ValueError:
+                        continue
+                    if owned_rel not in ("", "."):
+                        for pattern in (owned_rel, f"{owned_rel}/**"):
+                            if pattern not in guard_patterns:
+                                guard_patterns.append(pattern)
+
             for route_idx, route in enumerate(route_chain):
                 route_buckets = set(
                     route.get("applicable_buckets")
@@ -2151,8 +2822,32 @@ def execute_task(
                         },
                     )
 
+                    guard_baseline: dict[str, Any] | None = None
+                    guard_dir: Path | None = None
+                    if guard_enabled:
+                        guard_dir = attempt_dir / "guard"
+                        guard_dir.mkdir(parents=True, exist_ok=True)
+                        guard_baseline = guard_snapshot(effective_cwd, guard_patterns, guard_max_files)
+                        atomic_write_json(guard_dir / "baseline.json", guard_baseline)
+
                     try:
-                        if not agent_info.get("usable") or not binary:
+                        if guard_enabled and guard_baseline and guard_baseline.get("status") != "ok":
+                            # Without a usable baseline the attempt cannot be
+                            # verified, so do not run the agent at all.
+                            res: dict[str, Any] = {
+                                "status": "failed",
+                                "exit_code": 2,
+                                "session_id": resume_session_id,
+                                "usage": {"input_tokens": 0, "output_tokens": 0},
+                                "requested_model": route.get("requested_model") or route["model_id"],
+                                "resolved_model": route.get("resolved_model_id") or route["model_id"],
+                                "observed_model": None,
+                                "session_cleaned_up": True,
+                                "cleanup_verified": True,
+                                "error_class": "guard_failed",
+                                "error": f"Baseline snapshot failed: {guard_baseline.get('error')}",
+                            }
+                        elif not agent_info.get("usable") or not binary:
                             res: dict[str, Any] = {
                                 "status": "failed",
                                 "exit_code": 127,
@@ -2182,6 +2877,7 @@ def execute_task(
                                 recipe_flags=current_recipe_flags,
                                 allow_gh=allow_gh,
                                 allow_network=allow_network,
+                                policy=execution_policy,
                             )
                         elif agent == "claude-code":
                             res = invoke_claude_code(
@@ -2199,6 +2895,7 @@ def execute_task(
                                 recipe_flags=current_recipe_flags,
                                 allow_gh=allow_gh,
                                 allow_network=allow_network,
+                                policy=execution_policy,
                             )
                         elif agent == "opencode":
                             res = invoke_opencode(
@@ -2216,6 +2913,7 @@ def execute_task(
                                 recipe_flags=current_recipe_flags,
                                 allow_gh=allow_gh,
                                 allow_network=allow_network,
+                                policy=execution_policy,
                             )
                         elif agent == "antigravity":
                             res = invoke_antigravity(
@@ -2231,6 +2929,7 @@ def execute_task(
                                 timeout_sec,
                                 child_env,
                                 recipe_flags=current_recipe_flags,
+                                policy=execution_policy,
                             )
                         else:
                             res = {
@@ -2257,10 +2956,59 @@ def execute_task(
                             "resolved_model": route.get("resolved_model_id") or route["model_id"],
                             "observed_model": None,
                             "session_cleaned_up": False,
-                            "cleanup_verified": True,
+                            # The adapter may have launched a process before
+                            # raising, so its cleanup state is unknown, not clean.
+                            "cleanup_verified": False,
                             "error_class": err_cls,
                             "error": f"Subprocess invocation error: {invoke_exc}",
                         }
+
+                    if guard_enabled and guard_dir is not None:
+                        if guard_baseline is None or guard_baseline.get("status") != "ok":
+                            guard_report: dict[str, Any] = {
+                                "status": "guard_failed",
+                                "error": (guard_baseline or {}).get("error") or "baseline snapshot failed",
+                            }
+                        elif not res.get("cleanup_verified", True):
+                            guard_report = {
+                                "status": "guard_failed",
+                                "error": (
+                                    "subprocess cleanup was not confirmed; a descendant may still "
+                                    "write protected inputs"
+                                ),
+                            }
+                        else:
+                            guard_report = guard_verify(
+                                effective_cwd, guard_baseline, max_files=guard_max_files
+                            )
+                        atomic_write_json(guard_dir / "report.json", guard_report)
+                        res["guard"] = {
+                            "status": guard_report.get("status"),
+                            "report_path": str(guard_dir / "report.json"),
+                            "baseline_path": str(guard_dir / "baseline.json"),
+                            "counts": guard_report.get("counts"),
+                            "changed": guard_report.get("changed"),
+                            "added": guard_report.get("added"),
+                            "removed": guard_report.get("removed"),
+                            "git_changes": guard_report.get("git_changes"),
+                            "error": guard_report.get("error"),
+                        }
+                        if guard_report.get("status") != "clean":
+                            res["status"] = "failed"
+                            res["exit_code"] = 2
+                            res["error_class"] = (
+                                "mutated" if guard_report.get("status") == "mutated" else "guard_failed"
+                            )
+                            details: list[str] = []
+                            for key in ("changed", "added", "removed", "git_changes"):
+                                values = guard_report.get(key) or []
+                                if values:
+                                    details.append(
+                                        f"{key}={len(values)} ({', '.join(str(v) for v in values[:5])})"
+                                    )
+                            res["error"] = "Protected inputs were not clean after the attempt" + (
+                                ": " + "; ".join(details) if details else f": {guard_report.get('error')}"
+                            )
 
                     ended_at = now_iso()
                     duration_ms = int((time.monotonic() - t0) * 1000)
@@ -2372,6 +3120,13 @@ def execute_task(
                         if (res["status"] == "ok" and published_result_file.is_file())
                         else None,
                         "lease_mode": lease.get("mode"),
+                        "tool_policy": execution_policy,
+                        "tools_enforced": tools_enforcement(
+                            agent, execution_policy, str(res.get("status") or "failed")
+                        ),
+                        "permission_denials": res.get("permission_denials"),
+                        "model_verified": bool(res.get("observed_model")),
+                        "guard": res.get("guard"),
                     }
                     atomic_write_json(task_dir / "meta.json", meta_payload)
 
@@ -2412,8 +3167,15 @@ def execute_task(
                             atomic_write_json(task_dir / "meta.json", meta_payload)
                         return meta_payload
 
-                    # If a timed-out writer process could not be confirmed dead, refuse to start another writer
-                    if res.get("error_class") == "timeout" and not res.get("cleanup_verified", True) and effective_sandbox != "read-only":
+                    # Unconfirmed cleanup can leave a descendant writing after the
+                    # attempt. Never retry or fall back from it, even when the
+                    # failure itself looks retryable.
+                    if res.get("cleanup_verified") is not True:
+                        return meta_payload
+
+                    # A mutated tree or a guard that could not verify it invalidates the whole task;
+                    # falling back to another route would hide the change and review a different tree.
+                    if res.get("error_class") in ("mutated", "guard_failed"):
                         return meta_payload
 
                     # Retry the same route once if self-repair adapted recipe flags on `no_option` or `format`
@@ -3060,6 +3822,55 @@ def main() -> int:
     parser.add_argument("--force-route", action="store_true", help="Bypass eligibility checks on an explicit --route.")
     parser.add_argument("--exclude-vendor", action="append", help="Exclude model vendor(s) during selection.")
     parser.add_argument("--exclude-agent", action="append", help="Exclude agent(s) during selection.")
+    parser.add_argument(
+        "--include-vendor",
+        action="append",
+        help="Restrict automatic selection to model vendor(s) (repeatable).",
+    )
+    parser.add_argument(
+        "--max-tier",
+        type=int,
+        help="Restrict automatic selection to models ranked at or above this vendor tier (1 = flagship).",
+    )
+    parser.add_argument("--exclude-route", action="append", help="Exclude an explicit route_id (repeatable).")
+    parser.add_argument(
+        "--no-tools",
+        action="store_true",
+        help=(
+            "Tool-free posture (implies --sandbox read-only). Enforced by Claude Code and OpenCode; "
+            "Codex and Antigravity report tools_enforced=false because their CLIs cannot disable tools."
+        ),
+    )
+    parser.add_argument(
+        "--allow-shell",
+        action="store_true",
+        help="In read-only mode, permit shell commands for inspection and focused tests; editing tools stay denied.",
+    )
+    parser.add_argument(
+        "--isolate",
+        action="store_true",
+        help="Isolate the reviewer: Claude safe mode + strict MCP, OpenCode instruction/skill plugins off, Codex rules off.",
+    )
+    parser.add_argument(
+        "--guard",
+        action="store_true",
+        help=(
+            "Snapshot protected inputs before the attempt and verify them afterwards (opt-in; "
+            "POSIX only, because Windows descendant cleanup cannot be verified)."
+        ),
+    )
+    parser.add_argument(
+        "--guard-exclude",
+        action="append",
+        default=[],
+        help="Relative glob to keep out of the guard snapshot (repeatable), e.g. 'node_modules/**'.",
+    )
+    parser.add_argument(
+        "--guard-max-files",
+        type=int,
+        default=100_000,
+        help="Guard fails closed above this many files; narrow --cwd or add --guard-exclude.",
+    )
     parser.add_argument("--no-fallback", action="store_true", help="Disable automatic fallback chain on failure.")
     parser.add_argument("--dry-run", action="store_true", help="Print planned route and prompt paths without running.")
     parser.add_argument("--cost-gate", type=int, metavar="NUM_CALLS", help="Evaluate cost/call gate for NUM_CALLS fan-out.")
@@ -3068,6 +3879,10 @@ def main() -> int:
     parser.add_argument("--human", action="store_true", help="Print human-readable output when used with --report.")
 
     args = parser.parse_args()
+
+    if args.max_tier is not None and args.max_tier < 1:
+        print("run: --max-tier must be at least 1", file=sys.stderr)
+        return 2
 
     if args.report:
         rep = build_run_report(args.run_id, only_significant=args.only_significant)
@@ -3112,6 +3927,9 @@ def main() -> int:
         min_headroom=args.min_headroom,
         exclude_vendors=args.exclude_vendor,
         exclude_agents=args.exclude_agent,
+        include_vendors=args.include_vendor,
+        max_tier=args.max_tier,
+        exclude_route_ids=args.exclude_route,
         no_fallback=args.no_fallback,
         force_route=args.force_route,
         dry_run=args.dry_run,
@@ -3120,6 +3938,12 @@ def main() -> int:
         recommend_inspect=args.recommend_inspect,
         allow_gh=args.allow_gh,
         allow_network=args.allow_network,
+        no_tools=args.no_tools,
+        allow_shell=args.allow_shell,
+        isolate=args.isolate,
+        guard_enabled=args.guard,
+        guard_excludes=args.guard_exclude,
+        guard_max_files=args.guard_max_files,
         task_summary=args.summary,
         outcome_summary=args.outcome_summary,
         significant=sig_flag,

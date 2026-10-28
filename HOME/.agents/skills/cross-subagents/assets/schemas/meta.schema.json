@@ -85,10 +85,13 @@
         "auth",
         "model_unavailable",
         "quota",
+        "transient",
         "permission",
         "timeout",
         "format",
         "capacity",
+        "mutated",
+        "guard_failed",
         "failed"
       ]
     },
@@ -101,7 +104,43 @@
     "prompt_size_warning": { "type": ["string", "null"] },
     "attempt_dir": { "type": ["string", "null"] },
     "result_file": { "type": ["string", "null"] },
-    "lease_mode": { "type": ["string", "null"] }
+    "lease_mode": { "type": ["string", "null"] },
+    "tool_policy": {
+      "type": "object",
+      "properties": {
+        "no_tools": { "type": "boolean" },
+        "allow_shell": { "type": "boolean" },
+        "isolate": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "tools_enforced": {
+      "type": ["boolean", "null"],
+      "description": "true when the CLI actually denies every tool; false when the tool-free posture is prompt-only; null when --no-tools was not requested."
+    },
+    "permission_denials": {
+      "type": ["array", "null"],
+      "description": "Tool calls the CLI refused, when the adapter exposes them. A non-empty list makes the round blocked, never clean."
+    },
+    "model_verified": {
+      "type": ["boolean", "null"],
+      "description": "true when the adapter reported the executed model; false means the model was requested but could not be observed."
+    },
+    "guard": {
+      "type": ["object", "null"],
+      "properties": {
+        "status": { "type": "string", "enum": ["clean", "mutated", "guard_failed"] },
+        "report_path": { "type": ["string", "null"] },
+        "baseline_path": { "type": ["string", "null"] },
+        "counts": { "type": ["object", "null"] },
+        "changed": { "type": ["array", "null"], "items": { "type": "string" } },
+        "added": { "type": ["array", "null"], "items": { "type": "string" } },
+        "removed": { "type": ["array", "null"], "items": { "type": "string" } },
+        "git_changes": { "type": ["array", "null"], "items": { "type": "string" } },
+        "error": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    }
   },
   "additionalProperties": true
 }

@@ -139,6 +139,16 @@ Useful selection flags:
  -  `--exclude-vendor <vendor>` (such as `openai`, `anthropic`, `google`,
     `deepseek`, `qwen`, `zhipu`, `moonshot`, `minimax`, or `xiaomi`) requires a
     model vendor different from the host session for independent verification.
+ -  `--include-vendor <vendor>` (repeatable) restricts selection to the named
+    vendors instead of listing every other vendor in `--exclude-vendor`.
+ -  `--max-tier <N>` keeps only models ranked at or above N within their own
+    vendor (`1` = flagship, `2` = second tier). Ranking is computed per vendor
+    from task-fit evidence and is independent of quota, cost, and speed, so a
+    tight account does not silently demote a vendor's flagship to its third
+    model. Use `--max-tier 2` when you want "top or second tier" rather than a
+    specific model.
+ -  `--exclude-route <route_id>` (repeatable) removes an exact route, which is
+    how a step plan keeps later steps on different models.
  -  `--require-vision` (or `--require-modality image`) restricts selection to
     multimodal models that accept image inputs. Always pass `--require-vision`
     when the subagent needs to inspect UI design mockups, screenshots, or
@@ -158,12 +168,41 @@ Useful selection flags:
     chain without executing a subagent.
 
 Always print the one-line selection rationale so the user can see which route
-was chosen and why (task fit, vision/speed traits when requested, limiting quota
-bucket usage, and time until reset). For the scoring formula, quality floor
-rules, vision and token-speed weighting, reset-imminence trade-offs, reset
-credit redemption policy, and canonical model survey workflow
+was chosen and why (task fit, vision/speed traits when requested, vendor tier,
+limiting quota bucket usage, and time until reset). For the scoring formula,
+quality floor rules, vision and token-speed weighting, reset-imminence
+trade-offs, reset credit redemption policy, and canonical model survey workflow
 (`models.py survey-missing` and `survey-put`), read the
 [model selection reference](references/model-selection.md).
+
+#### Multi-step plans
+
+A multi-step workflow (for example a cheap first-pass reviewer followed by two
+independent frontier reviewers) needs *independent* routes, not a fallback
+chain. Plan them in one call:
+
+~~~~ bash
+python3 <skill-dir>/scripts/select_route.py --task code_review --steps 3 \
+  --step-spec '{"speed":"fast","quality_floor":0.60,"exclude_vendor":["openai","anthropic","google"]}' \
+  --step-spec '{"include_vendor":["openai","anthropic","google"],"max_tier":2}' \
+  --step-spec '{"include_vendor":["openai","anthropic","google"],"max_tier":2}' \
+  --human
+~~~~
+
+Each `--step-spec` is inline JSON or `@path/to/spec.json`; omitted steps inherit
+the global flags. Global `--exclude-route`, `--exclude-vendor` and
+`--exclude-agent` entries are additive, so a step spec cannot re-enable a route
+the caller excluded for the whole plan. Steps are independent: a route already
+chosen by an earlier step is excluded, and `--step-distinct-vendor` (the
+default) forces each step onto a different model vendor so the later steps are
+genuinely independent checks. `--step-distinct-bucket` additionally spreads steps across quota
+buckets when two vendors share one subscription. Per-step `fallbacks` remain
+available for failure of that step's own model, but they do not replace a
+planned step. Plan mode ignores saved session pins; pass `--pin-*` explicitly
+only when a single route is intended.
+
+`--steps` is a plan, not an execution: pass each step's `selected.route_id` to
+`run.py --route` (usually with `--no-fallback`) for that step's own rounds.
 
 ### Step 3: Choose native delegation or CLI execution
 
@@ -236,6 +275,23 @@ if the primary route fails with a quota, authentication, or model-availability
 error (pass `--no-fallback` when a user gate requires that exact model or
 nothing).
 
+Three flags shape the execution posture:
+
+ -  `--no-tools` is the tool-free posture for prose and other text-only review.
+    It implies `--sandbox read-only`. Claude Code (`--tools ""`) and OpenCode (a
+    dedicated all-deny agent) enforce it; Codex and Antigravity have no CLI
+    switch that disables tools, so they report `tools_enforced: false` in
+    `meta.json` and rely on a prompt instruction prepended by `run.py`. A failed
+    attempt reports `null` (unknown) rather than claiming enforcement. Choose a
+    route whose `tools_enforced` is `true` when "no tool call happened" must be
+    guaranteed.
+ -  `--allow-shell` keeps editing tools denied but permits shell commands in
+    read-only mode, for inspection and focused tests in a code review.
+ -  `--isolate` suppresses ambient behavior in read-only execution: Claude safe
+    mode and strict MCP, OpenCode instruction/skill plugins and
+    share/update/snapshots off, Codex rules off. Use it for reviewers that must
+    not inherit project hooks or skills.
+
 `run.py` writes all artifacts under `$SKILL_CACHE_DIR/runs/<run-id>/`:
 
  -  `prompts/common.md` and `prompts/task-<task-id>.md` store the prompt inputs
@@ -247,8 +303,9 @@ nothing).
  -  `<task-id>/meta.json` records structured execution metadata matching
     [meta.schema.json](assets/schemas/meta.schema.json) (`status`, `exit_code`,
     `duration_ms`, `requested_model`, `observed_model`, `session_id`,
-    `resumable`, `session_cleaned_up`, `usage`, `error_class`, and
-    `selection_rationale`).
+    `resumable`, `session_cleaned_up`, `usage`, `error_class`,
+    `selection_rationale`, `tool_policy`, `tools_enforced`,
+    `permission_denials`, `model_verified`, and `guard`).
  -  `manifest.jsonl` maintains an append-only audit log of `task_started` and
     `task_finished` events across the run.
 
@@ -299,6 +356,45 @@ unless isolated in a separate worktree).
 After `run.py` completes, always read `<task-id>/meta.json` and
 `<task-id>/result.md`, and verify `git status --short` and `git diff` against
 the task's `write_set`.
+
+#### Optional protected-input guard
+
+For a read-only review where a silent edit would invalidate the verdict, pass
+`--guard`. `run.py` hashes the working tree and Git state before the attempt,
+verifies them afterwards, and writes `attempt-<N>/guard/baseline.json` and
+`report.json`. A changed, added, or removed file, or any Git state change,
+turns the attempt into `status: failed` with `error_class: mutated` (or
+`guard_failed` when verification itself could not run); the task then stops
+instead of falling back and reviewing a different tree. If the baseline cannot
+be read (unreadable file or directory, unreadable Git metadata, or too many
+files), the agent does not run at all. The skill's cache directory and its own
+artifacts are excluded from the snapshot even when the cache lives inside
+`--cwd`.
+
+~~~~ bash
+python3 <skill-dir>/scripts/run.py --run-id <run-id> --task-id <task-id> \
+  --task code_review --sandbox read-only --allow-shell --isolate \
+  --guard --guard-exclude 'node_modules/**' --guard-exclude 'dist/**' \
+  --cwd <repo> --prompt-file <review-prompt.md>
+~~~~
+
+The guard is opt-in and costs one tree walk plus hashing per attempt. It
+records file contents, modes, symlink targets (including directory symlinks),
+HEAD, the index, packed-refs, and the contents of in-progress merge/rebase
+markers. An attempt whose process group cannot be confirmed gone is treated as
+`guard_failed`, because a surviving descendant could still write after
+verification. It does not cover Git object storage,
+reflogs, external symlink targets, or the Git metadata of nested repositories,
+and it fails closed above `--guard-max-files` (default 100000). It can also run
+standalone: `python3 <skill-dir>/scripts/guard.py snapshot|verify`. The guard is
+POSIX-only: Windows has no reliable process-group check, so `--guard` is
+rejected there rather than reporting a clean run it cannot verify.
+
+The guard is a change detector, not a sandbox. It catches ordinary background
+children, but a descendant that creates a new session or process group
+(`setsid`, daemonization) escapes the process-group check and can still write
+after verification. Pair it with a read-only posture; a clean report is not
+proof that no transient write occurred.
 
 ### Zero-token reactive monitoring vs. active polling loops
 

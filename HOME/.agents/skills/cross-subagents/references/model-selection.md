@@ -191,9 +191,10 @@ Five-step route selection
     confirmed exhausted on a non-stale reading, routes that lack a verified
     `context_window` or `input_modalities` matching `--min-context` or
     `--require-modality` (unless `--allow-estimated-capabilities` is passed),
-    and routes excluded by user pins (`--pin-agent`, `--pin-model`,
-    `--exclude-vendor`). Never use a stale proactive quota reading
-    (`stale: true`) as a hard filter.
+    routes excluded by user pins (`--pin-agent`, `--pin-model`,
+    `--exclude-vendor`), routes outside `--include-vendor`, and routes whose
+    vendor-internal tier rank exceeds `--max-tier`. Never use a stale proactive
+    quota reading (`stale: true`) as a hard filter.
 
 2.  Enforce a minimum `task_fit` quality floor per task category (for example,
     `0.75` for `security_audit`, `0.72` for `code_review` and `debugging`,
@@ -229,6 +230,55 @@ Five-step route selection
     `opencode/deepseek/deepseek-flash` to
     `opencode/opencode-go/deepseek-v4.1-flash` or from `claude-code` to
     `opencode/anthropic`).
+
+
+Vendor tiers
+------------
+
+`--max-tier N` keeps only models ranked at or above N within their own vendor.
+Tier ranking is computed from task-fit evidence only: the latest validated
+survey for the canonical model, otherwise the family prior. It deliberately
+ignores quota scarcity, reset timing, cost, speed, and the agent-specific
+native bonus, so a vendor's flagship does not change identity because an
+account is tight or because the same model is served through a different CLI.
+
+Ranking is per canonical model, with ties sharing a rank. The same model served
+through several providers therefore receives one rank, and `--max-tier 2` does
+not arbitrarily drop one of two equally strong models. Use `--max-tier 2` for
+"top or second tier" and `--max-tier 1` when only the flagship is acceptable.
+Combined with `--include-vendor`, it expresses constraints like "the two best
+models from OpenAI, Anthropic, or Google" without enumerating model IDs.
+
+
+Multi-step planning
+-------------------
+
+A workflow that needs several independent reviewers is not a fallback chain:
+fallbacks substitute for a failed route, while steps are separate rounds that
+must not repeat a model. `select_route.py --steps N` returns a `steps` array,
+each entry containing its own `selected` route, `fallbacks`, and `rationale`.
+
+Each step runs a normal selection with accumulated exclusions: every route
+already chosen is added to `exclude_route_ids`, and with
+`--step-distinct-vendor` (the default) the used vendors are added to the hard
+filters. `--step-distinct-bucket` additionally excludes the quota buckets used
+by earlier steps. Per-step constraints come from `--step-spec`, a JSON object
+(inline or `@file`) that may override `task`, `speed`, `max_tier`,
+`quality_floor`, `min_context`, `min_headroom`, `allow_micro_quota`,
+`allow_estimated_capabilities`, `include_vendor`, `exclude_vendor`,
+`exclude_agent`, `exclude_route`, `require_modality`, `require_vision`, and the
+`pin_*` fields. Steps without a spec inherit the global flags. Global
+`--exclude-route`, `--exclude-vendor` and `--exclude-agent` entries are
+additive: a step spec can add exclusions but cannot remove a global one. A
+canonical model chosen by one step is excluded from every later step even when
+`--no-step-distinct-vendor` allows the same vendor.
+
+Plan mode ignores saved session pins, because a pin is a single-route
+constraint that conflicts with multi-step independence; pass `--pin-*`
+explicitly only when a single route is intended. A step that cannot satisfy its
+constraints (for example two steps both restricted to one vendor with
+`--step-distinct-vendor`) is reported under `unfilled`, and the plan status
+becomes `partial` rather than silently repeating a model.
 
 
 Absolute quota headroom vs. deceptive percentage usage

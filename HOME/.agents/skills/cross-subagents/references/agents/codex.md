@@ -117,3 +117,16 @@ Inspect the generated JSON Schema files in `<temp-dir>` or run
 `codex debug models` and `codex exec --help` to recover the updated method or
 flag names, then update the version-keyed recipe cache in
 `$SKILL_CACHE_DIR/recipes.json`.
+
+
+Execution postures used by `scripts/run.py`
+--------------------------------------------
+
+Codex has no CLI switch that disables tools. `--no-tools` therefore runs under
+`--sandbox read-only` and relies on the prompt; `run.py` prints a warning and
+records `tools_enforced: false` in `meta.json`. Use Claude Code or OpenCode when
+tool use must be impossible.
+
+`--isolate` passes `--ignore-rules` so execpolicy `.rules` files from the user
+or project are not loaded. Codex still reads repository files under the
+read-only sandbox, so a reviewer can inspect the checkout.

@@ -123,3 +123,26 @@ identify updated flag names. When Claude Code runs as the host agent and spawns
 native subagents, check
 `subagent_stats.refused.{depth_limit,concurrency_limit,budget}` in JSON outputs
 so host-level refusals are not double-counted in `$SKILL_CACHE_DIR/registry/`.
+
+
+Execution postures used by `scripts/run.py`
+--------------------------------------------
+
+Read-only execution passes `--permission-mode dontAsk`, `--permission-prompts
+none`, `--tools`, and `--disallowedTools`. Three additional postures layer on
+top:
+
+ -  `--no-tools`: `--tools ""` plus `--safe-mode` and `--strict-mcp-config`.
+    No tool may run; this is the posture for prose review. `--tools ""` is
+    accepted by Claude Code with a JSON result even though the option is
+    variadic, because the empty string is the value and the next token starts
+    with `--`.
+ -  `--allow-shell`: adds `Bash` to `--tools` and `Bash(*)` to `--allowedTools`
+    while edit/write/notebook tools stay denied. Use it when a review needs
+    focused tests or git inspection.
+ -  `--isolate`: adds `--safe-mode` (no hooks, project instructions, or
+    auto-memory) and `--strict-mcp-config` (no MCP servers). The reviewer reads
+    repository guidance files itself instead of inheriting them.
+
+`run.py` records the requested posture as `tool_policy` and whether the CLI can
+enforce it as `tools_enforced`.

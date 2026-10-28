@@ -58,6 +58,70 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(self.run_guard("import subprocess; subprocess.run(['git','add','source'],check=True)"), 40)
         self.assertIn('git:index', json.loads(Path(str(self.prefix) + '.guard.json').read_text())['changes'])
 
+    def test_read_only_git_inspection_does_not_mutate(self):
+        (self.root / 'source').write_bytes(b'dirty worktree')
+        code = (
+            "import os, subprocess; "
+            "env = dict(os.environ); env.pop('GIT_OPTIONAL_LOCKS', None); "
+            "subprocess.run(['git', 'status', '--short'], check=True, env=env); "
+            "subprocess.run(['git', 'diff'], check=True, env=env)"
+        )
+        self.assertEqual(self.run_guard(code), 0)
+
+    def test_nested_tracked_file_inside_allowed_output_is_protected(self):
+        sub = self.root / 'sub'
+        sub.mkdir()
+
+        def git_sub(*args):
+            return subprocess.check_output(['git', '-C', str(sub), *args])
+
+        git_sub('init', '-q')
+        git_sub('config', 'user.email', 'test@example.invalid')
+        git_sub('config', 'user.name', 'Test')
+        (sub / 'build').mkdir()
+        (sub / 'build' / 'file').write_text('original')
+        git_sub('add', 'build/file')
+        git_sub('commit', '-qm', 'nested')
+        code = "from pathlib import Path; Path('sub/build/file').write_text('changed')"
+        self.assertEqual(self.run_guard(code, allowed=['sub/build']), 40)
+
+    def test_linked_worktree_commondir_change_is_detected(self):
+        wt = self.base / 'wt'
+        self.git('worktree', 'add', '-q', '-b', 'wt', str(wt))
+        raw = subprocess.check_output(
+            ['git', '-C', str(wt), 'rev-parse', '--git-path', 'commondir']
+        ).decode().strip()
+        commondir = Path(raw)
+        if not commondir.is_absolute():
+            commondir = wt / commondir
+        code = (
+            "from pathlib import Path; "
+            f"Path({str(commondir)!r}).write_text('elsewhere\\n')"
+        )
+        prefix = self.base / 'wt-attempt'
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / 'review-guard.py'),
+                '--root', str(wt),
+                '--prefix', str(prefix),
+                '--stdin', str(self.prompt),
+                '--',
+                sys.executable, '-c', code,
+            ],
+            capture_output=True,
+            env={**os.environ, 'REVIEW_OUTPUT_PATHS': '[]'},
+        )
+        # Either the changed pointer is detected (40) or resolution fails and
+        # the guard refuses to report anything (2). Both are fail-closed.
+        self.assertIn(result.returncode, (40, 2), result.stderr)
+
+    def test_intent_to_add_transition_is_detected(self):
+        (self.root / 'empty').write_bytes(b'')
+        self.git('add', '-N', 'empty')
+        code = "import subprocess; subprocess.run(['git', 'add', 'empty'], check=True)"
+        self.assertEqual(self.run_guard(code), 40)
+
     def test_split_index_dependencies_are_backed_up(self):
         self.git('update-index', '--split-index')
         self.assertEqual(self.run_guard('pass'), 0)
@@ -170,90 +234,6 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(self.run_guard('pass'), 2)
         self.assertFalse(Path(str(self.prefix) + '.stdout').exists())
 
-
-    def test_opencode_retry_keeps_evidence_and_fresh_session(self):
-        work = self.base / 'work'
-        work.mkdir()
-        (work / 'opencode-prompt.txt').write_text('review inputs')
-        mockbin = self.base / 'bin'
-        mockbin.mkdir()
-        mock = mockbin / 'opencode'
-        mock.write_text("""#!/usr/bin/env python3
-import json, os, sys
-from pathlib import Path
-args=sys.argv[1:]
-work=Path(os.environ['WORK'])
-if args==['--version']:
-    print('mock 1.18.34')
-elif args[:2]==['debug','paths']:
-    print('data  '+str(work))
-elif args[:2]==['debug','config']:
-    print('{}')
-elif args[:2]==['debug','agent']:
-    print(json.dumps({'name':'review-loop-flash','permission':[{'permission':'*','pattern':'*','action':'deny'}], 'tools':dict(edit=False,write=False,task=False,webfetch=False)}))
-elif args[0]=='run':
-    if os.environ.get('MOCK_MUTATE'): Path('source').write_bytes(b'reviewer edit')
-    count=work/'count'
-    n=int(count.read_text())+1 if count.exists() else 1
-    count.write_text(str(n))
-    with (work/'calls').open('a') as f: f.write(json.dumps(args)+'\\n')
-    print(json.dumps({'type':'step_start','sessionID':'session'+str(n)}))
-    if n==1: print(json.dumps({'type':'error','error':{'name':'APIError','data':{'statusCode':503,'message':'unavailable'}}}))
-elif args[0]=='export':
-    n=int((work/'count').read_text())
-    info=dict(role='assistant',providerID='deepseek',modelID='deepseek-flash',variant='high',agent='review-loop-flash',finish='stop')
-    if n==1: info['error']={'name':'APIError','data':{'statusCode':503,'message':'unavailable'}}
-    print(json.dumps({'messages':[{'info':{'role':'user'},'parts':[]},{'info':info,'parts':[{'type':'text','text':'NO ACTIONABLE FINDINGS'}]}]}))
-else:
-    raise SystemExit(2)
-""")
-        mock.chmod(0o700)
-        result = subprocess.run(['bash',str(SCRIPTS/'opencode-review.sh'),'run','deepseek/deepseek-flash','2','previous-session'], capture_output=True, env={**os.environ, 'REPO_ROOT':str(self.root),'WORK':str(work),'PATH':str(mockbin)+os.pathsep+os.environ['PATH'],'REVIEW_OUTPUT_PATHS':'[]'})
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn(b'STATUS=transient', result.stdout)
-        self.assertIn(b'STATUS=clean', result.stdout)
-        calls=[json.loads(line) for line in (work/'calls').read_text().splitlines()]
-        self.assertIn('--session', calls[0])
-        self.assertNotIn('--session', calls[1])
-        self.assertEqual(len(list(work.glob('opencode-*/a*.backup.tar'))),2)
-        (work/'count').write_text('0')
-        mutation = subprocess.run(['bash',str(SCRIPTS/'opencode-review.sh'),'run','deepseek/deepseek-flash','1'], capture_output=True, env={**os.environ,'MOCK_MUTATE':'1','REPO_ROOT':str(self.root),'WORK':str(work),'PATH':str(mockbin)+os.pathsep+os.environ['PATH'],'REVIEW_OUTPUT_PATHS':'[]'})
-        self.assertEqual(mutation.returncode,40,mutation.stdout+mutation.stderr)
-        self.assertIn(b'STATUS=mutated',mutation.stdout)
-        self.assertEqual((work/'count').read_text(),'1')
-
-
-
-class OpenCodeResults(unittest.TestCase):
-    def check(self, finish='stop', text='NO ACTIONABLE FINDINGS', error=None, variant='high', denied=False):
-        with tempfile.TemporaryDirectory() as d:
-            prefix = Path(d) / 'round'
-            prefix.with_suffix('.exit').write_text('0')
-            prefix.with_suffix('.err').write_text('')
-            prefix.with_suffix('.jsonl').write_text(json.dumps({'sessionID':'test'}) + '\n')
-            info = dict(role='assistant', providerID='deepseek', modelID='deepseek-flash', variant=variant, agent='review-loop-flash', finish=finish)
-            if error:
-                info['error'] = error
-            parts = [dict(type='text', text=text)]
-            if denied:
-                parts.append(dict(type='tool', tool='bash', state=dict(status='error', error='permission denied', input=dict(command='git diff'))))
-            prefix.with_suffix('.export.json').write_text(json.dumps({'messages':[{'info':{'role':'user'},'parts':[]}, {'info':info,'parts':parts}]}))
-            result = subprocess.run(['bash', str(SCRIPTS/'opencode-review.sh'), 'check', str(prefix), 'deepseek/deepseek-flash'], capture_output=True)
-            return result.returncode
-
-    def test_clean_and_findings(self):
-        self.assertEqual(self.check(), 0)
-        self.assertEqual(self.check(text='P1: concrete defect'), 10)
-
-    def test_empty_reply_and_transient_provider(self):
-        self.assertEqual(self.check(text=''), 31)
-        self.assertEqual(self.check(error={'name':'APIError','data':{'statusCode':503,'message':'unavailable'}}), 31)
-
-    def test_auth_model_mismatch_and_denials(self):
-        self.assertEqual(self.check(error={'name':'APIError','data':{'statusCode':401,'message':'unauthorized'}}), 30)
-        self.assertEqual(self.check(variant='low'), 20)
-        self.assertEqual(self.check(denied=True), 21)
-        self.assertEqual(self.check(finish='length'), 20)
 
 
 if __name__ == '__main__':

@@ -286,27 +286,20 @@ a piece of context), not a validation of what was already said.
 
 ## Review process
 
-After drafting, get one style review from a different model vendor when an
-execution tool can reach an authenticated CLI. Use the assistant's declared
-identity to identify the author vendor, not the presence of a tool or MCP server.
-Codex authors prefer Claude Code, then OpenCode with DeepSeek Flash; Claude
-authors prefer Codex, then OpenCode with DeepSeek Flash. DeepSeek authors prefer
-Codex, then Claude Code. If the author vendor is unknown, choose an available
-reviewer and disclose that cross-vendor independence could not be established.
-Neither a different CLI running the author's model nor a same-vendor subagent
-satisfies the cross-vendor requirement.
+After drafting, get one style review from a different model vendor when
+`cross-subagents` is available. Use the assistant's declared identity to
+identify the author vendor, not the presence of a tool or MCP server. Let
+cross-subagents select a prose-capable model with `--exclude-vendor <author
+vendor>` and `--max-tier 2`; an expensive flagship is not needed for
+copy-editing. Neither a different CLI running the author's model nor a
+same-vendor subagent satisfies the cross-vendor requirement. If the author
+vendor is unknown, choose an available reviewer and disclose that cross-vendor
+independence could not be established.
 
-OpenCode requires v2 or later. Before using it, check `opencode --version`.
-If it is below v2, warn the user to upgrade to OpenCode v2 or later and skip
-that candidate; try the next eligible vendor. Do not run v1 commands or upgrade
-the installation automatically. Treat an unreadable version as unavailable and
-warn that v2 compatibility could not be verified. If no eligible vendor remains,
-use the self-review/unmet-gate rules below.
-
-Read [references/style-review.md](references/style-review.md) for CLI commands,
-quota-aware model selection, `mise x` execution when a CLI is missing, output
-validation, and vendor fallbacks. This is a prose review, not the code review
-loop: do not invoke that skill's commit, repository backup, or multi-stage flow.
+Read [references/style-review.md](references/style-review.md) for the
+selection and tool-free invocation commands, output validation, and fallbacks.
+This is a prose review, not the code review loop: do not invoke that skill's
+commit, guard, or multi-stage flow.
 
 For every reviewer, including subagents, provide the absolute path of this
 `SKILL.md` as resolved in the current environment. Do not assume a reviewer

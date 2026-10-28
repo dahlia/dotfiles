@@ -11,6 +11,13 @@ Implements the 5-step selection procedure:
 
 Usage:
   python3 select_route.py --task code_review [--run-id <id>] [--exclude-vendor google] [--pin-agent codex] [--dry-run] [--human]
+  python3 select_route.py --task code_review --include-vendor openai --include-vendor anthropic --max-tier 2
+  python3 select_route.py --task code_review --steps 3 --step-spec '<json>' --step-spec '@spec.json'
+
+`--max-tier N` ranks models within each vendor by task-fit evidence only
+(1 = flagship, 2 = second tier) and is independent of quota, cost, and speed.
+`--steps` plans independent routes rather than a fallback chain, excluding
+already-chosen routes and, by default, already-used vendors.
 """
 
 from __future__ import annotations
@@ -734,6 +741,55 @@ def infer_model_vendor(route: dict[str, Any]) -> str:
     return infer_vendor_from_common(route["canonical_key"], route.get("provider"))
 
 
+def _tier_evidence_fit(canonical_key: str, task: str) -> float:
+    """Task fit used only for vendor-internal tier ranking.
+
+    Deliberately excludes quota, cost, speed, and agent-specific bonuses so a
+    vendor's flagship does not change identity because an account is tight or a
+    route happens to be native to its CLI.
+    """
+    prior = resolve_prior_for_route({"canonical_key": canonical_key})
+    prior_fits = prior.get("task_fit") or {}
+    fit = float(prior_fits.get(task, prior_fits.get("general", 0.70)))
+    survey = get_survey(canonical_key)
+    effective = (survey or {}).get("effective_confidence") or (survey or {}).get("confidence")
+    if survey and effective not in (None, "insufficient"):
+        survey_fits = survey.get("task_fit") or {}
+        raw = survey_fits.get(task, survey_fits.get("general"))
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and 0.0 <= float(raw) <= 1.0:
+            fit = float(raw)
+    return round(fit, 3)
+
+
+def compute_vendor_tier_ranks(all_models: dict[str, Any], task: str) -> dict[str, int]:
+    """Dense-rank each canonical model within its vendor (1 = top tier for `task`).
+
+    Ranking is per canonical model, so the same model served through several
+    providers or agents receives one rank. Ties share a rank, which keeps
+    `--max-tier 2` from arbitrarily dropping one of two equally strong models.
+    """
+    by_vendor: dict[str, dict[str, float]] = {}
+    for _agent, agent_data in (all_models or {}).items():
+        for route in (agent_data or {}).get("routes") or []:
+            canonical_key = route.get("canonical_key")
+            if not canonical_key:
+                continue
+            vendor = infer_vendor_from_common(canonical_key, route.get("provider"))
+            by_vendor.setdefault(vendor, {})[canonical_key] = _tier_evidence_fit(canonical_key, task)
+
+    ranks: dict[str, int] = {}
+    for _vendor, models in by_vendor.items():
+        ordered = sorted(models.items(), key=lambda item: (-item[1], item[0]))
+        last_fit: float | None = None
+        rank = 0
+        for canonical_key, fit in ordered:
+            if last_fit is None or fit != last_fit:
+                rank += 1
+                last_fit = fit
+            ranks[canonical_key] = rank
+    return ranks
+
+
 def get_pins_path(run_id: str | None = None) -> Path:
     if run_id:
         validate_safe_identifier(run_id, "run_id")
@@ -835,6 +891,7 @@ def check_route_eligibility(
     eff_pin_model: str | None = None,
     excl_agents: set[str] | None = None,
     excl_vendors: set[str] | None = None,
+    incl_vendors: set[str] | None = None,
     quality_floor: float | None = None,
     is_explicit_route: bool = False,
 ) -> tuple[bool, str | None, dict[str, Any], dict[str, Any]]:
@@ -865,6 +922,8 @@ def check_route_eligibility(
         return False, f"excluded_agent:{agent}", q_eval, traits
     if excl_vendors and vendor in excl_vendors:
         return False, f"excluded_vendor:{vendor}", q_eval, traits
+    if incl_vendors and vendor not in incl_vendors:
+        return False, f"vendor_not_included:{vendor}", q_eval, traits
     if eff_pin_agent and agent != eff_pin_agent:
         return False, f"pinned_agent_mismatch:{agent}!={eff_pin_agent}", q_eval, traits
     if eff_pin_provider and route["provider"] != eff_pin_provider:
@@ -951,9 +1010,17 @@ def select_routes(
     pin_model: str | None = None,
     exclude_agents: list[str] | None = None,
     exclude_vendors: list[str] | None = None,
+    include_vendors: list[str] | None = None,
+    max_tier: int | None = None,
+    exclude_route_ids: list[str] | None = None,
+    exclude_canonical_keys: list[str] | None = None,
+    exclude_buckets: list[str] | None = None,
     quality_floor: float | None = None,
     refresh_quota: bool = False,
     run_id: str | None = None,
+    use_saved_pins: bool = True,
+    all_models: dict[str, Any] | None = None,
+    quota_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the 5-step route selection algorithm and return top route + fallback chain."""
     task_norm = task.strip().lower().replace("-", "_")
@@ -963,19 +1030,24 @@ def select_routes(
         speed_norm = "normal"
     speed_weight = SPEED_WEIGHTS[speed_norm]
 
-    pins = load_session_pins(run_id=run_id)
+    pins = load_session_pins(run_id=run_id) if use_saved_pins else {}
     eff_pin_agent = canonical_agent_name(pin_agent) if pin_agent else pins.get("pin_agent")
     eff_pin_provider = (pin_provider or pins.get("pin_provider") or "").strip().lower() or None
     eff_pin_model = (pin_model or pins.get("pin_model") or "").strip().lower() or None
 
     excl_agents = {canonical_agent_name(a) for a in (exclude_agents or [])}
     excl_vendors = {v.strip().lower() for v in (exclude_vendors or [])}
+    incl_vendors = {v.strip().lower() for v in (include_vendors or []) if v.strip()}
+    excl_routes = {r.strip().lower() for r in (exclude_route_ids or []) if r.strip()}
+    excl_canonicals = {c.strip().lower() for c in (exclude_canonical_keys or []) if c.strip()}
+    excl_buckets = {b.strip() for b in (exclude_buckets or []) if b.strip()}
     req_mods = {m.strip().lower() for m in (require_modalities or []) if m.strip()}
     if require_vision:
         req_mods.add("image")
 
-    all_models = collect_all_models(refresh=False)
-    quota_state = collect_quota(refresh=refresh_quota)
+    all_models = all_models if all_models is not None else collect_all_models(refresh=False)
+    quota_state = quota_state if quota_state is not None else collect_quota(refresh=refresh_quota)
+    tier_ranks = compute_vendor_tier_ranks(all_models, task_norm) if max_tier else {}
 
     candidates: list[dict[str, Any]] = []
     filtered_out: list[dict[str, str]] = []
@@ -990,6 +1062,12 @@ def select_routes(
 
         for route in a_data.get("routes") or []:
             r_id = route["route_id"]
+            if r_id.lower() in excl_routes:
+                filtered_out.append({"route_id": r_id, "reason": "excluded_route"})
+                continue
+            if route["canonical_key"].lower() in excl_canonicals:
+                filtered_out.append({"route_id": r_id, "reason": "excluded_canonical_model"})
+                continue
             if route.get("hidden") and eff_pin_model not in (
                 route["model_id"].lower(),
                 route["canonical_key"].lower(),
@@ -1012,12 +1090,21 @@ def select_routes(
                 eff_pin_model=eff_pin_model,
                 excl_agents=excl_agents,
                 excl_vendors=excl_vendors,
+                incl_vendors=incl_vendors,
                 quality_floor=floor,
                 is_explicit_route=False,
             )
             if not ok:
                 filtered_out.append({"route_id": r_id, "reason": reason or "filtered"})
                 continue
+
+            if excl_buckets:
+                route_buckets = set(
+                    q_eval.get("applicable_buckets") or [q_eval.get("bucket_id")]
+                )
+                if route_buckets & excl_buckets:
+                    filtered_out.append({"route_id": r_id, "reason": "excluded_bucket"})
+                    continue
 
             vendor = infer_model_vendor(route)
             scarcity = q_eval["scarcity"]
@@ -1061,9 +1148,12 @@ def select_routes(
             off_model = route.get("official_model_id") or resolve_official_model_id(
                 route.get("resolved_model_id") or route["model_id"], all_models=all_models
             )
+            tier_rank = tier_ranks.get(route["canonical_key"])
+            tier_str = f", vendor tier {tier_rank}" if tier_rank else ""
             rationale = (
                 f"{r_id} [{off_agent} / {off_model}] selected — {task_norm} fit {traits['task_fit']:.2f} "
-                f"({traits['trait_source']}){vision_str}{speed_str}, {q_eval['bucket_id']} {used_str}{reset_str}, score {score:.3f}"
+                f"({traits['trait_source']}){vision_str}{speed_str}{tier_str}, "
+                f"{q_eval['bucket_id']} {used_str}{reset_str}, score {score:.3f}"
             )
 
             candidates.append(
@@ -1090,10 +1180,26 @@ def select_routes(
                     "tokens_per_sec": traits["tokens_per_sec"],
                     "speed_score": speed_score,
                     "quota": q_eval,
+                    "vendor_tier_rank": tier_ranks.get(route["canonical_key"]),
                     "_headroom_sort": headroom_sort,
                     "rationale": rationale,
                 }
             )
+
+    if max_tier is not None:
+        kept: list[dict[str, Any]] = []
+        for candidate in candidates:
+            rank = tier_ranks.get(candidate["canonical_key"])
+            if rank is not None and rank > max_tier:
+                filtered_out.append(
+                    {
+                        "route_id": candidate["route_id"],
+                        "reason": f"vendor_tier:{rank}>max_tier:{max_tier}",
+                    }
+                )
+                continue
+            kept.append(candidate)
+        candidates = kept
 
     candidates.sort(
         key=lambda c: (
@@ -1115,6 +1221,7 @@ def select_routes(
             "status": "no_route_available",
             "task": task_norm,
             "quality_floor": floor,
+            "max_tier": max_tier,
             "selected": None,
             "fallbacks": [],
             "filtered_count": len(filtered_out),
@@ -1171,6 +1278,7 @@ def select_routes(
         "selected_at": now_iso(),
         "task": task_norm,
         "quality_floor": floor,
+        "max_tier": max_tier,
         "rationale": selected["rationale"],
         "selected": selected,
         "fallbacks": fallbacks,
@@ -1178,9 +1286,219 @@ def select_routes(
     }
 
 
-def main() -> int:
+STEP_SPEC_KEYS = frozenset(
+    {
+        "task",
+        "speed",
+        "max_tier",
+        "quality_floor",
+        "min_context",
+        "min_headroom",
+        "allow_micro_quota",
+        "allow_estimated_capabilities",
+        "include_vendor",
+        "exclude_vendor",
+        "exclude_agent",
+        "exclude_route",
+        "require_modality",
+        "require_vision",
+        "pin_agent",
+        "pin_provider",
+        "pin_model",
+    }
+)
+STEP_SPEC_LIST_KEYS = frozenset(
+    {"include_vendor", "exclude_vendor", "exclude_agent", "exclude_route", "require_modality"}
+)
+
+
+def _normalize_str_list(value: Any, label: str) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return list(value)
+    raise ValueError(f"step spec field '{label}' must be a string or a list of strings")
+
+
+def parse_step_spec(raw: str) -> dict[str, Any]:
+    """Parse one `--step-spec` value: inline JSON or `@path/to/spec.json`."""
+    text = raw.strip()
+    if text.startswith("@"):
+        try:
+            text = Path(text[1:]).expanduser().read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(f"cannot read step spec file: {exc}") from exc
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"step spec is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("step spec must be a JSON object")
+    unknown = sorted(set(data) - STEP_SPEC_KEYS)
+    if unknown:
+        raise ValueError(f"unknown step spec field(s): {', '.join(unknown)}")
+
+    parsed: dict[str, Any] = {}
+    for key, value in data.items():
+        if key in STEP_SPEC_LIST_KEYS:
+            parsed[key] = _normalize_str_list(value, key)
+        elif key in ("max_tier", "min_context"):
+            try:
+                parsed[key] = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"step spec field '{key}' must be an integer") from exc
+            if key == "max_tier" and parsed[key] < 1:
+                raise ValueError("step spec field 'max_tier' must be at least 1")
+        elif key in ("quality_floor", "min_headroom"):
+            try:
+                parsed[key] = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"step spec field '{key}' must be a number") from exc
+        elif key in ("allow_micro_quota", "allow_estimated_capabilities", "require_vision"):
+            parsed[key] = bool(value)
+        else:
+            parsed[key] = str(value)
+    return parsed
+
+
+def select_step_plan(
+    specs: list[dict[str, Any]],
+    defaults: dict[str, Any] | None = None,
+    require_distinct_vendor: bool = True,
+    require_distinct_bucket: bool = False,
+    refresh_quota: bool = False,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    """Plan N independent review/generation steps.
+
+    Each step is a full route selection with its own constraints. Steps are
+    independent (not fallbacks): a route already chosen by an earlier step is
+    excluded, and by default each step must use a different model vendor so the
+    later steps provide an independent check rather than a repeat.
+    """
+    base = dict(defaults or {})
+    all_models = collect_all_models(refresh=False)
+    quota_state = collect_quota(refresh=refresh_quota)
+    used_routes: set[str] = set()
+    used_canonicals: set[str] = set()
+    used_vendors: set[str] = set()
+    used_buckets: set[str] = set()
+    steps: list[dict[str, Any]] = []
+    unfilled: list[dict[str, Any]] = []
+
+    for index, spec in enumerate(specs, 1):
+        merged = {**base, **spec}
+        task = str(merged.get("task") or "general").strip().lower().replace("-", "_")
+        task_norm = task or "general"
+
+        # Global exclusions are hard constraints for the whole plan. A step
+        # spec may add exclusions, but must not be able to drop a global one.
+        exclude_vendors = list(
+            dict.fromkeys(
+                [*(base.get("exclude_vendor") or []), *(spec.get("exclude_vendor") or [])]
+            )
+        )
+        exclude_agents = list(
+            dict.fromkeys(
+                [*(base.get("exclude_agent") or []), *(spec.get("exclude_agent") or [])]
+            )
+        )
+        if require_distinct_vendor:
+            exclude_vendors.extend(v for v in sorted(used_vendors) if v not in exclude_vendors)
+
+        # A per-step spec must not be able to re-enable a globally excluded
+        # route: union the global list, the step list, and earlier selections.
+        excluded_routes = {
+            str(route_id).strip().lower()
+            for source in (base.get("exclude_route"), spec.get("exclude_route"))
+            for route_id in (source or [])
+            if str(route_id).strip()
+        } | used_routes
+
+        speed = str(merged.get("speed") or "normal").strip().lower()
+        res = select_routes(
+            task=task_norm,
+            min_context=merged.get("min_context"),
+            require_modalities=merged.get("require_modality"),
+            require_vision=bool(merged.get("require_vision")),
+            speed=speed,
+            allow_estimated_capabilities=bool(merged.get("allow_estimated_capabilities")),
+            allow_micro_quota=bool(merged.get("allow_micro_quota")),
+            min_headroom=merged.get("min_headroom"),
+            pin_agent=merged.get("pin_agent"),
+            pin_provider=merged.get("pin_provider"),
+            pin_model=merged.get("pin_model"),
+            exclude_agents=exclude_agents,
+            exclude_vendors=exclude_vendors,
+            include_vendors=merged.get("include_vendor"),
+            max_tier=merged.get("max_tier"),
+            exclude_route_ids=sorted(excluded_routes),
+            exclude_canonical_keys=sorted(used_canonicals),
+            exclude_buckets=sorted(used_buckets) if require_distinct_bucket else None,
+            quality_floor=merged.get("quality_floor"),
+            refresh_quota=False,
+            run_id=run_id,
+            use_saved_pins=False,
+            all_models=all_models,
+            quota_state=quota_state,
+        )
+
+        if res["status"] != "ok" or not res.get("selected"):
+            unfilled.append(
+                {
+                    "step": index,
+                    "task": task_norm,
+                    "reason": res["status"],
+                    "filtered_sample": res.get("filtered_sample"),
+                }
+            )
+            continue
+
+        selected = res["selected"]
+        used_routes.add(selected["route_id"])
+        used_canonicals.add(selected["canonical_key"])
+        used_vendors.add(selected["vendor"])
+        selected_buckets = set(selected["quota"].get("applicable_buckets") or [selected["quota_bucket"]])
+        used_buckets.update(selected_buckets)
+        steps.append(
+            {
+                "step": index,
+                "task": task_norm,
+                "constraints": {
+                    "speed": speed,
+                    "include_vendor": merged.get("include_vendor") or [],
+                    "exclude_vendor": exclude_vendors,
+                    "max_tier": merged.get("max_tier"),
+                    "quality_floor": res.get("quality_floor"),
+                },
+                "selected": selected,
+                "fallbacks": res.get("fallbacks") or [],
+                "rationale": res["rationale"],
+            }
+        )
+
+    status = "ok" if not unfilled else ("partial" if steps else "no_route_available")
+    return {
+        "status": status,
+        "planned_at": now_iso(),
+        "step_count": len(specs),
+        "filled": len(steps),
+        "constraints": {
+            "require_distinct_vendor": require_distinct_vendor,
+            "require_distinct_bucket": require_distinct_bucket,
+        },
+        "steps": steps,
+        "unfilled": unfilled,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
     enforce_utf8()
-    parser = argparse.ArgumentParser(description="Select optimal model route and fallback chain.")
+    parser = argparse.ArgumentParser(
+        description="Select an optimal model route, fallback chain, or multi-step plan."
+    )
     parser.add_argument("--task", default="general", help="Task category (e.g. code_review, debugging, prose).")
     parser.add_argument("--run-id", help="Optional run ID for run-scoped pins.")
     parser.add_argument("--min-context", type=int, help="Minimum required verified context window in tokens.")
@@ -1221,6 +1539,46 @@ def main() -> int:
     parser.add_argument("--pin-model", help="Restrict selection to a specific model ID or canonical key.")
     parser.add_argument("--exclude-agent", action="append", help="Exclude agent(s) from selection.")
     parser.add_argument("--exclude-vendor", action="append", help="Exclude model vendor(s) (e.g. openai, anthropic, google).")
+    parser.add_argument(
+        "--include-vendor",
+        action="append",
+        help="Restrict selection to model vendor(s) (repeatable; e.g. openai anthropic google).",
+    )
+    parser.add_argument("--exclude-route", action="append", help="Exclude an explicit route_id (repeatable).")
+    parser.add_argument(
+        "--max-tier",
+        type=int,
+        help="Keep only models ranked at or above this vendor-internal tier (1 = flagship, 2 = second tier).",
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        help="Plan N independent steps instead of one route, applying the global constraints to each.",
+    )
+    parser.add_argument(
+        "--step-spec",
+        action="append",
+        help="Per-step constraint JSON (inline or @file), repeatable; implies --steps.",
+    )
+    step_distinct = parser.add_mutually_exclusive_group()
+    step_distinct.add_argument(
+        "--step-distinct-vendor",
+        dest="step_distinct_vendor",
+        action="store_true",
+        default=True,
+        help="Require each planned step to use a different model vendor (default).",
+    )
+    step_distinct.add_argument(
+        "--no-step-distinct-vendor",
+        dest="step_distinct_vendor",
+        action="store_false",
+        help="Allow several planned steps to use the same model vendor.",
+    )
+    parser.add_argument(
+        "--step-distinct-bucket",
+        action="store_true",
+        help="Require each planned step to use a different quota bucket.",
+    )
     parser.add_argument("--quality-floor", type=float, help="Override minimum task_fit quality floor.")
     parser.add_argument("--save-pin", action="store_true", help="Persist --pin-* flags as session/run pins.")
     parser.add_argument("--clear-pins", action="store_true", help="Clear persisted session/run pins.")
@@ -1228,7 +1586,11 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Show selection rationale and fallback chain without executing.")
     parser.add_argument("--human", action="store_true", help="Print concise human-readable summary.")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    if args.max_tier is not None and args.max_tier < 1:
+        print("select_route: --max-tier must be at least 1", file=sys.stderr)
+        return 2
 
     if args.clear_pins:
         save_session_pins({"pin_agent": None, "pin_provider": None, "pin_model": None}, run_id=args.run_id)
@@ -1244,6 +1606,74 @@ def main() -> int:
         )
 
     eff_speed = "fast" if (args.prefer_fast and args.speed == "normal") else args.speed
+
+    if args.step_spec or args.steps is not None:
+        try:
+            specs = [parse_step_spec(raw) for raw in (args.step_spec or [])]
+        except ValueError as exc:
+            print(f"select_route: {exc}", file=sys.stderr)
+            return 2
+        if args.steps is not None and args.steps < len(specs):
+            print(
+                f"select_route: --steps {args.steps} is smaller than {len(specs)} --step-spec entries",
+                file=sys.stderr,
+            )
+            return 2
+        step_count = args.steps if args.steps is not None else len(specs)
+        if step_count is not None and step_count < 1:
+            print("select_route: --steps must be at least 1", file=sys.stderr)
+            return 2
+        while len(specs) < step_count:
+            specs.append({})
+
+        defaults = {
+            "task": args.task,
+            "speed": eff_speed,
+            "min_context": args.min_context,
+            "require_modality": args.require_modality,
+            "require_vision": args.require_vision,
+            "allow_estimated_capabilities": args.allow_estimated_capabilities,
+            "allow_micro_quota": args.allow_micro_quota,
+            "min_headroom": args.min_headroom,
+            "pin_agent": args.pin_agent,
+            "pin_provider": args.pin_provider,
+            "pin_model": args.pin_model,
+            "exclude_agent": args.exclude_agent,
+            "exclude_vendor": args.exclude_vendor,
+            "include_vendor": args.include_vendor,
+            "exclude_route": args.exclude_route,
+            "max_tier": args.max_tier,
+            "quality_floor": args.quality_floor,
+        }
+        plan = select_step_plan(
+            specs,
+            defaults=defaults,
+            require_distinct_vendor=args.step_distinct_vendor,
+            require_distinct_bucket=args.step_distinct_bucket,
+            refresh_quota=args.refresh_quota,
+            run_id=args.run_id,
+        )
+        if args.human:
+            if plan["status"] == "no_route_available":
+                print("No route available for any planned step.")
+                return 1
+            for entry in plan["steps"]:
+                selected = entry["selected"]
+                tier = selected.get("vendor_tier_rank")
+                tier_note = f", tier={tier}" if tier else ""
+                print(
+                    f"step {entry['step']}: {selected['route_id']} "
+                    f"(score={selected['score']:.3f}, fit={selected['task_fit']:.2f}"
+                    f"{tier_note}, bucket={selected['quota']['bucket_id']})"
+                )
+                for fb_idx, fb in enumerate(entry.get("fallbacks") or [], 1):
+                    print(f"  fallback {fb_idx}: {fb['route_id']}")
+            for missing in plan["unfilled"]:
+                print(f"step {missing['step']}: unfilled ({missing['reason']})")
+            return 0 if plan["status"] == "ok" else 1
+        print(json.dumps(plan, indent=2, ensure_ascii=False))
+        return 0 if plan["status"] == "ok" else 1
+
     res = select_routes(
         task=args.task,
         min_context=args.min_context,
@@ -1258,6 +1688,9 @@ def main() -> int:
         pin_model=args.pin_model,
         exclude_agents=args.exclude_agent,
         exclude_vendors=args.exclude_vendor,
+        include_vendors=args.include_vendor,
+        max_tier=args.max_tier,
+        exclude_route_ids=args.exclude_route,
         quality_floor=args.quality_floor,
         refresh_quota=args.refresh_quota,
         run_id=args.run_id,

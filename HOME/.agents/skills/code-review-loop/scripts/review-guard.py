@@ -9,10 +9,16 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
 import tarfile
+
+# Persistent index flags worth detecting: assume-valid, skip-worktree and
+# intent-to-add. Transient flags such as CE_UPDATE_IN_BASE (0x04000000) are
+# set by ordinary stat refreshes and are masked out.
+INDEX_PERSISTENT_FLAG_MASK = 0xE0000000
 
 
 def git(root, *args):
@@ -39,7 +45,21 @@ def record(path):
     raise ValueError(f'unsupported special file: {path}')
 
 
-def tree(root, allowed, tracked):
+def discover_nested(root):
+    """Find nested repositories before pruning allowed output directories."""
+    found = []
+    for dirpath, dirnames, _filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [name for name in dirnames if name != '.git']
+        directory = Path(dirpath)
+        if directory == root:
+            continue
+        marker = directory / '.git'
+        if marker.exists() or marker.is_symlink():
+            found.append(directory.relative_to(root).as_posix())
+    return found
+
+
+def tree(root, allowed, tracked, nested_roots=None):
     """Record the working tree, and list nested repositories found in it.
 
     A directory holding its own `.git` (a submodule, or any repository nested
@@ -47,8 +67,20 @@ def tree(root, allowed, tracked):
     directory is left to `metadata()`, which records the same Git state for
     it as for the top-level repository and, like there, skips object storage.
     A `.git` file (a gitdir pointer, as in submodules) is recorded as a file.
+    Tracked files inside a nested repository are protected too, so an allowed
+    output directory cannot hide a submodule-tracked file.
     """
     result, nested = {}, []
+    nested_roots = list(nested_roots or [])
+    protected_paths = set(tracked)
+    for rel_repo in nested_roots:
+        try:
+            for item in git(root / rel_repo, 'ls-files', '-z').split(b'\0'):
+                if item:
+                    protected_paths.add(f'{rel_repo}/{os.fsdecode(item)}')
+        except subprocess.CalledProcessError:
+            pass
+
     def visit(directory):
         marker = directory / '.git'
         if directory != root and (marker.exists() or marker.is_symlink()):
@@ -60,8 +92,11 @@ def tree(root, allowed, tracked):
             if path.name == '.git' and path.is_dir() and not path.is_symlink():
                 continue
             excluded = any(rel == p or rel.startswith(p + '/') for p in allowed)
-            protected = rel in tracked or any(t.startswith(rel + '/') for t in tracked)
-            if excluded and not protected:
+            protected = rel in protected_paths or any(
+                t.startswith(rel + '/') for t in protected_paths
+            )
+            contains_repo = any(n == rel or n.startswith(rel + '/') for n in nested_roots)
+            if excluded and not protected and not contains_repo:
                 continue
             result[rel] = record(path)
             if result[rel][0] == 'dir':
@@ -73,27 +108,50 @@ def tree(root, allowed, tracked):
 def metadata(root, marker=True):
     # Git paths can live outside the working directory in a linked worktree,
     # and a submodule's live in the superproject's .git/modules.
-    names = ['HEAD', 'index', 'refs', 'config', 'config.worktree', 'packed-refs',
+    names = ['HEAD', 'index', 'refs', 'config', 'config.worktree', 'commondir', 'packed-refs',
              'MERGE_HEAD', 'MERGE_MSG', 'MERGE_MODE', 'ORIG_HEAD',
              'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'AUTO_MERGE',
              'rebase-merge', 'rebase-apply', 'sequencer', 'info/sparse-checkout']
     index = Path(os.fsdecode(git(root, 'rev-parse', '--git-path', 'index')).strip())
     if not index.is_absolute():
         index = root / index
-    names.extend(path.name for path in sorted(index.parent.glob('sharedindex.*')))
+    shared_names = {path.name for path in sorted(index.parent.glob('sharedindex.*'))}
+    names.extend(sorted(shared_names))
     result, paths = {}, {}
     for name in names:
         path = Path(os.fsdecode(git(root, 'rev-parse', '--git-path', name)).strip())
         if not path.is_absolute():
             path = root / path
         paths[name] = path
+        if name in shared_names:
+            # Back these up for recovery but do not compare raw bytes: Git
+            # rewrites a shared index during a stat refresh even when staging
+            # is unchanged. The semantic index below covers real changes.
+            continue
         if path.exists() or path.is_symlink():
-            result[name] = record(path)
+            if name == 'index':
+                # Git refreshes the index stat cache during read-only commands
+                # such as `git status`/`git diff`. Compare the staged entries
+                # (mode, blob, stage, path, assume-unchanged) plus the index
+                # flags (including intent-to-add) instead of raw bytes, so
+                # normal inspection is not a mutation while staging, unstaging
+                # or intent-to-add changes still are.
+                stage = os.fsdecode(git(root, 'ls-files', '--stage', '-v', '-z'))
+                debug = git(root, 'ls-files', '--debug', '-z')
+                flags = [
+                    f'{int(item.decode("ascii"), 16) & INDEX_PERSISTENT_FLAG_MASK:08x}'
+                    for item in re.findall(rb'flags: ([0-9a-f]+)', debug)
+                ]
+                result[name] = ['index-semantic', stage, flags]
+            else:
+                result[name] = record(path)
             if path.is_dir() and not path.is_symlink():
                 for child in sorted(path.rglob('*')):
                     result[name + '/' + child.relative_to(path).as_posix()] = record(child)
-    if marker and (root / '.git').is_file():
-        result['git-marker'] = record(root / '.git')
+    marker_path = root / '.git'
+    if marker and (marker_path.is_file() or marker_path.is_symlink()):
+        result['git-marker'] = record(marker_path)
+        paths['git-marker'] = marker_path
     result['refs-list'] = os.fsdecode(git(root, 'for-each-ref', '--format=%(refname) %(objectname) %(symref)'))
     return result, paths
 
@@ -107,7 +165,7 @@ def snapshot(root, allowed, tracked):
     stray gitlinks with no .gitmodules entry) need nothing extra: the index
     already records their commits, and the tree records their directories.
     """
-    files, nested = tree(root, allowed, tracked)
+    files, nested = tree(root, allowed, tracked, discover_nested(root))
     state, paths = {'tree': files}, {}
     state['git'], paths[''] = metadata(root)
     for rel in nested:
@@ -118,7 +176,7 @@ def snapshot(root, allowed, tracked):
             top = None
         if top != repo.resolve():
             raise ValueError(f'cannot resolve the Git directory of nested repository {rel}')
-        state[f'git[{rel}]'], paths[rel] = metadata(repo, marker=False)
+        state[f'git[{rel}]'], paths[rel] = metadata(repo, marker=True)
     return state, paths
 
 
