@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cross-subagents.local/meta.schema.json",
+  "title": "CrossSubagentsTaskMeta",
+  "description": "Execution metadata contract written to $SKILL_CACHE_DIR/runs/<run-id>/<task-id>/meta.json by scripts/run.py.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "task_id",
+    "route_id",
+    "agent",
+    "provider",
+    "model",
+    "status",
+    "exit_code",
+    "started_at",
+    "ended_at",
+    "duration_ms",
+    "session_id",
+    "usage",
+    "error_class"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 2
+    },
+    "run_id": { "type": "string" },
+    "task_id": { "type": "string" },
+    "parent_instance": { "type": ["string", "null"] },
+    "parent_task_id": { "type": ["string", "null"] },
+    "attempt": { "type": "integer", "minimum": 0 },
+    "route_id": { "type": "string" },
+    "agent": {
+      "type": "string",
+      "enum": ["codex", "claude-code", "opencode", "antigravity"]
+    },
+    "official_agent": {
+      "type": "string",
+      "enum": ["Codex", "Claude Code", "OpenCode", "Antigravity"]
+    },
+    "provider": { "type": "string" },
+    "model": { "type": "string" },
+    "official_model_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.-]*$"
+    },
+    "variant": { "type": ["string", "null"] },
+    "effort": { "type": ["string", "null"] },
+    "sandbox_mode": {
+      "type": "string",
+      "enum": ["workspace-write", "read-only", "bypass"]
+    },
+    "cwd": { "type": ["string", "null"] },
+    "requested_model": { "type": ["string", "null"] },
+    "observed_model": { "type": ["string", "null"] },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "failed", "timeout", "quota", "deferred_capacity"]
+    },
+    "exit_code": { "type": "integer" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "ended_at": { "type": "string", "format": "date-time" },
+    "duration_ms": { "type": "integer", "minimum": 0 },
+    "session_id": { "type": ["string", "null"] },
+    "resumable": { "type": "boolean" },
+    "session_cleaned_up": { "type": ["boolean", "null"] },
+    "cleanup_note": { "type": ["string", "null"] },
+    "usage": {
+      "type": "object",
+      "required": ["input_tokens", "output_tokens"],
+      "properties": {
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "error_class": {
+      "type": ["string", "null"],
+      "enum": [
+        null,
+        "not_installed",
+        "no_option",
+        "auth",
+        "model_unavailable",
+        "quota",
+        "permission",
+        "timeout",
+        "format",
+        "capacity",
+        "failed"
+      ]
+    },
+    "error": { "type": ["string", "null"] },
+    "maintenance_notice": { "type": ["object", "null"] },
+    "selection_rationale": { "type": "string" },
+    "task_summary": { "type": ["string", "null"] },
+    "outcome_summary": { "type": ["string", "null"] },
+    "significant": { "type": "boolean" },
+    "prompt_size_warning": { "type": ["string", "null"] },
+    "attempt_dir": { "type": ["string", "null"] },
+    "result_file": { "type": ["string", "null"] },
+    "lease_mode": { "type": ["string", "null"] }
+  },
+  "additionalProperties": true
+}

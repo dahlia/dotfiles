@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cross-subagents.local/result.schema.json",
+  "title": "CrossSubagentsTaskResult",
+  "description": "Structured JSON output schema when a subagent is asked to return machine-readable findings or deliverables alongside result.md.",
+  "type": "object",
+  "required": ["status", "summary"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["completed", "partial", "blocked", "failed"]
+    },
+    "summary": {
+      "type": "string",
+      "description": "Concise explanation of what was accomplished or found."
+    },
+    "modified_files": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Repository-relative paths modified by this subagent within its declared write_set."
+    },
+    "commands_executed": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Verification or inspection commands executed during the task."
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "message"],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"]
+          },
+          "file": { "type": ["string", "null"] },
+          "line": { "type": ["integer", "null"] },
+          "message": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "follow_up_needed": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": true
+}
