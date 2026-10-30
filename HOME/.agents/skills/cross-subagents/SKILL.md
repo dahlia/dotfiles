@@ -100,7 +100,12 @@ and populate the route catalog (24-hour TTL):
 ~~~~ bash
 python3 <skill-dir>/scripts/probe.py --human
 python3 <skill-dir>/scripts/models.py collect --human
+python3 <skill-dir>/scripts/defects.py list --human
 ~~~~
+
+The last command lists open defect reports about this skill; see
+[skill defect reports](#skill-defect-reports-self-improvement-loop) for when to
+add one and how to report it to the user at the end.
 
 When multiple installations exist on `PATH` (for example, a `mise` install
 alongside a system package), `probe.py` resolves `mise` shims and records all
@@ -166,6 +171,10 @@ Useful selection flags:
     acceptable).
  -  `--dry-run` prints the selected route, one-line rationale, and fallback
     chain without executing a subagent.
+ -  `--sandbox <read-only|workspace-write|bypass>` excludes routes whose
+    installed CLI cannot honour the posture. Older Antigravity builds without
+    `--mode`/`--sandbox` are skipped for read-only and workspace-write work
+    instead of wasting an attempt; pass the same value to `run.py`.
 
 Always print the one-line selection rationale so the user can see which route
 was chosen and why (task fit, vision/speed traits when requested, vendor tier,
@@ -305,9 +314,34 @@ Three flags shape the execution posture:
     `duration_ms`, `requested_model`, `observed_model`, `session_id`,
     `resumable`, `session_cleaned_up`, `usage`, `error_class`,
     `selection_rationale`, `tool_policy`, `tools_enforced`,
-    `permission_denials`, `model_verified`, and `guard`).
+    `denials_observed`, `warnings`, `attempt_result_file`, `model_verified`,
+    and `guard`).
  -  `manifest.jsonl` maintains an append-only audit log of `task_started` and
     `task_finished` events across the run.
+
+#### Denials, failed attempts, and reading the answer
+
+`denials_observed` is advisory. It lists tool calls the CLI explicitly refused
+(a denied/declined status, a denial flag, or a tool-runner error naming an OS or
+sandbox denial such as `EPERM`/`EACCES`). A completed turn with a verified final
+answer is still `status: ok` even when the list is non-empty; only an incomplete
+turn or a missing answer fails. Ordinary command output is never treated as
+evidence of a denial, so a failing test or a file that happens to contain the
+word "permission" cannot fail a task. Inspect the list when the answer looks
+short, and tell the user when a refusal plausibly changed the result.
+
+When an attempt fails but did produce text (for example a turn that stopped
+before `turn.completed`), `meta.json` points at it with `attempt_result_file`
+(`attempts/attempt-<N>/result.md` or `partial_result.md`). Read that file
+instead of mining `events.jsonl`. The task-level `result.md` is published only
+for a successful attempt.
+
+`warnings` is the same idea for non-denial noise: CLI error events, or an
+earlier step's error, that a later verified completion recovered from. These do
+not change `status`. Failure classification (`error_class`) uses only structured
+CLI error output—stderr, error events, or the CLI's own error payload—never the
+agent's transcript or command output, so a failing test that prints `429` or
+`quota exceeded` cannot mark an account as exhausted.
 
 ### Step 5: Manage coroutines, permissions, and verification
 
@@ -355,7 +389,9 @@ unless isolated in a separate worktree).
 
 After `run.py` completes, always read `<task-id>/meta.json` and
 `<task-id>/result.md`, and verify `git status --short` and `git diff` against
-the task's `write_set`.
+the task's `write_set`. If the task failed, read the path in
+`meta.json.attempt_result_file` when present, and review `denials_observed`
+before deciding whether to retry or fall back.
 
 #### Optional protected-input guard
 
@@ -473,6 +509,17 @@ python3 <skill-dir>/scripts/run.py report --run-id <run-id> --human
 python3 <skill-dir>/scripts/run.py report --run-id <run-id> --only-significant
 ~~~~
 
+Then check for defect reports recorded during this run and include them in the
+same final message, as described in
+[skill defect reports](#skill-defect-reports-self-improvement-loop):
+
+~~~~ bash
+python3 <skill-dir>/scripts/defects.py list --run-id <run-id> --human
+~~~~
+
+If the list is non-empty, name each report path, its severity, and a one-line
+title so the user can fix the skill without hunting for the files.
+
 
 Multi-agent fan-out and orchestration
 -------------------------------------
@@ -493,6 +540,78 @@ batch:
  -  Schedule concurrent writes via the write-set ladder: disjoint `write_set`
     directories in place, single-writer token when sets overlap, serialized
     access for lockfiles and schemas, and Git worktrees only as a last resort.
+
+
+Skill defect reports (self-improvement loop)
+---------------------------------------------
+
+This skill maintains itself through the sessions that use it. Whenever an
+execution reveals a defect *in the skill*—not in the user's repository or in the
+model's answer—record it immediately in a report file and continue with the best
+available workaround. At the end of the workflow, tell the user that reports
+exist and where they are.
+
+Record a report when, for example:
+
+ -  a helper script exits with a traceback, writes a wrong `status`/`error_class`,
+    or contradicts its documented behavior;
+ -  a documented flag or option is rejected by an installed CLI, or an adapter
+    misparses a stream/export and misreports the result;
+ -  route selection returns a route that cannot honor the requested posture
+    (`--sandbox`, `--no-tools`, vision), or a model that the user can actually
+    reach is missing from the catalog;
+ -  a workaround had to be invented for something the reference docs claim is
+    handled, or a fallback burned quota because the primary route was
+    misclassified.
+
+Do not record model-quality complaints, failures caused by the user's code, or
+ordinary quota/timeout errors: those already have an `error_class` and belong to
+the run report.
+
+~~~~ bash
+python3 <skill-dir>/scripts/defects.py new \
+  --title "Codex marks completed turns failed after a failing test" \
+  --summary "A completed Codex turn was reported failed because a failing test printed 'permission'." \
+  --severity blocker \
+  --area "scripts/run.py _tool_denial" \
+  --step "Step 4: invoke run.py" \
+  --observed "status=failed, error_class=permission, error='Empty result from Codex.'" \
+  --expected "status=ok with the verified final answer" \
+  --reproduction "<exact command>" \
+  --impact "Discarded 3 of 3 answers and wasted fallback quota." \
+  --evidence "$SKILL_CACHE_DIR/runs/<run-id>/<task-id>/attempts/attempt-1/events.jsonl" \
+  --run-id <run-id> --task-id <task-id>
+~~~~
+
+`new` prints the report path; `--json` prints `{id, path, severity, title}`.
+Reports live in `$SKILL_CACHE_DIR/defects/` (override with
+`CROSS_SUBAGENTS_DEFECT_DIR`) and use `blocker`, `major`, or `minor` severity.
+Keep each report short, one defect per file, and point at evidence paths instead
+of pasting logs. Never put tokens, prompts containing user secrets, or
+proprietary code in a report.
+
+At the start of a workflow, check for open reports and route around any that
+affect the planned work:
+
+~~~~ bash
+python3 <skill-dir>/scripts/defects.py list --human
+~~~~
+
+At the end of the workflow, list the reports recorded for this run and tell the
+user once, with the paths:
+
+~~~~ bash
+python3 <skill-dir>/scripts/defects.py list --run-id <run-id> --human
+~~~~
+
+For example: "2 cross-subagents defect reports were created: `<path-a>` (blocker,
+...), `<path-b>` (minor, ...). Read them with `cat`; fix them and run
+`defects.py resolve --id <id> --note "<fix>"`." Pass the workflow's run ID to
+`defects.py new` so this filter is exact. Do not omit the notice when reports
+exist, and do not block the task to fix the skill unless the user asks.
+
+Only run `resolve` after the skill file has actually been fixed; it moves the
+report to `$SKILL_CACHE_DIR/defects/resolved/` and appends the note.
 
 
 Self-healing and CLI reference docs

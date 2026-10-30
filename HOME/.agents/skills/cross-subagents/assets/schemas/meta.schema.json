@@ -103,6 +103,10 @@
     "significant": { "type": "boolean" },
     "prompt_size_warning": { "type": ["string", "null"] },
     "attempt_dir": { "type": ["string", "null"] },
+    "attempt_result_file": {
+      "type": ["string", "null"],
+      "description": "Attempt-local answer text (attempt-<N>/result.md or partial_result.md). Present even when the attempt failed, so callers do not have to mine events.jsonl."
+    },
     "result_file": { "type": ["string", "null"] },
     "lease_mode": { "type": ["string", "null"] },
     "tool_policy": {
@@ -118,9 +122,13 @@
       "type": ["boolean", "null"],
       "description": "true when the CLI actually denies every tool; false when the tool-free posture is prompt-only; null when --no-tools was not requested."
     },
-    "permission_denials": {
+    "denials_observed": {
       "type": ["array", "null"],
-      "description": "Tool calls the CLI refused, when the adapter exposes them. A non-empty list makes the round blocked, never clean."
+      "description": "Structured tool refusals the adapter observed (explicit denied/declined status, denial flag, or a tool-runner error naming an OS/sandbox denial). Advisory only: a completed turn with a final answer is still ok, and callers decide whether the refusals matter. Ordinary command output is never used as evidence."
+    },
+    "warnings": {
+      "type": ["array", "null"],
+      "description": "Non-fatal problems observed during the attempt, such as CLI error events or earlier step errors that a verified completed turn recovered from. Advisory only; a non-empty list does not change status. Agent stdout/tool output is never used for failure classification."
     },
     "model_verified": {
       "type": ["boolean", "null"],

@@ -80,6 +80,12 @@ unrestricted execution (`--sandbox bypass`), pass
 `--dangerously-skip-permissions`. Avoid `agy remote-control` so no background
 daemon is started.
 
+Older `agy` builds (seen with 1.4.10) do not accept `--mode` or `--sandbox`.
+In that case `scripts/run.py` refuses read-only and workspace-write execution
+with `error_class: no_option` instead of silently running unsandboxed. Use
+`--sandbox bypass` when the user accepts unrestricted execution, or select a
+different agent for those postures.
+
 The output stream emits `{"event":"init","conversation_id":"..."}`,
 `{"event":"step_update",...}`, and a final
 `{"event":"result","result":{"conversation_id":"...","status":"SUCCESS","response":"...","usage":{...}}}`

@@ -46,6 +46,7 @@ from common import (
     validate_safe_identifier,
 )
 from models import collect_all_models, get_survey, resolve_official_model_id
+from probe import get_agent_recipe
 from quota import collect_quota
 
 TASK_QUALITY_FLOORS: dict[str, float] = {
@@ -877,6 +878,25 @@ def evaluate_route_quota(
     }
 
 
+SANDBOX_MODES = ("read-only", "workspace-write", "bypass")
+
+
+def sandbox_supported(agent: str, sandbox_mode: str | None) -> bool:
+    """Return whether the installed CLI for `agent` can honour `sandbox_mode`.
+
+    Antigravity only gained `--mode`/`--sandbox` in newer builds. Selecting an
+    Antigravity route for a read-only or workspace-write task on an older CLI
+    wastes an attempt, so such routes are filtered out of selection. A missing
+    recipe fails open: `run.py` still refuses the unsandboxed run.
+    """
+    if not sandbox_mode or sandbox_mode == "bypass":
+        return True
+    if agent == "antigravity":
+        flags = get_agent_recipe("antigravity")
+        return bool(flags.get("has_mode", True) and flags.get("has_sandbox", True))
+    return True
+
+
 def check_route_eligibility(
     route: dict[str, Any],
     task_norm: str,
@@ -894,6 +914,7 @@ def check_route_eligibility(
     incl_vendors: set[str] | None = None,
     quality_floor: float | None = None,
     is_explicit_route: bool = False,
+    sandbox_mode: str | None = None,
 ) -> tuple[bool, str | None, dict[str, Any], dict[str, Any]]:
     """Shared hard-eligibility evaluator for both automatic selection and explicit `--route` requests."""
     agent = route["agent"]
@@ -920,6 +941,8 @@ def check_route_eligibility(
 
     if excl_agents and agent in excl_agents:
         return False, f"excluded_agent:{agent}", q_eval, traits
+    if not sandbox_supported(agent, sandbox_mode):
+        return False, f"sandbox_unsupported:{agent}:{sandbox_mode}", q_eval, traits
     if excl_vendors and vendor in excl_vendors:
         return False, f"excluded_vendor:{vendor}", q_eval, traits
     if incl_vendors and vendor not in incl_vendors:
@@ -1021,6 +1044,7 @@ def select_routes(
     use_saved_pins: bool = True,
     all_models: dict[str, Any] | None = None,
     quota_state: dict[str, Any] | None = None,
+    sandbox_mode: str | None = None,
 ) -> dict[str, Any]:
     """Run the 5-step route selection algorithm and return top route + fallback chain."""
     task_norm = task.strip().lower().replace("-", "_")
@@ -1093,6 +1117,7 @@ def select_routes(
                 incl_vendors=incl_vendors,
                 quality_floor=floor,
                 is_explicit_route=False,
+                sandbox_mode=sandbox_mode,
             )
             if not ok:
                 filtered_out.append({"route_id": r_id, "reason": reason or "filtered"})
@@ -1302,6 +1327,7 @@ STEP_SPEC_KEYS = frozenset(
         "exclude_route",
         "require_modality",
         "require_vision",
+        "sandbox",
         "pin_agent",
         "pin_provider",
         "pin_model",
@@ -1443,6 +1469,7 @@ def select_step_plan(
             use_saved_pins=False,
             all_models=all_models,
             quota_state=quota_state,
+            sandbox_mode=merged.get("sandbox"),
         )
 
         if res["status"] != "ok" or not res.get("selected"):
@@ -1580,6 +1607,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Require each planned step to use a different quota bucket.",
     )
     parser.add_argument("--quality-floor", type=float, help="Override minimum task_fit quality floor.")
+    parser.add_argument(
+        "--sandbox",
+        choices=list(SANDBOX_MODES),
+        help="Requested execution posture; routes whose CLI cannot honour it (for example old agy without --mode/--sandbox) are excluded.",
+    )
     parser.add_argument("--save-pin", action="store_true", help="Persist --pin-* flags as session/run pins.")
     parser.add_argument("--clear-pins", action="store_true", help="Clear persisted session/run pins.")
     parser.add_argument("--refresh-quota", action="store_true", help="Force fresh quota query before selecting.")
@@ -1644,6 +1676,7 @@ def main(argv: list[str] | None = None) -> int:
             "exclude_route": args.exclude_route,
             "max_tier": args.max_tier,
             "quality_floor": args.quality_floor,
+            "sandbox": args.sandbox,
         }
         plan = select_step_plan(
             specs,
@@ -1694,6 +1727,7 @@ def main(argv: list[str] | None = None) -> int:
         quality_floor=args.quality_floor,
         refresh_quota=args.refresh_quota,
         run_id=args.run_id,
+        sandbox_mode=args.sandbox,
     )
 
     if args.human:

@@ -95,7 +95,15 @@ claude -p --model <model-or-alias> \
 Extract `.result` for the response text, `.usage` (`input_tokens`,
 `output_tokens`) for token accounting, `.is_error` for error status, and
 `.modelUsage` to verify the exact model ID that served the request (ignoring
-internal `claude-haiku-*` bookkeeping entries).
+internal `claude-haiku-*` bookkeeping entries). `modelUsage` can also list
+auxiliary models used by subagents; treat the requested model as verified when
+it appears in the map, and only report substitution when it is absent and a
+different non-Haiku model is present.
+
+The CLI emits a single JSON document, but warnings can precede it on stdout.
+Parse the last valid JSON object rather than slicing from the first `{` to the
+last `}`; `run.py` does this and reports `Format` failures with an explicit
+"not valid JSON" message when nothing parses.
 
 Coroutine invocation and resumption:
 

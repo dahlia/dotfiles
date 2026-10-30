@@ -127,6 +127,14 @@ Codex has no CLI switch that disables tools. `--no-tools` therefore runs under
 records `tools_enforced: false` in `meta.json`. Use Claude Code or OpenCode when
 tool use must be impossible.
 
+Codex's read-only sandbox also blocks child processes, so a task that shells out
+(for example `git` invoked from a Node tool call) fails with `spawnSync ...
+EPERM`. Read-only Codex tasks must not need subprocesses: either keep them
+purely analytical, pass `--sandbox workspace-write`, or choose another agent
+when the task has to run commands. A denial observed this way is recorded in
+`denials_observed` and does not by itself fail a completed turn, but the task
+will be missing whatever the subprocess was meant to produce.
+
 `--isolate` passes `--ignore-rules` so execpolicy `.rules` files from the user
 or project are not loaded. Codex still reads repository files under the
 read-only sandbox, so a reviewer can inspect the checkout.

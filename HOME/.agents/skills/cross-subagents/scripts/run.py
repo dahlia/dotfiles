@@ -19,6 +19,9 @@ Features:
     `tools_enforced`.
   - Offers an opt-in protected-input guard (`--guard`) that hashes the working tree and Git
     state before the attempt and fails the task when they changed.
+  - Treats structured tool denials as warnings (`denials_observed`) rather than failing a
+    completed turn, and always exposes the attempt's own answer text through
+    `attempt_result_file` in `meta.json`.
 """
 
 from __future__ import annotations
@@ -108,45 +111,111 @@ def _message_text(message: dict[str, Any]) -> str:
     return "".join(chunks)
 
 
+# A denied call is only recognised from a structured status, an explicit
+# denial field, or a short error emitted by the tool runner itself. Command
+# output is never evidence: a failing test that prints "permission" is not a
+# sandbox denial, and a command may legitimately read files whose contents
+# mention the word.
+DENIAL_STATUSES = frozenset({"denied", "declined", "rejected", "not_allowed"})
+DENIAL_ERROR_MARKERS = (
+    "operation not permitted",
+    "permission denied",
+    "denied by sandbox",
+    "sandbox denied",
+    "approval denied",
+    "approval required",
+    "not permitted by policy",
+    "eperm",
+    "eacces",
+)
+# Tool-runner errors are single messages. Anything longer is a transcript of
+# the command's own stderr/stdout and must not be keyword-scanned.
+DENIAL_ERROR_MAX_CHARS = 400
+
+
+def _denied_flag(container: Any) -> bool:
+    """Return True when a mapping carries an explicit denial flag."""
+    if not isinstance(container, dict):
+        return False
+    for key in ("denied", "is_denied", "permission_denied"):
+        if container.get(key) is True:
+            return True
+    for key in ("permission", "approval", "decision"):
+        if str(container.get(key) or "").lower() in ("denied", "declined", "rejected", "deny"):
+            return True
+    return False
+
+
+def _find_last_json_object(text: str) -> dict[str, Any] | None:
+    """Return the last JSON object in `text`, tolerating surrounding noise.
+
+    Some CLIs prepend warnings (or emit more than one JSON document) on
+    stdout. Slicing from the first `{` to the last `}` then fails to parse a
+    perfectly good payload, which used to turn a completed run into a
+    `format` failure with a misleading "subtype=None" message.
+    """
+    decoder = json.JSONDecoder()
+    found: dict[str, Any] | None = None
+    index = text.find("{")
+    while index != -1:
+        try:
+            obj, end = decoder.raw_decode(text[index:])
+        except ValueError:
+            index = text.find("{", index + 1)
+            continue
+        if isinstance(obj, dict):
+            found = obj
+        index = text.find("{", index + max(end, 1))
+    return found
+
+
+def _int_or_zero(value: Any) -> int:
+    """Coerce a usage field to int without discarding an otherwise valid payload."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _tool_denial(part: dict[str, Any]) -> str | None:
-    """Return a denial description when a tool part reports a permission failure."""
+    """Return a denial description when a tool part reports a structured refusal.
+
+    Only signals that actually mean "the runner refused this call" count: an
+    explicit denied/declined status, a denial flag or approval decision, or a
+    short error from the tool runner naming an OS/sandbox denial. Ordinary
+    command output (`output`, `aggregated_output`) is never scanned, because
+    unrelated output may contain words such as "permission" or "denied".
+    """
     state = part.get("state") if isinstance(part.get("state"), dict) else {}
     state_meta = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
-    outputs = [
-        part.get("error"),
-        part.get("output"),
-        part.get("aggregated_output"),
-        state.get("error"),
-        state.get("output"),
-        state_meta.get("error"),
-        state_meta.get("output"),
-    ]
-    detail = " ".join(str(value) for value in outputs if value)
-    text = detail.lower()
     status = str(state.get("status") or part.get("status") or "").lower()
-    exit_code = part.get("exit_code")
-    if exit_code is None:
-        exit_code = state.get("exit_code")
-    if exit_code is None:
-        exit_code = state_meta.get("exit")
-    failed = status in ("error", "failed") or exit_code not in (None, 0, "0")
     tool = part.get("tool") or part.get("name") or part.get("command") or "tool"
-    if status in ("denied", "declined"):
-        return f"{tool}: denied"
-    if failed and any(
-        key in text
-        for key in (
-            "permission",
-            "denied",
-            "not allowed",
-            "forbidden",
-            "operation not permitted",
-            "eperm",
-            "eacces",
-        )
-    ):
-        return f"{tool}: {detail[:160]}"
+
+    if status in DENIAL_STATUSES:
+        return f"{tool}: denied (status={status})"
+    for container in (part, state, state_meta):
+        if _denied_flag(container):
+            return f"{tool}: denied"
+
+    error_detail = ""
+    for value in (part.get("error"), state.get("error"), state_meta.get("error")):
+        if value:
+            error_detail = str(value)
+            break
+    if not error_detail or len(error_detail) > DENIAL_ERROR_MAX_CHARS:
+        return None
+    text = error_detail.lower()
+    if any(marker in text for marker in DENIAL_ERROR_MARKERS):
+        return f"{tool}: {error_detail[:160]}"
     return None
+
+
+def _denial_error(denials: list[Any]) -> str | None:
+    """Render observed denials as a failure message instead of an empty result."""
+    cleaned = [str(item).strip() for item in denials if str(item).strip()]
+    if not cleaned:
+        return None
+    return ("Tool call(s) denied: " + "; ".join(cleaned))[:500]
 
 
 def get_run_dir(run_id: str) -> Path:
@@ -203,7 +272,13 @@ def allocate_next_attempt_dir(task_dir: Path) -> tuple[int, Path]:
 
 
 def classify_failure(exit_code: int, stdout_text: str, stderr_text: str, timed_out: bool = False) -> str:
-    """Classify failure into standard error classes for repair and fallback routing."""
+    """Classify failure into standard error classes for repair and fallback routing.
+
+    `stdout_text` and `stderr_text` must contain only structured CLI error
+    output (stderr, error events, or the CLI's own error payload). Never pass
+    the agent's transcript or tool output: a test that prints "429" or
+    "quota" would otherwise mark a quota bucket exhausted.
+    """
     if timed_out or exit_code == 124:
         return "timeout"
     if exit_code == 127:
@@ -323,6 +398,10 @@ def classify_exception(exc: Exception) -> tuple[str, int]:
     if isinstance(exc, PermissionError):
         return "permission", 126
     msg = str(exc).lower()
+    if "sandbox_unsupported" in msg:
+        # The route's CLI cannot honour the requested posture; this is an
+        # option/capability mismatch, not a permission failure.
+        return "no_option", 1
     if "quota_exhausted" in msg or "rate limit" in msg:
         return "quota", 1
     if "model" in msg and ("not found" in msg or "unavailable" in msg or "eligible" in msg):
@@ -613,8 +692,13 @@ def invoke_codex(
     session_id = resume_session_id
     usage = {"input_tokens": 0, "output_tokens": 0}
     last_agent_msg = ""
+    # `stream_errors` are fatal protocol/verification failures. `warnings`
+    # collect CLI error events that a later completed turn may have recovered
+    # from (for example a retried stream disconnect); they are reported but do
+    # not fail a turn that completed with an answer.
     stream_errors: list[str] = []
-    permission_denials: list[str] = []
+    warnings: list[str] = []
+    denials_observed: list[str] = []
     stream_models: list[str] = []
     saw_turn_completed = False
     observed_model: str | None = None
@@ -647,9 +731,12 @@ def invoke_codex(
             elif item.get("type") in ("command_execution", "mcp_tool_call", "tool_call"):
                 denial = _tool_denial(item if isinstance(item, dict) else {})
                 if denial:
-                    permission_denials.append(denial)
-        elif ev_type in ("error", "turn.failed"):
+                    denials_observed.append(denial)
+        elif ev_type == "turn.failed":
+            # An explicit terminal failure is fatal even if a message exists.
             stream_errors.append(json.dumps(ev))
+        elif ev_type == "error":
+            warnings.append(json.dumps(ev))
 
     if stream_models and not _models_compatible(stream_models):
         stream_errors.append(
@@ -660,7 +747,7 @@ def invoke_codex(
         result_file.write_text(last_agent_msg.strip() + "\n", encoding="utf-8")
 
     final_text = result_file.read_text(encoding="utf-8").strip() if (saw_turn_completed and result_file.is_file()) else ""
-    err_combined = err + ("\n" + "\n".join(stream_errors) if stream_errors else "")
+    err_combined = err + ("\n" + "\n".join(warnings + stream_errors) if (warnings or stream_errors) else "")
     ephemeral_used = not keep_session and not resume_session_id and flags.get("has_ephemeral", True)
 
     if timed_out:
@@ -674,7 +761,8 @@ def invoke_codex(
             "observed_model": observed_model,
             "session_cleaned_up": ephemeral_used,
             "cleanup_verified": cleanup_verified,
-            "permission_denials": permission_denials,
+            "warnings": warnings,
+            "denials_observed": denials_observed,
             "error_class": "timeout",
             "error": "Execution timed out.",
         }
@@ -690,16 +778,19 @@ def invoke_codex(
             "observed_model": observed_model,
             "session_cleaned_up": ephemeral_used,
             "cleanup_verified": cleanup_verified,
-            "permission_denials": permission_denials,
+            "warnings": warnings,
+            "denials_observed": denials_observed,
             "error_class": "model_unavailable",
             "error": f"Model substitution detected: requested '{model_id}', observed '{observed_model}'.",
         }
 
-    if code != 0 or stream_errors or permission_denials or not saw_turn_completed or not final_text:
-        err_class = classify_failure(code, out, err_combined, timed_out=False)
-        if permission_denials:
-            err_class = "permission"
-        elif code == 0 and not stream_errors and (not saw_turn_completed or not final_text):
+    if code != 0 or stream_errors or not saw_turn_completed or not final_text:
+        # Only structured CLI error text is classification evidence. `out` is
+        # the event stream and embeds every command's output, so scanning it
+        # would let a test transcript mentioning "429" or "quota" mark a bucket
+        # exhausted.
+        err_class = classify_failure(code, "", err_combined, timed_out=False)
+        if code == 0 and not stream_errors and (not saw_turn_completed or not final_text):
             err_class = "format"
         return {
             "status": "quota" if err_class == "quota" else "failed",
@@ -711,9 +802,11 @@ def invoke_codex(
             "observed_model": observed_model,
             "session_cleaned_up": ephemeral_used,
             "cleanup_verified": cleanup_verified,
-            "permission_denials": permission_denials,
+            "warnings": warnings,
+            "denials_observed": denials_observed,
             "error_class": err_class,
             "error": err_combined.strip()[:500]
+            or _denial_error(denials_observed)
             or ("Codex stream ended before turn.completed." if not saw_turn_completed else "Empty result from Codex."),
         }
 
@@ -727,7 +820,8 @@ def invoke_codex(
         "observed_model": observed_model,
         "session_cleaned_up": ephemeral_used,
         "cleanup_verified": cleanup_verified,
-        "permission_denials": permission_denials,
+        "warnings": warnings,
+        "denials_observed": denials_observed,
         "error_class": None,
     }
 
@@ -914,76 +1008,74 @@ def invoke_claude_code(
     result_text = ""
     is_error = False
     subtype: str | None = None
-    permission_denials: list[Any] = []
+    denials_observed: list[Any] = []
     observed_models: list[str] = []
+    payload_parsed = False
 
     cleaned_out = strip_ansi(out).strip()
-    start = cleaned_out.find("{")
-    end = cleaned_out.rfind("}")
-    if start != -1 and end != -1 and end >= start:
-        try:
-            payload = json.loads(cleaned_out[start : end + 1])
-            session_id = payload.get("session_id") or session_id
-            is_error = bool(payload.get("is_error", False))
-            subtype = payload.get("subtype")
-            permission_denials = payload.get("permission_denials") or []
-            result_text = (payload.get("result") or "").strip()
-            u = payload.get("usage") or {}
-            usage["input_tokens"] = int(u.get("input_tokens", 0))
-            usage["output_tokens"] = int(u.get("output_tokens", 0))
-            m_usage = payload.get("modelUsage")
-            if isinstance(m_usage, dict):
-                observed_models = [str(k) for k in m_usage.keys()]
-        except Exception:
-            pass
+    payload = _find_last_json_object(cleaned_out)
+    if isinstance(payload, dict):
+        payload_parsed = True
+        session_id = payload.get("session_id") or session_id
+        is_error = bool(payload.get("is_error", False))
+        subtype = payload.get("subtype")
+        denials_observed = payload.get("permission_denials") or []
+        result_text = (payload.get("result") or "").strip()
+        u = payload.get("usage") or {}
+        usage["input_tokens"] = _int_or_zero(u.get("input_tokens"))
+        usage["output_tokens"] = _int_or_zero(u.get("output_tokens"))
+        m_usage = payload.get("modelUsage")
+        if isinstance(m_usage, dict):
+            observed_models = [str(k) for k in m_usage.keys()]
 
     no_persist = not keep_session and not resume_session_id and flags.get("has_no_session_persistence", True)
 
-    # Filter out background Haiku bookkeeping entries when a non-Haiku model was requested
-    route_key = route.get("canonical_key") or route.get("model_id") or ""
-    if "haiku" not in route_key:
-        non_haiku = [m for m in observed_models if "haiku" not in m.lower()]
-        observed_primary = non_haiku[0] if non_haiku else (observed_models[0] if observed_models else None)
-    else:
-        observed_primary = observed_models[0] if observed_models else None
+    def _matches_requested(model: str) -> bool:
+        return _verify_model_match(
+            resolved_model,
+            route["canonical_key"],
+            model,
+            expected_provider=route.get("provider"),
+            expected_variant=eff,
+        )
 
-    # modelUsage can list more than the answering model; reject any unexpected
-    # non-bookkeeping entry rather than trusting only the first. For a Haiku
-    # request, Haiku entries are the bookkeeping exception, not the answer.
+    # modelUsage can list auxiliary models (subagents, bookkeeping) alongside
+    # the answering model. A requested model that is present means the right
+    # model answered; only a list without it is evidence of substitution.
+    route_key = route.get("canonical_key") or route.get("model_id") or ""
     if "haiku" in route_key:
+        observed_primary = observed_models[0] if observed_models else None
         mismatched = [model for model in observed_models if "haiku" not in model.lower()]
     else:
-        mismatched = [
-            model
-            for model in observed_models
-            if "haiku" not in model.lower()
-            and not _verify_model_match(
-                resolved_model,
-                route["canonical_key"],
-                model,
-                expected_provider=route.get("provider"),
-                expected_variant=eff,
+        matching = [model for model in observed_models if _matches_requested(model)]
+        non_haiku = [model for model in observed_models if "haiku" not in model.lower()]
+        if matching:
+            observed_primary = matching[0]
+            mismatched = []
+        else:
+            observed_primary = (
+                non_haiku[0] if non_haiku else (observed_models[0] if observed_models else None)
             )
-        ]
+            mismatched = non_haiku
     if mismatched:
-            return {
-                "status": "failed",
-                "exit_code": code or 1,
-                "session_id": session_id,
-                "usage": usage,
-                "requested_model": requested_model,
-                "resolved_model": resolved_model,
-                "observed_model": observed_primary,
-                "observed_models": observed_models,
-                "permission_denials": permission_denials,
-                "session_cleaned_up": no_persist,
-                "cleanup_verified": cleanup_verified,
-                "error_class": "model_unavailable",
-                "error": (
-                    f"Claude reported unexpected model(s): {', '.join(mismatched)}; "
-                    f"requested '{resolved_model}'."
-                ),
-            }
+        return {
+            "status": "failed",
+            "exit_code": code or 1,
+            "session_id": session_id,
+            "usage": usage,
+            "requested_model": requested_model,
+            "resolved_model": resolved_model,
+            "observed_model": observed_primary,
+            "observed_models": observed_models,
+            "denials_observed": denials_observed,
+            "session_cleaned_up": no_persist,
+            "cleanup_verified": cleanup_verified,
+            "error_class": "model_unavailable",
+            "error": (
+                f"Claude reported unexpected model(s): {', '.join(mismatched)}; "
+                f"requested '{resolved_model}'."
+            ),
+        }
 
     if timed_out:
         return {
@@ -1017,16 +1109,17 @@ def invoke_claude_code(
             "error": f"Claude model substitution detected: requested '{resolved_model}', observed '{observed_primary}'.",
         }
 
-    # Require explicit terminal subtype == "success" and zero permission denials
+    # Require an explicit terminal subtype == "success". Denials are recorded as
+    # warnings, not failures: a completed turn with a final answer succeeded
+    # even if one of its tool calls was refused.
     subtype_failed = subtype != "success"
-    has_denials = len(permission_denials) > 0
-    if code != 0 or is_error or subtype_failed or has_denials or not result_text:
+    if code != 0 or is_error or subtype_failed or not result_text:
         if result_text:
             (attempt_dir / "partial_result.md").write_text(result_text + "\n", encoding="utf-8")
-        err_class = classify_failure(code, out, err, timed_out=False)
-        if has_denials:
-            err_class = "permission"
-        elif code == 0 and not is_error and (subtype_failed or not result_text):
+        # Only the CLI's own error message (result when is_error) is
+        # classification evidence, never the full payload with its transcript.
+        err_class = classify_failure(code, result_text if is_error else "", err, timed_out=False)
+        if code == 0 and not is_error and (subtype_failed or not result_text):
             err_class = "format"
         return {
             "status": "quota" if err_class == "quota" else "failed",
@@ -1037,15 +1130,20 @@ def invoke_claude_code(
             "resolved_model": resolved_model,
             "observed_model": observed_primary,
             "observed_models": observed_models,
-            "permission_denials": permission_denials,
+            "denials_observed": denials_observed,
             "session_cleaned_up": no_persist,
             "cleanup_verified": cleanup_verified,
             "error_class": err_class,
             "error": (result_text if is_error else err.strip())[:500]
+            or _denial_error(denials_observed)
             or (
-                f"Permission denied for {len(permission_denials)} tool call(s)."
-                if has_denials
-                else f"Claude terminal subtype={subtype!r} (expected 'success')."
+                "Claude output was not valid JSON."
+                if not payload_parsed
+                else (
+                    "Claude JSON payload had no result or subtype field."
+                    if subtype is None and not result_text
+                    else f"Claude terminal subtype={subtype!r} (expected 'success')."
+                )
             ),
         }
 
@@ -1328,8 +1426,13 @@ def invoke_opencode(
     session_id = resume_session_id
     stream_step_text: list[str] = []
     stream_final_text = ""
+    # Fatal protocol/verification errors vs. recoverable CLI error events.
+    # A verified completed turn supersedes the latter; they are reported in
+    # `warnings` instead of failing the task.
     stream_errors: list[str] = []
-    permission_denials: list[str] = []
+    warnings: list[str] = []
+    turn_message_errors: list[str] = []
+    denials_observed: list[str] = []
     stream_models: list[str] = []
     usage = {"input_tokens": 0, "output_tokens": 0}
     observed_model: str | None = None
@@ -1369,9 +1472,9 @@ def invoke_opencode(
             part = ev.get("part") or ev
             denial = _tool_denial(part if isinstance(part, dict) else {})
             if denial:
-                permission_denials.append(denial)
+                denials_observed.append(denial)
         elif ev_type == "error":
-            stream_errors.append(json.dumps(ev.get("error") or ev))
+            warnings.append(json.dumps(ev.get("error") or ev))
 
     if stream_models and not _models_compatible(stream_models):
         stream_errors.append(
@@ -1478,7 +1581,9 @@ def invoke_opencode(
                                 turn_models.append(obs_str)
                                 observed_model = obs_str
                             if m_info.get("error") or m.get("error"):
-                                stream_errors.append(json.dumps(m_info.get("error") or m.get("error")))
+                                turn_message_errors.append(
+                                    json.dumps(m_info.get("error") or m.get("error"))
+                                )
                             completed_ts = (m_info.get("time") or {}).get("completed")
                             if completed_ts is None and isinstance(m.get("time"), dict):
                                 completed_ts = m["time"].get("completed")
@@ -1488,7 +1593,7 @@ def invoke_opencode(
                                 if isinstance(c, dict):
                                     denial = _tool_denial(c)
                                     if denial:
-                                        permission_denials.append(denial)
+                                        denials_observed.append(denial)
                             # Keep the text of the last assistant message only;
                             # earlier steps may be partial tool-call turns.
                             export_final_text = "".join(
@@ -1528,6 +1633,15 @@ def invoke_opencode(
             except Exception as exp_exc:
                 cleanup_verified = False
                 cleanup_warning = f"session export error: {exp_exc}"[:200]
+
+        # A message-level error in an earlier step may have been retried into
+        # the verified final answer. Only keep it fatal when the turn could not
+        # be verified.
+        if turn_message_errors:
+            if export_verified:
+                warnings.extend(turn_message_errors)
+            else:
+                stream_errors.extend(turn_message_errors)
 
         # Always attempt session delete for one-shot invocations, even after timeout or failure
         if not keep_session and not resume_session_id:
@@ -1584,7 +1698,7 @@ def invoke_opencode(
         export_verified if has_session_cmd else last_finish_reason in OPENCODE_SUCCESS_FINISH
     )
 
-    err_combined = err + ("\n" + "\n".join(stream_errors) if stream_errors else "")
+    err_combined = err + ("\n" + "\n".join(warnings + stream_errors) if (warnings or stream_errors) else "")
     if timed_out:
         return {
             "status": "timeout",
@@ -1597,7 +1711,8 @@ def invoke_opencode(
             "session_cleaned_up": session_cleaned_up,
             "cleanup_verified": cleanup_verified,
             "cleanup_warning": cleanup_warning,
-            "permission_denials": permission_denials,
+            "warnings": warnings,
+            "denials_observed": denials_observed,
             "error_class": "timeout",
             "error": "Execution timed out.",
         }
@@ -1628,7 +1743,8 @@ def invoke_opencode(
             "session_cleaned_up": session_cleaned_up,
             "cleanup_verified": cleanup_verified,
             "cleanup_warning": cleanup_warning,
-            "permission_denials": permission_denials,
+            "warnings": warnings,
+            "denials_observed": denials_observed,
             "error_class": stream_class,
             "error": stream_error,
         }
@@ -1651,18 +1767,17 @@ def invoke_opencode(
             "session_cleaned_up": session_cleaned_up,
             "cleanup_verified": cleanup_verified,
             "cleanup_warning": cleanup_warning,
-            "permission_denials": permission_denials,
+            "warnings": warnings,
+            "denials_observed": denials_observed,
             "error_class": "model_unavailable",
             "error": f"OpenCode model substitution detected: requested '{model_spec}', observed '{observed_model}'.",
         }
 
-    if code != 0 or stream_errors or not saw_completion or not final_text or permission_denials:
+    if code != 0 or stream_errors or not saw_completion or not final_text:
         if final_text:
             (attempt_dir / "partial_result.md").write_text(final_text + "\n", encoding="utf-8")
-        err_class = classify_failure(code, out, err_combined, timed_out=False)
-        if permission_denials:
-            err_class = "permission"
-        elif code == 0 and not stream_errors and (not saw_completion or not final_text):
+        err_class = classify_failure(code, "", err_combined, timed_out=False)
+        if code == 0 and not stream_errors and (not saw_completion or not final_text):
             err_class = "format"
         return {
             "status": "quota" if err_class == "quota" else "failed",
@@ -1675,9 +1790,10 @@ def invoke_opencode(
             "session_cleaned_up": session_cleaned_up,
             "cleanup_verified": cleanup_verified,
             "cleanup_warning": cleanup_warning,
-            "permission_denials": permission_denials,
+            "warnings": warnings,
+            "denials_observed": denials_observed,
             "error_class": err_class,
-            "error": err_combined.strip()[:500] or "OpenCode produced no verified completed output.",
+            "error": err_combined.strip()[:500] or _denial_error(denials_observed) or "OpenCode produced no verified completed output.",
         }
 
     result_file.write_text(final_text + "\n", encoding="utf-8")
@@ -1692,7 +1808,8 @@ def invoke_opencode(
         "session_cleaned_up": session_cleaned_up,
         "cleanup_verified": cleanup_verified,
         "cleanup_warning": cleanup_warning,
-        "permission_denials": permission_denials,
+        "warnings": warnings,
+        "denials_observed": denials_observed,
         "error_class": None,
     }
 
@@ -1744,8 +1861,11 @@ def invoke_antigravity(
             "observed_model": None,
             "session_cleaned_up": False,
             "cleanup_verified": True,
-            "error_class": "permission",
-            "error": f"Installed Antigravity CLI does not support --mode and --sandbox required for {sandbox_mode} mode.",
+            "error_class": "no_option",
+            "error": (
+                f"Installed Antigravity CLI does not support --mode and --sandbox required for "
+                f"{sandbox_mode} mode; retry with --sandbox bypass or choose another agent."
+            ),
         }
 
     eff = effort or route.get("variant")
@@ -1791,7 +1911,7 @@ def invoke_antigravity(
     result_error = None
     observed_model: str | None = None
     stream_models: list[str] = []
-    permission_denials: list[str] = []
+    denials_observed: list[str] = []
 
     for line in out.splitlines():
         line = line.strip()
@@ -1808,7 +1928,7 @@ def invoke_antigravity(
             if isinstance(candidate, dict):
                 denial = _tool_denial(candidate)
                 if denial:
-                    permission_denials.append(denial)
+                    denials_observed.append(denial)
         if ev.get("model"):
             stream_models.append(str(ev["model"]))
             if not observed_model:
@@ -1816,7 +1936,8 @@ def invoke_antigravity(
         if ev.get("event") == "result" and isinstance(ev.get("result"), dict):
             res_obj = ev["result"]
             session_id = res_obj.get("conversation_id") or session_id
-            result_status = res_obj.get("status")
+            raw_status = res_obj.get("status")
+            result_status = str(raw_status).strip().upper() if raw_status is not None else None
             result_error = res_obj.get("error")
             if res_obj.get("model"):
                 stream_models.append(str(res_obj["model"]))
@@ -1853,7 +1974,7 @@ def invoke_antigravity(
             "session_cleaned_up": False,
             "cleanup_verified": cleanup_verified,
             "cleanup_note": cleanup_note,
-            "permission_denials": permission_denials,
+            "denials_observed": denials_observed,
             "error_class": "timeout",
             "error": "Execution timed out.",
         }
@@ -1869,19 +1990,22 @@ def invoke_antigravity(
             "session_cleaned_up": False,
             "cleanup_verified": cleanup_verified,
             "cleanup_note": cleanup_note,
-            "permission_denials": permission_denials,
+            "denials_observed": denials_observed,
             "error_class": "model_unavailable",
             "error": f"Antigravity model substitution detected: requested '{resolved_model}', observed '{observed_model}'.",
         }
-    if code != 0 or result_status != "SUCCESS" or not response_text or model_changed or permission_denials:
+    if code != 0 or result_status != "SUCCESS" or not response_text or model_changed:
         if response_text:
             (attempt_dir / "partial_result.md").write_text(response_text + "\n", encoding="utf-8")
-        err_class = classify_failure(code, out, err_combined, timed_out=False)
-        if permission_denials:
-            err_class = "permission"
-        elif model_changed:
+        err_class = classify_failure(code, "", err_combined, timed_out=False)
+        if model_changed:
             err_class = "model_unavailable"
         elif code == 0 and result_status == "SUCCESS" and not response_text:
+            err_class = "format"
+        elif code == 0 and result_status is None and not model_changed:
+            # No terminal `result` event: a protocol/shape change, not a
+            # provider failure. Classify as format so self-repair and fallback
+            # can run instead of reporting an opaque "failed".
             err_class = "format"
         return {
             "status": "quota" if err_class == "quota" else "failed",
@@ -1894,9 +2018,15 @@ def invoke_antigravity(
             "session_cleaned_up": False,
             "cleanup_verified": cleanup_verified,
             "cleanup_note": cleanup_note,
-            "permission_denials": permission_denials,
+            "denials_observed": denials_observed,
             "error_class": err_class,
-            "error": err_combined[:500] or "Antigravity invocation failed.",
+            "error": err_combined[:500]
+            or _denial_error(denials_observed)
+            or (
+                f"Antigravity returned status={result_status!r} (expected 'SUCCESS')."
+                if result_status is not None
+                else "Antigravity produced no terminal result event (protocol format changed?)."
+            ),
         }
 
     result_file.write_text(response_text + "\n", encoding="utf-8")
@@ -1911,7 +2041,7 @@ def invoke_antigravity(
         "session_cleaned_up": False,
         "cleanup_verified": cleanup_verified,
         "cleanup_note": cleanup_note,
-        "permission_denials": permission_denials,
+        "denials_observed": denials_observed,
         "error_class": None,
     }
 
@@ -2520,6 +2650,7 @@ def execute_task(
                         incl_vendors={v.strip().lower() for v in (include_vendors or []) if v.strip()},
                         quality_floor=None,
                         is_explicit_route=True,
+                        sandbox_mode=effective_sandbox,
                     )
                     if not ok:
                         raise ValueError(
@@ -2564,6 +2695,7 @@ def execute_task(
                         max_tier=max_tier,
                         exclude_route_ids=exclude_route_ids,
                         run_id=eff_run_id,
+                        sandbox_mode=effective_sandbox,
                     )
                     exp_buckets = set(explicit_route.get("applicable_buckets") or [explicit_route["quota_bucket"]])
                     for fb in [sel.get("selected")] + (sel.get("fallbacks") or []):
@@ -2589,6 +2721,7 @@ def execute_task(
                     max_tier=max_tier,
                     exclude_route_ids=exclude_route_ids,
                     run_id=eff_run_id,
+                    sandbox_mode=effective_sandbox,
                 )
                 if sel["status"] != "ok" or not sel.get("selected"):
                     raise RuntimeError(f"No eligible route found for task '{task_category}'.")
@@ -3029,9 +3162,17 @@ def execute_task(
                             prev_flags=prev_recipe_flags,
                         )
 
-                    attempt_result_file = attempt_dir / "result.md"
-                    if res["status"] == "ok" and attempt_result_file.is_file():
-                        atomic_publish_file(attempt_result_file, published_result_file)
+                    attempt_result_path = attempt_dir / "result.md"
+                    if res["status"] == "ok" and attempt_result_path.is_file():
+                        atomic_publish_file(attempt_result_path, published_result_file)
+                    attempt_result_file: Path | None = next(
+                        (
+                            candidate
+                            for candidate in (attempt_result_path, attempt_dir / "partial_result.md")
+                            if candidate.is_file()
+                        ),
+                        None,
+                    )
 
                     resumable_flag = bool(
                         res["status"] == "ok" and res.get("session_id") and (keep_session or resume_session_id)
@@ -3119,12 +3260,19 @@ def execute_task(
                         "result_file": str(published_result_file)
                         if (res["status"] == "ok" and published_result_file.is_file())
                         else None,
+                        # Always expose the attempt's own answer text, even when
+                        # the attempt failed, so the caller never has to mine
+                        # events.jsonl for it.
+                        "attempt_result_file": str(attempt_result_file)
+                        if attempt_result_file is not None
+                        else None,
                         "lease_mode": lease.get("mode"),
                         "tool_policy": execution_policy,
                         "tools_enforced": tools_enforcement(
                             agent, execution_policy, str(res.get("status") or "failed")
                         ),
-                        "permission_denials": res.get("permission_denials"),
+                        "denials_observed": res.get("denials_observed"),
+                        "warnings": res.get("warnings") or [],
                         "model_verified": bool(res.get("observed_model")),
                         "guard": res.get("guard"),
                     }

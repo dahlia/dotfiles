@@ -4,6 +4,7 @@
 import contextlib
 import io
 import json
+import argparse
 import os
 import sys
 import tempfile
@@ -43,6 +44,7 @@ from select_route import (
 )
 import guard
 from guard import snapshot as guard_snapshot, verify as guard_verify
+import defects
 import run
 from run import (
     prepare_prompts,
@@ -890,12 +892,54 @@ class TestCrossSubagents(unittest.TestCase):
         self.assertEqual(stale["error_class"], "format")
 
         denied, _ = run_with(denial=True)
-        self.assertEqual(denied["status"], "failed")
-        self.assertEqual(denied["error_class"], "permission")
-        self.assertTrue(denied["permission_denials"])
+        self.assertEqual(denied["status"], "ok")
+        self.assertEqual(len(denied["denials_observed"]), 1)
 
         missing, _ = run_with(omit_model=True)
         self.assertEqual(missing["status"], "failed")
+
+    def test_sandbox_unsupported_routes_are_ineligible(self):
+        route = self._fake_route(
+            "antigravity", "google", "gemini-4-argon-high", "gemini-4-argon-high", "antigravity:default"
+        )
+        quota_state = {
+            "buckets": {
+                "antigravity:default": {
+                    "bucket_id": "antigravity:default",
+                    "status": "ample",
+                    "used_percent": 0.0,
+                    "scarcity": 0.0,
+                    "effective_headroom": 1.0,
+                    "is_micro_capacity": False,
+                    "exhausted": False,
+                }
+            },
+            "agents": {"antigravity": {"stale": False}},
+        }
+        with patch.object(
+            select_route, "get_agent_recipe", return_value={"has_mode": False, "has_sandbox": False}
+        ):
+            self.assertTrue(select_route.sandbox_supported("antigravity", "bypass"))
+            self.assertFalse(select_route.sandbox_supported("antigravity", "read-only"))
+            ok, reason, _, _ = check_route_eligibility(
+                route=route,
+                task_norm="general",
+                quota_state=quota_state,
+                sandbox_mode="read-only",
+            )
+            self.assertFalse(ok)
+            self.assertIn("sandbox_unsupported", reason)
+
+        with patch.object(
+            select_route, "get_agent_recipe", return_value={"has_mode": True, "has_sandbox": True}
+        ):
+            ok, reason, _, _ = check_route_eligibility(
+                route=route,
+                task_norm="general",
+                quota_state=quota_state,
+                sandbox_mode="read-only",
+            )
+            self.assertTrue(ok, reason)
 
     def test_namespaced_model_identity_and_compatibility(self):
         self.assertTrue(
@@ -921,27 +965,639 @@ class TestCrossSubagents(unittest.TestCase):
         )
 
     def test_tool_denial_shapes(self):
+        # Structured statuses and flags are denials.
         self.assertTrue(
-            run._tool_denial(
-                {
-                    "tool": "shell",
-                    "state": {
-                        "status": "completed",
-                        "metadata": {"exit": 1},
-                        "output": "Permission denied",
-                    },
-                }
-            )
+            run._tool_denial({"tool": "read", "state": {"status": "denied"}})
         )
+        self.assertTrue(
+            run._tool_denial({"tool": "shell", "status": "declined"})
+        )
+        self.assertTrue(
+            run._tool_denial({"tool": "read", "state": {"metadata": {"denied": True}}})
+        )
+        # A short tool-runner error naming an OS/sandbox denial is a denial.
         self.assertTrue(
             run._tool_denial(
                 {"tool": "read", "state": {"status": "error", "error": "Operation not permitted"}}
             )
         )
         self.assertTrue(
-            run._tool_denial({"tool": "read", "state": {"status": "denied"}})
+            run._tool_denial(
+                {"tool": "shell", "state": {"error": "spawnSync git EPERM"}}
+            )
+        )
+        # Ordinary command output is never evidence, even on a failing command:
+        # a failing test that prints "permission denied" is not a sandbox denial.
+        self.assertIsNone(
+            run._tool_denial(
+                {
+                    "tool": "shell",
+                    "state": {
+                        "status": "completed",
+                        "metadata": {"exit": 1},
+                        "output": "The directory '/home/u/.cache/pip' is not writable: permission denied",
+                    },
+                }
+            )
+        )
+        self.assertIsNone(
+            run._tool_denial(
+                {
+                    "tool": "shell",
+                    "state": {"status": "error", "exit_code": 1},
+                    "aggregated_output": "grep: denied by policy docs\n",
+                }
+            )
+        )
+        # Long transcripts in an error field are command output, not a runner error.
+        self.assertIsNone(
+            run._tool_denial(
+                {
+                    "tool": "shell",
+                    "state": {"status": "error", "error": ("permission denied\n" + "x" * 500)},
+                }
+            )
         )
         self.assertIsNone(run._tool_denial({"tool": "read", "state": {"status": "completed"}}))
+
+    def test_codex_completed_turn_with_denial_word_in_output_is_ok(self):
+        from run import invoke_codex
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        events = [
+            {"type": "thread.started", "thread_id": "thread-1"},
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": "python3 -m unittest -q",
+                    "exit_code": 1,
+                    "aggregated_output": (
+                        "The directory '/home/u/.cache/pip' or its parent directory "
+                        "is not owned or is not writable: permission denied"
+                    ),
+                },
+            },
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "Final answer."}},
+            {"type": "turn.completed", "usage": {"input_tokens": 3, "output_tokens": 4}},
+        ]
+
+        def mock_run(cmd, prompt="", *args, **kwargs):
+            Path(cmd[cmd.index("-o") + 1]).write_text("Final answer.\n", encoding="utf-8")
+            return 0, "\n".join(json.dumps(event) for event in events), "", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+            res = invoke_codex(
+                binary="echo",
+                route={"route_id": "codex/openai/gpt-6.1-sol", "model_id": "gpt-6.1-sol"},
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="workspace-write",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertIsNone(res["error_class"])
+        self.assertEqual(res["denials_observed"], [])
+        self.assertEqual((attempt_dir / "result.md").read_text(encoding="utf-8").strip(), "Final answer.")
+
+    def test_codex_structured_denial_is_a_warning_not_a_failure(self):
+        from run import invoke_codex
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        events = [
+            {"type": "thread.started", "thread_id": "thread-2"},
+            {
+                "type": "item.completed",
+                "item": {"type": "command_execution", "command": "git status", "status": "denied"},
+            },
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "Answer despite denial."}},
+            {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},
+        ]
+
+        def mock_run(cmd, prompt="", *args, **kwargs):
+            Path(cmd[cmd.index("-o") + 1]).write_text("Answer despite denial.\n", encoding="utf-8")
+            return 0, "\n".join(json.dumps(event) for event in events), "", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+            res = invoke_codex(
+                binary="echo",
+                route={"route_id": "codex/openai/gpt-6.1-sol", "model_id": "gpt-6.1-sol"},
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="workspace-write",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(len(res["denials_observed"]), 1)
+        self.assertIn("denied", res["denials_observed"][0])
+
+    def test_codex_failure_names_the_denial_instead_of_empty_result(self):
+        from run import invoke_codex
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        events = [
+            {"type": "thread.started", "thread_id": "thread-3"},
+            {
+                "type": "item.completed",
+                "item": {"type": "command_execution", "command": "git status", "status": "denied"},
+            },
+        ]
+
+        def mock_run(cmd, prompt="", *args, **kwargs):
+            return 0, "\n".join(json.dumps(event) for event in events), "", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+            res = invoke_codex(
+                binary="echo",
+                route={"route_id": "codex/openai/gpt-6.1-sol", "model_id": "gpt-6.1-sol"},
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="workspace-write",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+            )
+        self.assertEqual(res["status"], "failed")
+        self.assertIn("denied", res["error"])
+        self.assertNotIn("Empty result", res["error"])
+
+    def test_codex_recovered_error_event_is_a_warning(self):
+        from run import invoke_codex
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        events = [
+            {"type": "error", "message": "stream disconnected before completion; retrying"},
+            {"type": "thread.started", "thread_id": "thread-4"},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "Answer."}},
+            {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},
+        ]
+
+        def mock_run(cmd, prompt="", *args, **kwargs):
+            Path(cmd[cmd.index("-o") + 1]).write_text("Answer.\n", encoding="utf-8")
+            return 0, "\n".join(json.dumps(event) for event in events), "", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+            res = invoke_codex(
+                binary="echo",
+                route={"route_id": "codex/openai/gpt-6.1-sol", "model_id": "gpt-6.1-sol"},
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="workspace-write",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(len(res["warnings"]), 1)
+        self.assertIn("disconnected", res["warnings"][0])
+
+    def test_codex_turn_failed_stays_fatal_even_with_an_agent_message(self):
+        from run import invoke_codex
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        events = [
+            {"type": "thread.started", "thread_id": "thread-5"},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "Partial answer."}},
+            {"type": "turn.failed", "error": {"message": "boom"}},
+            {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},
+        ]
+
+        def mock_run(cmd, prompt="", *args, **kwargs):
+            Path(cmd[cmd.index("-o") + 1]).write_text("Partial answer.\n", encoding="utf-8")
+            return 0, "\n".join(json.dumps(event) for event in events), "", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+            res = invoke_codex(
+                binary="echo",
+                route={"route_id": "codex/openai/gpt-6.1-sol", "model_id": "gpt-6.1-sol"},
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="workspace-write",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+            )
+        self.assertEqual(res["status"], "failed")
+        self.assertIn("boom", res["error"])
+
+    def test_codex_failure_classification_ignores_command_output(self):
+        from run import invoke_codex
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        events = [
+            {"type": "thread.started", "thread_id": "thread-6"},
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": "pytest",
+                    "exit_code": 1,
+                    "aggregated_output": "429 Too Many Requests: quota exceeded",
+                },
+            },
+        ]
+
+        def mock_run(cmd, prompt="", *args, **kwargs):
+            return 1, "\n".join(json.dumps(event) for event in events), "", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+            res = invoke_codex(
+                binary="echo",
+                route={"route_id": "codex/openai/gpt-6.1-sol", "model_id": "gpt-6.1-sol"},
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="workspace-write",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+            )
+        self.assertEqual(res["status"], "failed")
+        self.assertEqual(res["error_class"], "failed")
+
+    def test_claude_output_with_leading_noise_is_parsed(self):
+        from run import invoke_claude_code
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        payload = {
+            "session_id": "claude-session",
+            "is_error": False,
+            "subtype": "success",
+            "result": "CLAUDE ANSWER",
+            "usage": {"input_tokens": 2, "output_tokens": 3},
+            "modelUsage": {"claude-sonnet-5": {}},
+        }
+
+        def mock_run(cmd, prompt="", *args, **kwargs):
+            return 0, "Warning: config {deprecated}\n" + json.dumps(payload), "", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+            res = invoke_claude_code(
+                binary="echo",
+                route={
+                    "route_id": "claude-code/anthropic/claude-sonnet-5",
+                    "model_id": "claude-sonnet-5",
+                    "canonical_key": "claude-sonnet-5",
+                },
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="workspace-write",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(
+            (attempt_dir / "result.md").read_text(encoding="utf-8").strip(), "CLAUDE ANSWER"
+        )
+
+    def test_claude_auxiliary_model_does_not_fail_the_answer(self):
+        from run import invoke_claude_code
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        payload = {
+            "session_id": "claude-session",
+            "is_error": False,
+            "subtype": "success",
+            "result": "CLAUDE ANSWER",
+            "usage": {"input_tokens": 2, "output_tokens": 3},
+            "modelUsage": {"claude-opus-5-5": {}, "claude-sonnet-5": {}},
+        }
+
+        def mock_run(cmd, prompt="", *args, **kwargs):
+            return 0, json.dumps(payload), "", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+            res = invoke_claude_code(
+                binary="echo",
+                route={
+                    "route_id": "claude-code/anthropic/claude-sonnet-5",
+                    "model_id": "claude-sonnet-5",
+                    "canonical_key": "claude-sonnet-5",
+                },
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="workspace-write",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["observed_model"], "claude-sonnet-5")
+
+    def test_claude_missing_requested_model_is_still_rejected(self):
+        from run import invoke_claude_code
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        payload = {
+            "session_id": "claude-session",
+            "is_error": False,
+            "subtype": "success",
+            "result": "CLAUDE ANSWER",
+            "usage": {"input_tokens": 2, "output_tokens": 3},
+            "modelUsage": {"claude-opus-5-5": {}},
+        }
+
+        def mock_run(cmd, prompt="", *args, **kwargs):
+            return 0, json.dumps(payload), "", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+            res = invoke_claude_code(
+                binary="echo",
+                route={
+                    "route_id": "claude-code/anthropic/claude-sonnet-5",
+                    "model_id": "claude-sonnet-5",
+                    "canonical_key": "claude-sonnet-5",
+                },
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="workspace-write",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+            )
+        self.assertEqual(res["status"], "failed")
+        self.assertEqual(res["error_class"], "model_unavailable")
+
+    def test_unexpected_capability_error_is_no_option(self):
+        self.assertEqual(
+            run.classify_exception(
+                ValueError("Explicit route 'x' failed eligibility check (sandbox_unsupported:antigravity:read-only).")
+            ),
+            ("no_option", 1),
+        )
+
+    def test_claude_unparsable_output_is_a_format_failure(self):
+        from run import invoke_claude_code
+
+        attempt_dir = Path(tempfile.mkdtemp())
+
+        def mock_run(cmd, prompt="", *args, **kwargs):
+            return 0, "this is not json", "", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+            res = invoke_claude_code(
+                binary="echo",
+                route={
+                    "route_id": "claude-code/anthropic/claude-sonnet-5",
+                    "model_id": "claude-sonnet-5",
+                    "canonical_key": "claude-sonnet-5",
+                },
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="workspace-write",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+            )
+        self.assertEqual(res["status"], "failed")
+        self.assertEqual(res["error_class"], "format")
+        self.assertIn("not valid JSON", res["error"])
+
+    def test_antigravity_lowercase_success_status_is_accepted(self):
+        from run import invoke_antigravity
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        result = {
+            "event": "result",
+            "result": {
+                "conversation_id": "conv-1",
+                "status": "success",
+                "response": "AGY ANSWER",
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            },
+        }
+
+        def mock_run(cmd, prompt="", *args, **kwargs):
+            return 0, json.dumps(result), "", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+            res = invoke_antigravity(
+                binary="echo",
+                route={
+                    "route_id": "antigravity/google/gemini-4-argon-high",
+                    "model_id": "gemini-4-argon-high",
+                    "canonical_key": "gemini-4-argon-high",
+                },
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="bypass",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(
+            (attempt_dir / "result.md").read_text(encoding="utf-8").strip(), "AGY ANSWER"
+        )
+
+    def test_antigravity_missing_result_event_is_a_format_failure(self):
+        from run import invoke_antigravity
+
+        attempt_dir = Path(tempfile.mkdtemp())
+
+        def mock_run(cmd, prompt="", *args, **kwargs):
+            return 0, json.dumps({"event": "step_update", "step": {"status": "running"}}), "", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+            res = invoke_antigravity(
+                binary="echo",
+                route={
+                    "route_id": "antigravity/google/gemini-4-argon-high",
+                    "model_id": "gemini-4-argon-high",
+                    "canonical_key": "gemini-4-argon-high",
+                },
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="bypass",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+            )
+        self.assertEqual(res["status"], "failed")
+        self.assertEqual(res["error_class"], "format")
+        self.assertIn("no terminal result event", res["error"])
+
+    def test_opencode_recovered_stream_error_is_a_warning(self):
+        from run import invoke_opencode
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        export = {
+            "messages": [
+                {"type": "user", "content": [{"type": "text", "text": "prompt"}]},
+                {
+                    "type": "assistant",
+                    "time": {"created": 0, "completed": 0},
+                    "finish": "stop",
+                    "model": {"id": "deepseek-flash", "providerID": "deepseek", "variant": "default"},
+                    "content": [{"type": "text", "text": "FULL ANSWER"}],
+                },
+            ]
+        }
+        captured: dict[str, str] = {}
+
+        def fake_run(cmd, prompt="", *args, **kwargs):
+            if cmd[1:3] == ["session", "export"]:
+                sent = captured.get("prompt", "")
+                nonce = sent[sent.rfind("[cross-subagents turn:") :].strip()
+                export["messages"][0]["content"] = [{"type": "text", "text": f"prompt {nonce}"}]
+                completed = int(time.time() * 1000)
+                export["messages"][1]["time"] = {"created": completed, "completed": completed}
+                return 0, json.dumps(export), "", False, True
+            if cmd[1:3] == ["session", "delete"]:
+                return 0, "", "", False, True
+            captured["prompt"] = prompt
+            stream = "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "step_start",
+                            "sessionID": "ses_test",
+                            "model": "deepseek/deepseek-flash",
+                        }
+                    ),
+                    json.dumps(
+                        {"type": "error", "error": {"message": "provider temporarily unavailable"}}
+                    ),
+                    json.dumps({"type": "text", "part": {"text": "FULL ANSWER"}}),
+                    json.dumps({"type": "step_finish", "part": {"reason": "stop"}}),
+                ]
+            )
+            return 0, stream, "", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=fake_run):
+            res = invoke_opencode(
+                binary="echo",
+                route={
+                    "route_id": "opencode/deepseek/deepseek-flash",
+                    "agent": "opencode",
+                    "provider": "deepseek",
+                    "model_id": "deepseek-flash",
+                    "canonical_key": "deepseek-flash",
+                },
+                prompt_text="prompt",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=True,
+                sandbox_mode="read-only",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+                recipe_flags={"cli_major": 2, "has_agent_flag": True, "has_session_cmd": True},
+                policy={"allow_shell": True},
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(len(res["warnings"]), 1)
+        self.assertIn("temporarily unavailable", res["warnings"][0])
+
+    def test_defect_reports_are_written_listed_and_resolved(self):
+        report_dir = Path(tempfile.mkdtemp())
+        env = {"CROSS_SUBAGENTS_DEFECT_DIR": str(report_dir)}
+        with patch.dict(os.environ, env, clear=False):
+            created = defects.create_report(
+                argparse.Namespace(
+                    title="Test defect",
+                    summary="Something in the skill misbehaved.",
+                    severity="minor",
+                    area="scripts/run.py",
+                    step="Step 4",
+                    observed="observed",
+                    expected="expected",
+                    reproduction="python3 scripts/run.py ...",
+                    impact="cost one attempt",
+                    suggested_fix="fix it",
+                    evidence="/tmp/evidence",
+                    run_id="run-1",
+                    task_id="task-1",
+                )
+            )
+            self.assertTrue(Path(created["path"]).is_file())
+            text = Path(created["path"]).read_text(encoding="utf-8")
+            self.assertIn("# Skill defect: Test defect", text)
+            self.assertIn("Something in the skill misbehaved.", text)
+            self.assertIn("run-1", text)
+
+            reports = defects.list_reports()
+            self.assertEqual(len(reports), 1)
+            self.assertEqual(reports[0]["severity"], "minor")
+            self.assertEqual(reports[0]["title"], "Test defect")
+            self.assertEqual(reports[0]["run_id"], "run-1")
+            self.assertEqual(len(defects.list_reports(run_id="run-1")), 1)
+            self.assertEqual(defects.list_reports(run_id="other-run"), [])
+
+            resolved = defects.resolve_report(created["id"], "Fixed.")
+            self.assertTrue(Path(resolved["path"]).is_file())
+            self.assertIn("## Resolution", Path(resolved["path"]).read_text(encoding="utf-8"))
+            self.assertEqual(defects.list_reports(), [])
+
+    def test_defect_report_requires_title_and_summary(self):
+        report_dir = Path(tempfile.mkdtemp())
+        with patch.dict(os.environ, {"CROSS_SUBAGENTS_DEFECT_DIR": str(report_dir)}, clear=False):
+            base = dict(
+                title="",
+                summary="x",
+                severity="minor",
+                area=None,
+                step=None,
+                observed=None,
+                expected=None,
+                reproduction=None,
+                impact=None,
+                suggested_fix=None,
+                evidence=None,
+                run_id=None,
+                task_id=None,
+            )
+            with self.assertRaises(ValueError):
+                defects.create_report(argparse.Namespace(**base))
+            base["title"] = "t"
+            base["summary"] = ""
+            with self.assertRaises(ValueError):
+                defects.create_report(argparse.Namespace(**base))
+            base["severity"] = "catastrophic"
+            base["summary"] = "s"
+            with self.assertRaises(ValueError):
+                defects.create_report(argparse.Namespace(**base))
 
     def test_opencode_conflicting_stream_and_export_models_are_rejected(self):
         from run import invoke_opencode
