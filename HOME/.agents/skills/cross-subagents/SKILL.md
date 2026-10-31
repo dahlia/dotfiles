@@ -111,11 +111,12 @@ When multiple installations exist on `PATH` (for example, a `mise` install
 alongside a system package), `probe.py` resolves `mise` shims and records all
 candidate paths and the active version.
 
-OpenCode v2 or later (`>= 2.0.0`) is required when OpenCode is the host
-session. If OpenCode v1 (`< 2.0.0`) is installed, `probe.py` marks
-`host_usable: false` and `target_usable: true` with a warning recommending an
-upgrade to v2; surface that warning to the user and use v1 only as a target CLI
-when needed.
+OpenCode v2 or later (`>= 2.0.0`) is required for both the host session
+(`host_usable: true`) and target CLI invocation. If OpenCode v1 (`< 2.0.0`) is
+installed, `probe.py` marks it unusable (`usable: false`, `target_usable: false`)
+and records a warning; surface that warning to the user and select another
+agent, or ask the user to upgrade. Never upgrade the user's installation
+automatically.
 
 If route collection or quota inspection needs to be run from scratch and would
 produce verbose diagnostic output, delegate the discovery pass to a lightweight

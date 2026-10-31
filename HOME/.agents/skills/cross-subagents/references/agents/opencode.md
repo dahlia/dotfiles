@@ -4,14 +4,14 @@ OpenCode CLI reference
 Version gate and authentication check
 -------------------------------------
 
-OpenCode v2 or later (`>= 2.0.0`) is required when OpenCode is the host
-session (`host_usable: true`). Check `opencode --version` before running
-discovery or execution commands. If the installed version is `1.x`,
-`scripts/probe.py` marks `host_usable: false` and `target_usable: true`,
-recording a warning recommending an upgrade to OpenCode v2 while still allowing
-v1 to be called as a target CLI if needed. If the version cannot be parsed or
-is below `1.0.0`, mark OpenCode unusable. Never upgrade the user's installation
-automatically.
+OpenCode v2 or later (`>= 2.0.0`) is required for both the host session
+(`host_usable: true`) and target CLI invocation. Check `opencode --version`
+before running discovery or execution commands. If the installed version is
+`1.x`, `scripts/probe.py` marks OpenCode unusable (`usable: false`,
+`host_usable: false`, `target_usable: false`) and records an upgrade warning.
+If the version cannot be parsed or is below `2.0.0`, do not attempt to run it;
+select another agent or ask the user to upgrade. Never upgrade the user's
+installation automatically.
 
 Inspect configured providers with:
 
@@ -21,7 +21,10 @@ opencode auth list --format json
 
 Verify that `opencode auth list --format json` exits with status `0` before
 parsing provider records (falling back to text parsing only if `--format json`
-is unsupported). OpenCode supports multiple upstream providers simultaneously
+is unsupported). The text fallback recognizes both the current
+`Name  API key  stored` columns and the older `●  Name api` bullet form, so a
+credentialed provider is never dropped just because its output shape changed.
+OpenCode supports multiple upstream providers simultaneously
 (such as `OpenCode Go`, `Anthropic`, `DeepSeek`, `GitHub Copilot`, `Google`,
 `OpenAI`, plus the built-in `opencode` provider). Authentication and quota apply
 per `(opencode, provider)` pair rather than across the binary as a whole.
@@ -84,12 +87,11 @@ Effort variants (`low`, `medium`, `high`) attach to the model identifier with
 `#<variant>` (for example, `-m deepseek/deepseek-flash#high`).
 
 When `--sandbox read-only` is requested, `scripts/run.py` passes `--agent plan`
-without `--auto` and sets version-specific `OPENCODE_CONFIG_CONTENT` in the
-child environment (in OpenCode v2, a `permissions` array of
+without `--auto` and sets `OPENCODE_CONFIG_CONTENT` in the child environment
+(a `permissions` array of
 `{"action": "<tool>", "resource": "*", "effect": "deny"}` rules for `edit`,
-`write`, `patch`, `shell`, and `bash`; in v1, the `permission` map) so
-file-modifying and shell tools are blocked while read-only tools run
-non-interactively.
+`write`, `patch`, `shell`, and `bash`) so file-modifying and shell tools are
+blocked while read-only tools run non-interactively.
 
 Parse `<events.jsonl>` for `"sessionID"` (such as `ses_...`), `"type": "text"`
 parts, completion events, and `"type": "error"` events. To capture token usage
@@ -145,9 +147,6 @@ that deny edit/write/patch and, by default, shell/bash. Two postures extend it:
  -  `--isolate`: disables `share`, `update`, and `snapshots`, adds the
     `-opencode.config.instruction` and `-opencode.config.skill` plugins, and
     denies `plugin:*`, `mcp:*`, and `skill:*` integration use.
-OpenCode v1 has no per-agent configuration, so `--no-tools` and `--allow-shell`
-are rejected on v1 with a permission error instead of reporting enforcement
-that was never established.
 
  -  `--no-tools`: implies `--isolate`, denies `webfetch` too, and injects a
     dedicated `tools-off` primary agent whose only permission rule denies

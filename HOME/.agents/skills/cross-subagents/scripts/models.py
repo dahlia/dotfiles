@@ -41,7 +41,7 @@ from common import (
     read_json_file,
     validate_safe_identifier,
 )
-from probe import probe_all, run_cmd, strip_ansi
+from probe import parse_semver, probe_all, run_cmd, strip_ansi
 
 MODELS_TTL_SECONDS = 86400  # 24 hours
 SURVEY_COST_TTL_SECONDS = 7 * 86400  # 7 days
@@ -339,6 +339,17 @@ def collect_opencode_models(
     """Query OpenCode models via `opencode models` and filter to authenticated providers."""
     if not agent_info.get("target_usable", agent_info.get("usable")):
         raise RuntimeError("OpenCode is not usable or has no authenticated providers.")
+
+    major = agent_info.get("cli_major")
+    if not isinstance(major, int) or isinstance(major, bool):
+        ver_tuple = parse_semver(str(agent_info.get("version") or ""))
+        major = ver_tuple[0] if ver_tuple is not None else 2
+    if major < 2:
+        version = agent_info.get("version") or "v1"
+        raise RuntimeError(
+            f"OpenCode {version} is not supported: cross-subagents requires OpenCode v2 or "
+            "later (>= 2.0.0). Upgrade the CLI or select another agent."
+        )
 
     proc = run_cmd([binary, "models"], timeout=20)
     if proc.returncode != 0:

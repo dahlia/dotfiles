@@ -1281,6 +1281,18 @@ def opencode_read_only_config(
     return cfg, verified
 
 
+def _opencode_cli_major(flags: dict[str, Any]) -> int:
+    """Resolve the OpenCode major version from recipe flags, defaulting to v2."""
+    majors: list[int] = []
+    major_flag = flags.get("cli_major")
+    if isinstance(major_flag, int) and not isinstance(major_flag, bool):
+        majors.append(major_flag)
+    ver_tuple = parse_semver(str(flags.get("version") or ""))
+    if ver_tuple is not None:
+        majors.append(ver_tuple[0])
+    return min(majors) if majors else 2
+
+
 def invoke_opencode(
     binary: str,
     route: dict[str, Any],
@@ -1306,6 +1318,24 @@ def invoke_opencode(
     stderr_file = attempt_dir / "stderr.log"
 
     flags = recipe_flags if recipe_flags is not None else get_agent_recipe("opencode")
+    cli_major = _opencode_cli_major(flags)
+    if cli_major < 2:
+        return {
+            "status": "failed",
+            "exit_code": 127,
+            "session_id": resume_session_id,
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "requested_model": route.get("requested_model") or route["model_id"],
+            "resolved_model": route.get("resolved_model_id") or route["model_id"],
+            "observed_model": None,
+            "session_cleaned_up": True,
+            "cleanup_verified": True,
+            "error_class": "not_installed",
+            "error": (
+                f"OpenCode v{cli_major} recipe is not supported: cross-subagents requires "
+                "OpenCode v2 or later (>= 2.0.0). Upgrade OpenCode or select another agent."
+            ),
+        }
     has_standalone = flags.get("has_standalone", True)
     has_auto = flags.get("has_auto", True)
     has_agent_flag = flags.get("has_agent_flag", True)
@@ -1327,12 +1357,7 @@ def invoke_opencode(
         cmd.extend(["--format", "json"])
 
     if sandbox_mode == "read-only":
-        major_flag = flags.get("cli_major")
-        if isinstance(major_flag, int) and not isinstance(major_flag, bool):
-            major_ver = major_flag
-        else:
-            ver_tuple = parse_semver(str(flags.get("version") or ""))
-            major_ver = ver_tuple[0] if ver_tuple is not None else 2
+        major_ver = cli_major
 
         # `--no-tools` and `--allow-shell` depend on a dedicated agent; without
         # agent selection the builtin agent's own policy would still apply and
@@ -2912,7 +2937,11 @@ def execute_task(
                 agent_info = (probe_data.get("agents") or {}).get(agent) or {}
                 binary = agent_info.get("binary")
                 agent_version = agent_info.get("version")
-                current_recipe_flags = agent_info.get("recipe_flags") or get_agent_recipe(agent, agent_version)
+                current_recipe_flags = dict(
+                    agent_info.get("recipe_flags") or get_agent_recipe(agent, agent_version)
+                )
+                if agent == "opencode" and agent_version:
+                    current_recipe_flags.setdefault("version", agent_version)
 
                 # Each route in route_chain may run at most 1 initial attempt + 1 adapted recipe retry on `no_option`
                 for recipe_retry_idx in range(2):
@@ -2981,6 +3010,12 @@ def execute_task(
                                 "error": f"Baseline snapshot failed: {guard_baseline.get('error')}",
                             }
                         elif not agent_info.get("usable") or not binary:
+                            unusable_reasons = [
+                                str(w).strip()
+                                for w in (agent_info.get("warnings") or [])
+                                if str(w).strip()
+                            ]
+                            detail = f" {' '.join(unusable_reasons)}" if unusable_reasons else ""
                             res: dict[str, Any] = {
                                 "status": "failed",
                                 "exit_code": 127,
@@ -2992,7 +3027,7 @@ def execute_task(
                                 "session_cleaned_up": True,
                                 "cleanup_verified": True,
                                 "error_class": "not_installed",
-                                "error": f"Agent '{agent}' is not installed or not usable.",
+                                "error": f"Agent '{agent}' is not installed or not usable.{detail}",
                             }
                         elif agent == "codex":
                             res = invoke_codex(

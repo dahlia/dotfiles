@@ -1892,6 +1892,78 @@ class TestCrossSubagents(unittest.TestCase):
             _cfg, verified = opencode_read_only_config({}, major_ver=1, **kwargs)
             self.assertFalse(verified)
 
+    def test_opencode_v1_is_unusable_and_rejected_before_invocation(self):
+        import probe
+        from probe import parse_opencode_auth_text
+        from run import invoke_opencode
+
+        def fake_run(cmd, **kwargs):
+            if cmd[1:] == ["--version"]:
+                return argparse.Namespace(returncode=0, stdout="1.19.4\n", stderr="")
+            return argparse.Namespace(returncode=1, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as td, patch.object(
+            probe,
+            "resolve_agent_binary",
+            return_value={
+                "installed": True,
+                "binary": "/tmp/opencode",
+                "all_paths": ["/tmp/opencode"],
+                "distinct_targets": ["/tmp/opencode"],
+                "duplicate_installs": False,
+            },
+        ), patch.object(probe, "run_cmd", side_effect=fake_run), patch.object(
+            probe, "get_cache_dir", return_value=Path(td)
+        ), patch.object(probe, "compute_agent_config_fingerprint", return_value="fp"):
+            info = probe.probe_opencode()
+        self.assertFalse(info["version_ok"])
+        self.assertFalse(info["usable"])
+        self.assertFalse(info["host_usable"])
+        self.assertFalse(info["target_usable"])
+        self.assertTrue(any("2.0.0" in warning for warning in info["warnings"]))
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        invoked = False
+
+        def mock_run(*_args, **_kwargs):
+            nonlocal invoked
+            invoked = True
+            return 0, "", "", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+            res = invoke_opencode(
+                binary="echo",
+                route={
+                    "route_id": "opencode/deepseek/deepseek-flash",
+                    "model_id": "deepseek-flash",
+                    "provider": "deepseek",
+                },
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="workspace-write",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+                recipe_flags={"cli_major": 1, "version": "1.19.4", "has_standalone": True},
+            )
+        self.assertEqual(res["status"], "failed")
+        self.assertEqual(res["error_class"], "not_installed")
+        self.assertIn("2.0.0", res["error"])
+        self.assertFalse(invoked)
+
+        cases = {
+            "●  Google api\n●  DeepSeek api\n": {"google", "deepseek"},
+            "OpenCode Go     API key                     stored\n"
+            "Anthropic       OAuth                       stored\n": {"opencode-go", "anthropic"},
+        }
+        for text, expected in cases.items():
+            providers = parse_opencode_auth_text(text)
+            self.assertEqual({p["provider"] for p in providers}, expected)
+            self.assertTrue(all(p["auth_method"] in {"api_key", "oauth"} for p in providers))
+
     def test_review_shell_agent_preserves_network_access(self):
         cfg, verified = opencode_read_only_config(
             {}, major_ver=2, allow_shell=True, allow_network=True

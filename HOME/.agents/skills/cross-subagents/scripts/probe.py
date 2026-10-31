@@ -75,17 +75,23 @@ def cache_cli_help_and_recipe(agent: str, binary: str, version: str | None) -> d
 
     help_text = ""
     sub_help_text = ""
+
+    def _help_output(proc: subprocess.CompletedProcess[str]) -> str:
+        # Some CLIs (notably OpenCode v1) print --help to stderr rather than stdout.
+        return strip_ansi(f"{proc.stdout or ''}\n{proc.stderr or ''}").strip()
+
     try:
         proc = run_cmd([binary, "--help"], timeout=8)
-        if proc.returncode == 0 and (proc.stdout or "").strip():
-            help_text = strip_ansi(proc.stdout)
+        if proc.returncode == 0:
+            help_text = _help_output(proc)
             if agent in ("codex", "opencode"):
                 sub_cmd = "exec" if agent == "codex" else "run"
                 sub_proc = run_cmd([binary, sub_cmd, "--help"], timeout=8)
-                if sub_proc.returncode == 0 and (sub_proc.stdout or "").strip():
-                    sub_help_text = strip_ansi(sub_proc.stdout)
+                if sub_proc.returncode == 0:
+                    sub_help_text = _help_output(sub_proc)
             combined_help = help_text + ("\n\n--- SUBCOMMAND HELP ---\n" + sub_help_text if sub_help_text else "")
-            help_file.write_text(combined_help, encoding="utf-8")
+            if combined_help.strip():
+                help_file.write_text(combined_help, encoding="utf-8")
     except Exception:
         pass
 
@@ -99,7 +105,11 @@ def cache_cli_help_and_recipe(agent: str, binary: str, version: str | None) -> d
 
     ver_tuple = parse_semver(version or "")
     major = ver_tuple[0] if ver_tuple else 0
-    all_help = f"{help_text}\n{sub_help_text}"
+    all_help = "\n".join(part for part in (help_text, sub_help_text) if part).strip()
+    # `run`, `exec`, and their sibling subcommands take their own flags plus a
+    # subset of global flags. Prefer the subcommand help when it is available so
+    # a top-level-only flag is never mistaken for a run-time flag.
+    sub_help = sub_help_text.strip() or all_help
 
     if agent == "codex":
         flags = {
@@ -126,11 +136,11 @@ def cache_cli_help_and_recipe(agent: str, binary: str, version: str | None) -> d
     elif agent == "opencode":
         flags = {
             "cli_major": major or 2,
-            "has_standalone": ("--standalone" in all_help) if all_help else (major >= 2),
-            "has_auto": ("--auto" in all_help) if all_help else (major >= 2),
-            "has_agent_flag": ("--agent" in all_help) if all_help else True,
-            "has_format_json": ("--format" in all_help) if all_help else True,
-            "has_session_cmd": ("session" in help_text) if help_text else True,
+            "has_standalone": ("--standalone" in sub_help) if sub_help else (major >= 2),
+            "has_auto": ("--auto" in sub_help) if sub_help else (major >= 2),
+            "has_agent_flag": ("--agent" in sub_help) if sub_help else True,
+            "has_format_json": ("--format" in sub_help) if sub_help else True,
+            "has_session_cmd": ("session" in all_help) if all_help else True,
         }
     elif agent == "antigravity":
         flags = {
@@ -328,6 +338,48 @@ def probe_claude_code() -> dict[str, Any]:
     }
 
 
+def parse_opencode_auth_text(text: str) -> list[dict[str, str]]:
+    """Parse `opencode auth list` text output across CLI output formats.
+
+    OpenCode v2 prints ``OpenCode Go     API key   stored`` while v1 prints
+    ``●  OpenCode Go api``. Both carry the provider name and credential method,
+    but neither shape survives the other's field spacing or method labels.
+    """
+    providers: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw_line in strip_ansi(text).splitlines():
+        line = raw_line.strip().lstrip("│┃|").strip()
+        if not line or line[0] in "┌└├─┐┘┤┬┴┼":
+            continue
+        line = re.sub(r"^[●•*\-]\s*", "", line).strip()
+        match = re.search(
+            r"\s+(api\s*key|api|oauth|token|configured)\b(?:\s+stored)?\s*$",
+            line,
+            re.IGNORECASE,
+        )
+        if not match:
+            continue
+        name = line[: match.start()].strip()
+        if not name:
+            continue
+        method = re.sub(r"\s+", " ", match.group(1).lower())
+        if method in ("api key", "api", "key"):
+            method = "api_key"
+        slug = name.lower().replace(" ", "-")
+        if slug in seen:
+            continue
+        seen.add(slug)
+        providers.append(
+            {
+                "provider": slug,
+                "name": name,
+                "auth_type": method,
+                "auth_method": method,
+            }
+        )
+    return providers
+
+
 def probe_opencode() -> dict[str, Any]:
     base = resolve_agent_binary("opencode")
     if not base["installed"] or not base["binary"]:
@@ -356,8 +408,7 @@ def probe_opencode() -> dict[str, Any]:
 
     ver_tuple = parse_semver(version or "")
     major = ver_tuple[0] if ver_tuple is not None else 0
-    host_version_ok = major >= 2
-    target_version_ok = major >= 1
+    version_ok = major >= 2
     warnings: list[str] = []
 
     if base["duplicate_installs"]:
@@ -365,13 +416,16 @@ def probe_opencode() -> dict[str, Any]:
             f"Multiple installations detected for opencode: {base['distinct_targets']}. Using {binary}."
         )
 
-    if not target_version_ok:
+    if not version_ok:
         warnings.append(
-            f"OpenCode version '{version}' could not be parsed as >= 1.0.0. Marking OpenCode unusable."
+            f"OpenCode version '{version}' is not supported: cross-subagents requires "
+            "OpenCode v2 or later (>= 2.0.0). Marking OpenCode unusable; upgrade the CLI "
+            "or select another agent."
         )
         return {
             **base,
             "version": version,
+            "cli_major": major,
             "version_ok": False,
             "authenticated": False,
             "auth_check_transient": False,
@@ -384,12 +438,6 @@ def probe_opencode() -> dict[str, Any]:
             "config_fingerprint": compute_agent_config_fingerprint("opencode", binary, version),
             "warnings": warnings,
         }
-
-    if not host_version_ok:
-        warnings.append(
-            f"OpenCode v1 ({version}) detected. OpenCode v1 cannot act as a host for this skill (`host_usable: false`), "
-            "and upgrading to OpenCode v2 (>= 2.0.0) is recommended. Target CLI invocation remains available via v1 recipe."
-        )
 
     recipe_flags = cache_cli_help_and_recipe("opencode", binary, version)
 
@@ -424,21 +472,11 @@ def probe_opencode() -> dict[str, Any]:
             a_proc_txt = run_cmd([binary, "auth", "list"], timeout=10)
             if a_proc_txt.returncode == 0:
                 auth_cmd_ok = True
-                clean = strip_ansi(a_proc_txt.stdout or "")
-                for line in clean.splitlines():
-                    m = re.search(r"[●•*]\s+(.+?)\s{2,}(API key|OAuth|Token|Configured)", line, re.IGNORECASE)
-                    if m:
-                        raw_name = m.group(1).strip()
-                        auth_kind = m.group(2).strip().lower()
-                        slug = raw_name.lower().replace(" ", "-")
-                        providers.append(
-                            {
-                                "provider": slug,
-                                "name": raw_name,
-                                "auth_type": auth_kind,
-                                "auth_method": auth_kind,
-                            }
-                        )
+                providers.extend(parse_opencode_auth_text(a_proc_txt.stdout or ""))
+                if not providers:
+                    warnings.append(
+                        "`opencode auth list` succeeded but no provider credentials could be parsed."
+                    )
             else:
                 auth_transient = True
                 warnings.append(
@@ -451,13 +489,13 @@ def probe_opencode() -> dict[str, Any]:
 
     # OpenCode includes built-in free models under the `opencode` provider even when no external provider credentials exist
     authenticated = auth_cmd_ok
-    target_usable = bool(target_version_ok and authenticated)
-    host_usable = bool(host_version_ok and authenticated)
+    target_usable = bool(version_ok and authenticated)
+    host_usable = bool(version_ok and authenticated)
     return {
         **base,
         "version": version,
         "cli_major": major,
-        "version_ok": host_version_ok,
+        "version_ok": version_ok,
         "authenticated": authenticated,
         "auth_check_transient": auth_transient,
         "authenticated_providers": providers,
