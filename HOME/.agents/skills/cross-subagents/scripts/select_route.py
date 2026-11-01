@@ -30,6 +30,7 @@ from typing import Any
 
 from common import (
     SCHEMA_VERSION,
+    atomic_write_json,
     canonical_agent_name,
     enforce_utf8,
     ensure_child_path,
@@ -818,6 +819,98 @@ def save_session_pins(pins: dict[str, Any], run_id: str | None = None) -> None:
     locked_update_json(path, _update)
 
 
+SELECTION_PLAN_FILENAME = "selection-plan.json"
+PLAN_CONSTRAINT_KEYS = (
+    "exclude_vendor",
+    "exclude_agent",
+    "exclude_route",
+    "include_vendor",
+    "max_tier",
+    "quality_floor",
+    "min_context",
+    "require_modality",
+    "require_vision",
+    "allow_estimated_capabilities",
+    "allow_micro_quota",
+    "min_headroom",
+    "speed",
+    "sandbox",
+)
+
+
+def get_selection_plan_path(run_id: str, *, create: bool = False) -> Path:
+    """Return the run-scoped plan constraints path used by run.py fallbacks."""
+    validate_safe_identifier(run_id, "run_id")
+    runs_root = get_cache_dir() / "runs"
+    if create:
+        runs_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    run_dir = ensure_child_path(runs_root, run_id)
+    if create:
+        run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return run_dir / SELECTION_PLAN_FILENAME
+
+
+def save_selection_plan(plan: dict[str, Any], run_id: str) -> Path:
+    """Persist only the per-step constraints so run.py can keep a pinned route's
+    fallback chain inside the filters that produced the plan.
+    """
+    steps: list[dict[str, Any]] = []
+    for entry in plan.get("steps") or []:
+        selected = entry.get("selected") or {}
+        route_id = str(selected.get("route_id") or "").strip()
+        if not route_id:
+            continue
+        constraints = entry.get("constraints") or {}
+        steps.append(
+            {
+                "step": entry.get("step"),
+                "route_id": route_id,
+                "vendor": selected.get("vendor"),
+                "constraints": {
+                    key: constraints.get(key)
+                    for key in PLAN_CONSTRAINT_KEYS
+                    if key in constraints
+                },
+            }
+        )
+
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "saved_at": now_iso(),
+        "planned_at": plan.get("planned_at"),
+        "status": plan.get("status"),
+        "require_distinct_vendor": (plan.get("constraints") or {}).get("require_distinct_vendor"),
+        "require_distinct_bucket": (plan.get("constraints") or {}).get("require_distinct_bucket"),
+        "steps": steps,
+    }
+    path = get_selection_plan_path(run_id, create=True)
+    atomic_write_json(path, payload)
+    return path
+
+
+def load_selection_plan(run_id: str | None = None) -> dict[str, Any]:
+    """Load persisted plan constraints for a run, if select_route.py saved them."""
+    if not run_id:
+        return {}
+    try:
+        path = get_selection_plan_path(run_id)
+    except ValueError:
+        return {}
+    return read_json_file(path) or {}
+
+
+def planned_constraints_for_route(plan: dict[str, Any], route_id: str) -> dict[str, Any] | None:
+    """Return the effective constraints of the plan step that selected `route_id`."""
+    target = (route_id or "").strip().lower()
+    if not target:
+        return None
+    for entry in plan.get("steps") or []:
+        if str(entry.get("route_id") or "").strip().lower() == target:
+            return dict(entry.get("constraints") or {})
+    return None
+
+
 def evaluate_route_quota(
     route: dict[str, Any],
     buckets: dict[str, dict[str, Any]],
@@ -1497,8 +1590,19 @@ def select_step_plan(
                     "speed": speed,
                     "include_vendor": merged.get("include_vendor") or [],
                     "exclude_vendor": exclude_vendors,
+                    "exclude_agent": exclude_agents,
+                    "exclude_route": sorted(excluded_routes),
                     "max_tier": merged.get("max_tier"),
                     "quality_floor": res.get("quality_floor"),
+                    "min_context": merged.get("min_context"),
+                    "require_modality": merged.get("require_modality") or [],
+                    "require_vision": bool(merged.get("require_vision")),
+                    "allow_estimated_capabilities": bool(
+                        merged.get("allow_estimated_capabilities")
+                    ),
+                    "allow_micro_quota": bool(merged.get("allow_micro_quota")),
+                    "min_headroom": merged.get("min_headroom"),
+                    "sandbox": merged.get("sandbox"),
                 },
                 "selected": selected,
                 "fallbacks": res.get("fallbacks") or [],
@@ -1507,7 +1611,7 @@ def select_step_plan(
         )
 
     status = "ok" if not unfilled else ("partial" if steps else "no_route_available")
-    return {
+    result = {
         "status": status,
         "planned_at": now_iso(),
         "step_count": len(specs),
@@ -1519,6 +1623,14 @@ def select_step_plan(
         "steps": steps,
         "unfilled": unfilled,
     }
+    if run_id:
+        try:
+            save_selection_plan(result, run_id)
+        except (OSError, ValueError):
+            # Planning must still succeed when the run cache is read-only; the
+            # caller simply loses cross-invocation constraint recovery.
+            pass
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:

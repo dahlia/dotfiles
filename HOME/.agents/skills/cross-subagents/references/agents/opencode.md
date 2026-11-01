@@ -28,6 +28,22 @@ OpenCode supports multiple upstream providers simultaneously
 (such as `OpenCode Go`, `Anthropic`, `DeepSeek`, `GitHub Copilot`, `Google`,
 `OpenAI`, plus the built-in `opencode` provider). Authentication and quota apply
 per `(opencode, provider)` pair rather than across the binary as a whole.
+`opencode auth list` reports the OpenCode Console credential as `opencode`
+(`OpenCode Console`), while `opencode models` exposes two catalogs backed by
+that credential: the metered `opencode` (Zen) models and the subscription
+`opencode-go` models. Treat both as authenticated when the console credential
+exists, and do not drop `opencode-go/*` just because it has no separate auth
+entry.
+
+~~~~ bash
+opencode models | grep -E '^(opencode|opencode-go)/'
+~~~~
+
+When the same canonical model exists in both catalogs, the `opencode-go`
+subscription route is selected. Its Zen duplicate remains in the catalog as
+`hidden` (reachable with an explicit pin or `--force-route`) so automatic
+selection does not attempt a metered route that can fail with
+`Insufficient account funds`.
 
 
 Model discovery
@@ -42,7 +58,8 @@ opencode models
 Each line uses the `provider/model` format (for example,
 `deepseek/deepseek-flash`, `opencode-go/deepseek-v4.1-flash`,
 `anthropic/claude-opus-5-5`). Filter the catalog to providers that appear in
-`opencode auth list --format json`, plus `free`-tagged models served under the
+`opencode auth list --format json`, plus `opencode-go` when the OpenCode
+Console credential is present, plus `free`-tagged models served under the
 built-in `opencode` provider.
 
 During normalization, map provider-specific versioned aliases for the same
@@ -60,6 +77,9 @@ providers. Track quota per provider bucket (`opencode:<provider>`) using
 observation mode:
 
  -  Initialize each authenticated provider bucket as `unknown`.
+ -  Initialize `opencode:opencode-go` whenever the OpenCode Console credential
+    exists, even though it does not appear as a separate auth entry; failure
+    observations are recorded against that bucket.
  -  When an invocation fails with HTTP 429 or an exhausted-quota message on
     `opencode:<provider>`, record the observation and cooldown timestamp via
     `scripts/quota.py record-observation --bucket opencode:<provider> --error "<message>"`.

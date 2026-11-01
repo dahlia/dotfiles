@@ -630,6 +630,120 @@ class TestCrossSubagents(unittest.TestCase):
             self.assertEqual(len(partial["steps"]), 1)
             self.assertEqual(partial["unfilled"][0]["step"], 2)
 
+    def test_plan_constraints_persist_for_pinned_fallbacks(self):
+        catalog, quota_state = self._fake_selection_inputs()
+        with tempfile.TemporaryDirectory() as td, patch.object(
+            select_route, "get_cache_dir", return_value=Path(td)
+        ), patch.object(select_route, "get_survey", return_value=None), patch.object(
+            select_route, "collect_all_models", return_value=catalog
+        ), patch.object(select_route, "collect_quota", return_value=quota_state):
+            plan = select_step_plan(
+                [{}],
+                defaults={"task": "code_review", "exclude_vendor": ["openai", "anthropic"]},
+                require_distinct_vendor=False,
+                run_id="plan-run",
+            )
+            self.assertEqual(plan["status"], "ok")
+            selected = plan["steps"][0]["selected"]
+            persisted = select_route.load_selection_plan("plan-run")
+            constraints = select_route.planned_constraints_for_route(
+                persisted, selected["route_id"]
+            )
+            self.assertIsNotNone(constraints)
+            self.assertIn("openai", constraints["exclude_vendor"])
+            self.assertIn("anthropic", constraints["exclude_vendor"])
+
+            policy = run.resolve_pinned_fallback_constraints(
+                selected,
+                run_id="plan-run",
+                exclude_vendors=None,
+                exclude_agents=None,
+                include_vendors=None,
+                max_tier=None,
+                min_context=None,
+                require_modalities=None,
+                require_vision=False,
+                allow_estimated_capabilities=False,
+                allow_micro_quota=False,
+                min_headroom=None,
+                speed="normal",
+                exclude_route_ids=None,
+            )
+        self.assertEqual(policy["scope"], "planned_constraints")
+        self.assertIn("openai", policy["exclude_vendors"])
+        self.assertIn("anthropic", policy["exclude_vendors"])
+
+    def test_pinned_fallback_stays_in_primary_vendor(self):
+        route = {
+            "route_id": "antigravity/google/gemini-4-argon-high",
+            "agent": "antigravity",
+            "provider": "google",
+            "model_id": "gemini-4-argon-high",
+            "canonical_key": "gemini-4-argon",
+            "vendor": "google",
+        }
+        with patch.object(run, "load_selection_plan", return_value={}):
+            policy = run.resolve_pinned_fallback_constraints(
+                route,
+                run_id="no-plan",
+                exclude_vendors=None,
+                exclude_agents=None,
+                include_vendors=None,
+                max_tier=None,
+                min_context=None,
+                require_modalities=None,
+                require_vision=False,
+                allow_estimated_capabilities=False,
+                allow_micro_quota=False,
+                min_headroom=None,
+                speed="normal",
+                exclude_route_ids=None,
+            )
+        self.assertEqual(policy["scope"], "same_vendor")
+        self.assertEqual(policy["include_vendors"], ["google"])
+
+        with patch.object(run, "load_selection_plan", return_value={}):
+            explicit = run.resolve_pinned_fallback_constraints(
+                route,
+                run_id="no-plan",
+                exclude_vendors=["anthropic"],
+                exclude_agents=None,
+                include_vendors=["openai", "anthropic"],
+                max_tier=2,
+                min_context=None,
+                require_modalities=None,
+                require_vision=False,
+                allow_estimated_capabilities=False,
+                allow_micro_quota=False,
+                min_headroom=None,
+                speed="normal",
+                exclude_route_ids=None,
+            )
+        self.assertEqual(explicit["scope"], "include_vendors")
+        self.assertEqual(explicit["include_vendors"], ["openai", "anthropic"])
+        self.assertEqual(explicit["max_tier"], 2)
+
+        unknown_vendor = {**route, "canonical_key": "", "provider": ""}
+        with patch.object(run, "load_selection_plan", return_value={}):
+            self.assertIsNone(
+                run.resolve_pinned_fallback_constraints(
+                    unknown_vendor,
+                    run_id="no-plan",
+                    exclude_vendors=None,
+                    exclude_agents=None,
+                    include_vendors=None,
+                    max_tier=None,
+                    min_context=None,
+                    require_modalities=None,
+                    require_vision=False,
+                    allow_estimated_capabilities=False,
+                    allow_micro_quota=False,
+                    min_headroom=None,
+                    speed="normal",
+                    exclude_route_ids=None,
+                )
+            )
+
     def test_parse_step_spec(self):
         parsed = parse_step_spec('{"include_vendor":"openai","max_tier":"2","speed":"fast"}')
         self.assertEqual(parsed["include_vendor"], ["openai"])
@@ -2012,6 +2126,63 @@ class TestCrossSubagents(unittest.TestCase):
             )
         self.assertEqual(plan["status"], "ok")
         self.assertNotEqual(plan["steps"][0]["selected"]["route_id"], "codex/openai/gpt-6-astra")
+
+    def test_opencode_go_catalog_uses_console_credential(self):
+        output = (
+            "opencode/glm-5.3\n"
+            "opencode/glm-5.3-flash-free\n"
+            "opencode-go/glm-5.3\n"
+            "opencode-go/qwen3.8-max\n"
+        )
+
+        def fake_run(cmd, **kwargs):
+            if cmd[1:] == ["models"]:
+                return argparse.Namespace(returncode=0, stdout=output, stderr="")
+            raise AssertionError(cmd)
+
+        agent_info = {
+            "target_usable": True,
+            "cli_major": 2,
+            "version": "2.2.2",
+            "authenticated_providers": [{"provider": "opencode", "auth_method": "oauth"}],
+        }
+        with patch.object(models, "run_cmd", side_effect=fake_run):
+            routes, meta = models.collect_opencode_models("/tmp/opencode", agent_info)
+        by_id = {route["route_id"]: route for route in routes}
+
+        go_route = by_id["opencode/opencode-go/glm-5.3"]
+        self.assertEqual(go_route["provider"], "opencode-go")
+        self.assertEqual(go_route["quota_bucket"], "opencode:opencode-go")
+        self.assertEqual(go_route["auth_plan"], "subscription")
+        self.assertEqual(go_route["cli_model_arg"], "opencode-go/glm-5.3")
+        self.assertFalse(go_route["hidden"])
+
+        # The unfunded Zen duplicate is demoted, and a free Zen-only model stays visible.
+        self.assertTrue(by_id["opencode/opencode/glm-5.3"]["hidden"])
+        self.assertEqual(
+            by_id["opencode/opencode/glm-5.3"]["hidden_reason"], "duplicate-opencode-go"
+        )
+        self.assertFalse(by_id["opencode/opencode/glm-5.3-flash-free"]["hidden"])
+        self.assertEqual(meta["derived_providers"], ["opencode-go"])
+
+        quota_state = quota.build_observed_quota("opencode", agent_info)
+        self.assertIn("opencode:opencode-go", quota_state["buckets"])
+
+        # Without the console credential, opencode-go lines stay hidden.
+        with patch.object(models, "run_cmd", side_effect=fake_run):
+            routes_without_console, meta_without_console = models.collect_opencode_models(
+                "/tmp/opencode",
+                {
+                    "target_usable": True,
+                    "cli_major": 2,
+                    "version": "2.2.2",
+                    "authenticated_providers": [{"provider": "anthropic", "auth_method": "oauth"}],
+                },
+            )
+        self.assertFalse(
+            any(route["provider"] == "opencode-go" for route in routes_without_console)
+        )
+        self.assertEqual(meta_without_console["derived_providers"], [])
 
     def test_opencode_v1_rejects_agent_dependent_postures(self):
         for kwargs in ({"allow_shell": True}, {"no_tools": True}):

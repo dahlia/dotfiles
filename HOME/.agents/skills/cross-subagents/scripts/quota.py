@@ -693,13 +693,23 @@ def build_observed_quota(agent: str, agent_info: dict[str, Any]) -> dict[str, An
         ]
         if "opencode" not in providers:
             providers.append("opencode")
+        # The subscription catalog shares the OpenCode Console credential but
+        # bills against its own quota bucket.
+        if "opencode" in providers and "opencode-go" not in providers:
+            providers.append("opencode-go")
         for prov in providers:
             b_id = f"opencode:{prov}"
-            metrics = compute_window_metrics(None, None, None, 1.0)
+            plan = estimate_plan_capacity(
+                "opencode-go"
+                if prov == "opencode-go"
+                else agent_info.get("plan_type") or "subscription"
+            )
+            metrics = compute_window_metrics(None, None, None, plan["capacity_factor"])
             buckets[b_id] = {
                 "bucket_id": b_id,
                 "agent": "opencode",
                 "provider": prov,
+                "plan": plan,
                 "used_percent": None,
                 "resets_at_epoch": None,
                 **metrics,

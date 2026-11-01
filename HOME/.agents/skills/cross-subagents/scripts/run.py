@@ -80,7 +80,10 @@ from select_route import (
     check_route_eligibility,
     classify_route_billing,
     evaluate_route_traits,
+    infer_model_vendor,
+    load_selection_plan,
     load_session_pins,
+    planned_constraints_for_route,
     select_routes,
 )
 
@@ -2537,6 +2540,109 @@ def _write_early_failure_contract(
     return meta_payload
 
 
+def _unique_lower(values: list[str] | None) -> list[str]:
+    return list(dict.fromkeys(v.strip().lower() for v in (values or []) if v and v.strip()))
+
+
+def resolve_pinned_fallback_constraints(
+    explicit_route: dict[str, Any],
+    *,
+    run_id: str | None,
+    exclude_vendors: list[str] | None,
+    exclude_agents: list[str] | None,
+    include_vendors: list[str] | None,
+    max_tier: int | None,
+    min_context: int | None,
+    require_modalities: list[str] | None,
+    require_vision: bool,
+    allow_estimated_capabilities: bool,
+    allow_micro_quota: bool,
+    min_headroom: float | None,
+    speed: str,
+    exclude_route_ids: list[str] | None,
+) -> dict[str, Any] | None:
+    """Build fallback-selection constraints for an explicitly pinned `--route`.
+
+    An explicit route is checked against the caller's constraints, but its
+    fallbacks used to be selected with whatever flags happened to be on the
+    run.py command line. That silently widened a multi-step plan (for example,
+    a plan that excluded Anthropic and OpenAI could fall back to Claude). Three
+    sources are honored, in order:
+
+      1. Constraints persisted by `select_route.py --steps --run-id`, matched to
+         the exact planned route, so fallbacks stay inside the original chain.
+      2. Explicit `--include-vendor` flags, which are the caller's allow-list.
+      3. Otherwise the primary route's own vendor, so a quota failure cannot
+         silently switch vendors.
+
+    Returns None when no safe fallback can be constructed (unknown vendor).
+    """
+    plan = load_selection_plan(run_id)
+    planned = planned_constraints_for_route(plan, explicit_route["route_id"]) if plan else None
+    cli_includes = _unique_lower(include_vendors)
+    cli_excludes = _unique_lower(exclude_vendors)
+    cli_exclude_agents = _unique_lower(exclude_agents)
+
+    if planned:
+        planned_excludes = _unique_lower(planned.get("exclude_vendor"))
+        planned_exclude_agents = _unique_lower(planned.get("exclude_agent"))
+        planned_excludes_routes = [
+            str(r).strip()
+            for r in (planned.get("exclude_route") or [])
+            if str(r).strip()
+        ]
+        return {
+            "scope": "planned_constraints",
+            "exclude_vendors": list(dict.fromkeys(planned_excludes + cli_excludes)),
+            "exclude_agents": list(dict.fromkeys(planned_exclude_agents + cli_exclude_agents)),
+            "include_vendors": cli_includes or _unique_lower(planned.get("include_vendor")),
+            "max_tier": max_tier if max_tier is not None else planned.get("max_tier"),
+            "min_context": min_context if min_context is not None else planned.get("min_context"),
+            "require_modalities": list(require_modalities or [])
+            or list(planned.get("require_modality") or []),
+            "require_vision": bool(require_vision) or bool(planned.get("require_vision")),
+            "allow_estimated_capabilities": bool(allow_estimated_capabilities)
+            or bool(planned.get("allow_estimated_capabilities")),
+            "allow_micro_quota": bool(allow_micro_quota)
+            or bool(planned.get("allow_micro_quota")),
+            "min_headroom": min_headroom
+            if min_headroom is not None
+            else planned.get("min_headroom"),
+            "speed": planned.get("speed") or speed or "normal",
+            "quality_floor": planned.get("quality_floor"),
+            "exclude_route_ids": list(
+                dict.fromkeys(planned_excludes_routes + list(exclude_route_ids or []))
+            ),
+        }
+
+    vendor = infer_model_vendor(explicit_route)
+    if cli_includes:
+        allowed_vendors = cli_includes
+        scope = "include_vendors"
+    elif vendor and vendor != "unknown":
+        allowed_vendors = [vendor]
+        scope = "same_vendor"
+    else:
+        return None
+
+    return {
+        "scope": scope,
+        "exclude_vendors": cli_excludes,
+        "exclude_agents": cli_exclude_agents,
+        "include_vendors": allowed_vendors,
+        "max_tier": max_tier,
+        "min_context": min_context,
+        "require_modalities": list(require_modalities or []),
+        "require_vision": bool(require_vision),
+        "allow_estimated_capabilities": bool(allow_estimated_capabilities),
+        "allow_micro_quota": bool(allow_micro_quota),
+        "min_headroom": min_headroom,
+        "speed": speed or "normal",
+        "quality_floor": None,
+        "exclude_route_ids": list(exclude_route_ids or []),
+    }
+
+
 def execute_task(
     run_id: str,
     task_id: str,
@@ -2738,31 +2844,57 @@ def execute_task(
                 selection_rationale = f"{explicit_route['route_id']} selected explicitly by caller"
                 route_chain.append(explicit_route)
                 if not no_fallback and not resume_session_id:
-                    sel = select_routes(
-                        task=task_category,
-                        min_context=min_context,
-                        require_modalities=eff_req_mods,
-                        require_vision=require_vision,
-                        speed=speed,
-                        allow_estimated_capabilities=allow_estimated_capabilities,
-                        allow_micro_quota=allow_micro_quota,
-                        min_headroom=min_headroom,
+                    fb_policy = resolve_pinned_fallback_constraints(
+                        explicit_route,
+                        run_id=eff_run_id,
                         exclude_vendors=exclude_vendors,
                         exclude_agents=exclude_agents,
                         include_vendors=include_vendors,
                         max_tier=max_tier,
+                        min_context=min_context,
+                        require_modalities=eff_req_mods,
+                        require_vision=require_vision,
+                        allow_estimated_capabilities=allow_estimated_capabilities,
+                        allow_micro_quota=allow_micro_quota,
+                        min_headroom=min_headroom,
+                        speed=speed,
                         exclude_route_ids=exclude_route_ids,
-                        run_id=eff_run_id,
-                        sandbox_mode=effective_sandbox,
                     )
-                    exp_buckets = set(explicit_route.get("applicable_buckets") or [explicit_route["quota_bucket"]])
-                    for fb in [sel.get("selected")] + (sel.get("fallbacks") or []):
-                        if not fb or fb["route_id"] == explicit_route["route_id"]:
-                            continue
-                        fb_copy = dict(fb)
-                        fb_buckets = set(fb_copy.get("applicable_buckets") or [fb_copy["quota_bucket"]])
-                        fb_copy["same_bucket_as_primary"] = bool(fb_buckets & exp_buckets)
-                        route_chain.append(fb_copy)
+                    if fb_policy is None:
+                        selection_rationale += (
+                            "; fallback chain disabled because the primary vendor is unknown "
+                            "and no --include-vendor/plan constraints were available"
+                        )
+                    else:
+                        fb_scope = fb_policy.pop("scope", "unknown")
+                        if fb_scope == "same_vendor":
+                            selection_rationale += (
+                                f"; fallbacks restricted to vendor '{infer_model_vendor(explicit_route)}' "
+                                "(pass --include-vendor for a wider chain)"
+                            )
+                        elif fb_scope == "planned_constraints":
+                            selection_rationale += (
+                                "; fallbacks inherit the run's persisted selection plan"
+                            )
+                        sel = select_routes(
+                            task=task_category,
+                            run_id=eff_run_id,
+                            sandbox_mode=effective_sandbox,
+                            **fb_policy,
+                        )
+                        exp_buckets = set(
+                            explicit_route.get("applicable_buckets")
+                            or [explicit_route["quota_bucket"]]
+                        )
+                        for fb in [sel.get("selected")] + (sel.get("fallbacks") or []):
+                            if not fb or fb["route_id"] == explicit_route["route_id"]:
+                                continue
+                            fb_copy = dict(fb)
+                            fb_buckets = set(
+                                fb_copy.get("applicable_buckets") or [fb_copy["quota_bucket"]]
+                            )
+                            fb_copy["same_bucket_as_primary"] = bool(fb_buckets & exp_buckets)
+                            route_chain.append(fb_copy)
             else:
                 sel = select_routes(
                     task=task_category,

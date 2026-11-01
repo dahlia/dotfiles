@@ -361,6 +361,14 @@ def collect_opencode_models(
             raw_method = str(p.get("auth_method") or p.get("auth_type") or "configured").strip().lower()
             provider_methods[p["provider"]] = raw_method
 
+    # `opencode models` exposes two catalogs backed by the same OpenCode Console
+    # credential: the metered `opencode` (Zen) catalog and the subscription
+    # `opencode-go` catalog. `opencode auth list` only reports the credential as
+    # `opencode`/`OpenCode Console`, so treating the raw provider ids as the
+    # auth list would drop every `opencode-go/*` route even though it runs.
+    console_providers = {"opencode", "opencode-console"}
+    console_authenticated = any(p in provider_methods for p in console_providers)
+
     routes: list[dict[str, Any]] = []
     for raw_line in strip_ansi(proc.stdout or "").splitlines():
         line = raw_line.strip()
@@ -369,10 +377,18 @@ def collect_opencode_models(
         provider, model_part = line.split("/", 1)
         provider_slug = provider.strip().lower()
         is_free_tagged = "free" in model_part.lower()
-        if provider_slug not in provider_methods and not (provider_slug == "opencode" and is_free_tagged):
-            continue
+        if provider_slug not in provider_methods:
+            if provider_slug == "opencode-go" and console_authenticated:
+                pass
+            elif provider_slug == "opencode" and is_free_tagged:
+                pass
+            else:
+                continue
 
-        auth_method = provider_methods.get(provider_slug, "free" if is_free_tagged else "unknown")
+        auth_method = provider_methods.get(
+            provider_slug,
+            "subscription" if provider_slug == "opencode-go" else ("free" if is_free_tagged else "unknown"),
+        )
         if provider_slug == "opencode":
             auth_plan = "free" if is_free_tagged else ("api_key" if "key" in auth_method else "unknown")
         elif provider_slug in ("opencode-go", "github-copilot") or "oauth" in auth_method:
@@ -398,9 +414,29 @@ def collect_opencode_models(
         )
         routes.append(route)
 
+    # The metered `opencode` (Zen) catalog mirrors many `opencode-go` subscription
+    # models. Keep the working subscription route visible and demote the
+    # unfunded duplicate to explicit --pin-model/--force-route use so automatic
+    # selection cannot burn an attempt on "Insufficient account funds".
+    go_models = {
+        r["canonical_key"]
+        for r in routes
+        if r["provider"] == "opencode-go" and not r.get("hidden")
+    }
+    if go_models:
+        for route in routes:
+            if (
+                route["provider"] == "opencode"
+                and route["canonical_key"] in go_models
+                and not route.get("is_bare_prefix")
+            ):
+                route["hidden"] = True
+                route["hidden_reason"] = "duplicate-opencode-go"
+
     meta = {
         "method": "opencode-models",
         "authenticated_providers": sorted(provider_methods.keys()),
+        "derived_providers": sorted({"opencode-go"}) if console_authenticated and go_models else [],
     }
     return routes, meta
 

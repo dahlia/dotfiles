@@ -209,10 +209,19 @@ genuinely independent checks. `--step-distinct-bucket` additionally spreads step
 buckets when two vendors share one subscription. Per-step `fallbacks` remain
 available for failure of that step's own model, but they do not replace a
 planned step. Plan mode ignores saved session pins; pass `--pin-*` explicitly
-only when a single route is intended.
+only when a single route is intended. With `--run-id <run-id>`, the plan's
+effective per-step constraints are persisted for `run.py` so explicit-route
+fallbacks cannot escape the filters that produced the plan.
 
 `--steps` is a plan, not an execution: pass each step's `selected.route_id` to
-`run.py --route` (usually with `--no-fallback`) for that step's own rounds.
+`run.py --route` for that step's own rounds. When the plan is created with
+`--run-id <run-id>`, `select_route.py` also saves the per-step selection
+constraints to `<run-dir>/selection-plan.json`; `run.py` reuses them so a
+failed step can fall back only inside the same filtered chain (for example, a
+plan that excluded Anthropic and OpenAI can never fall back to Claude or GPT).
+Without a saved plan, an explicit `--route` restricts its fallback chain to the
+primary route's own vendor unless `--include-vendor` names a wider allow-list;
+pass `--no-fallback` when even that is unacceptable.
 
 ### Step 3: Choose native delegation or CLI execution
 
@@ -280,10 +289,12 @@ python3 <skill-dir>/scripts/run.py \
 ~~~~
 
 You can also pass `--route <agent>/<provider>/<model>` to target a specific
-route while still allowing `run.py` to fall back to the next route in the chain
-if the primary route fails with a quota, authentication, or model-availability
-error (pass `--no-fallback` when a user gate requires that exact model or
-nothing).
+route while still allowing `run.py` to fall back if the primary route fails with
+a quota, authentication, or model-availability error. The fallback chain stays
+inside the run's persisted selection plan when one exists; otherwise it is
+limited to the primary route's own vendor unless `--include-vendor` gives a
+wider allow-list. Pass `--no-fallback` when a user gate requires that exact
+model or nothing.
 
 Three flags shape the execution posture:
 
