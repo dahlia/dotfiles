@@ -11,7 +11,8 @@ sending.
     or “the commits in `a1b2c3d..HEAD` on branch `feature/auth`“.
  -  `[GOAL]`, `[IN SCOPE]`, `[NON-GOALS]` — copied verbatim from the scope
     contract written in Step 0.
- -  `[OUTPUT PATHS]` — declared disposable repository output directories, or none.
+ -  `[OUTPUT PATHS]` — declared disposable repository output directories, or
+    none.
  -  `[PREVIOUS FINDINGS]` — for re-reviews, a terse list of the previous round's
     findings, each marked *fixed*, *rejected* (with the reason) or *deferred*.
  -  `[ROLE]` — for step 2, `second step`; for step 3, `independent final read`.

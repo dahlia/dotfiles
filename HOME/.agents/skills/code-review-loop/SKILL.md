@@ -141,15 +141,15 @@ Step 2: Plan the three review steps
 -----------------------------------
 
 Plan once, before any reviewer runs. The plan is three independent routes, not
-a fallback chain:
+a fallback chain: a clean or early-ended step never cancels the steps after it.
 
-| Step | Role | Route constraint | Round cap |
-| ---- | ---- | ---------------- | --------- |
-| 1 | Lightweight fast filter | Any vendor except OpenAI, Anthropic, Google; `--speed fast`; quality floor 0.60 | 2 |
-| 2 | Frontier reviewer | OpenAI, Anthropic or Google; `--max-tier 2` | 3 |
-| 3 | Independent frontier read | OpenAI, Anthropic or Google; different vendor from step 2; `--max-tier 2` | 2 |
+| Step | Role                      | Route constraint                                                                | Round cap |
+| ---- | ------------------------- | ------------------------------------------------------------------------------- | --------- |
+| 1    | Lightweight fast filter   | Any vendor except OpenAI, Anthropic, Google; `--speed fast`; quality floor 0.60 | 3         |
+| 2    | Frontier reviewer         | OpenAI, Anthropic or Google; `--max-tier 2`                                     | 7         |
+| 3    | Independent frontier read | OpenAI, Anthropic or Google; different vendor from step 2; `--max-tier 2`       | 5         |
 
-`--max-tier 2` means "top or second tier" within the vendor. The selector ranks
+`--max-tier 2` means “top or second tier” within the vendor. The selector ranks
 models by task-fit evidence only, so a tight account does not silently demote a
 vendor's flagship to a third model. The default `--step-distinct-vendor` keeps
 steps 2 and 3 on different vendors, which is what makes the second frontier
@@ -243,17 +243,18 @@ session handling, model-substitution detection, and the result contract.
 
 Do **not** pass `run.py --guard` here. `review-guard.py` is the stronger guard:
 it archives protected files, tracks nested repositories and Git metadata, and
-writes a per-attempt report under `$WORK`. Read-only Git inspection (`git
-status`, `git diff`) can refresh the index stat cache; the guard compares staged
-entries semantically, so that refresh is not a mutation. Staging, unstaging or
-changing a staged entry still is.
+writes a per-attempt report under `$WORK`. Read-only Git inspection
+(`git status`, `git diff`) can refresh the index stat cache; the guard compares
+staged entries semantically, so that refresh is not a mutation. Staging,
+unstaging or changing a staged entry still is.
 
 Pick the prompt template from `references/review-prompts.md`:
 
  -  step 1 round 1 → “Fast filter — initial review”
  -  step 1 later round → “Fast filter — re-review”
  -  step 2 round 1 → “Frontier — initial review” with role *second step*
- -  step 3 round 1 → “Frontier — initial review” with role *independent final read*
+ -  step 3 round 1 → “Frontier — initial review” with role *independent final
+    read*
  -  step 2/3 later round → “Frontier — re-review”
 
 Substitute the range and the scope contract. Never paste a diff or file
@@ -343,17 +344,40 @@ Clean sentinel: the trimmed `result_file` is exactly
 
 ### Round caps
 
- -  Step 1: **two rounds** (review plus re-review of fixes).
- -  Step 2: **three rounds**.
- -  Step 3: **two rounds**.
+ -  Step 1: **three rounds** (review plus re-reviews of fixes).
+ -  Step 2: **seven rounds**.
+ -  Step 3: **five rounds**.
 
 A cap limits how many times you ask the reviewer, not whether you fix what it
 found. Apply the last in-scope fixes, verify them yourself, and say in the
 report that they carry no further reviewer pass. More rounds past the cap drift
 into nitpicking.
 
-Step 1 is advisory. If it ends `failed`, `unavailable` or at its cap, go on to
-step 2; never let a cheap pass shorten or replace steps 2 and 3. If step 1
+### Stop early
+
+A cap is a ceiling, not a target. End a step on the first round that has
+nothing new to act on, without spending the remaining rounds:
+
+ -  the round is usable (above) — a blocked, failed, timed-out or `unknown`
+    round never justifies a stop;
+ -  `result_file` is exactly the clean sentinel, **or** every finding is
+    non-actionable under triage — already dispositioned in an earlier round, or
+    rejected now as style, speculation, or wrong about the code. A re-review
+    repeating a known finding is not a new finding;
+ -  the round added no fixes.
+
+A clean round after the last batch of fixes is what closes a step; a clean
+round with nothing to verify closes it immediately. Do not stop on silence, an
+empty `result_file`, or findings you have not triaged.
+
+Early exit is scoped to the step that earned it. It ends that step's rounds;
+it never skips a later step. A step 2 that closes clean on round three still
+gets step 3's independent frontier read, and step 3 runs whether step 2 ended
+clean, at its cap, or with findings applied. Only an unfilled route or a hard
+failure (above) removes a step — a clean earlier pass never does.
+
+Step 1 is advisory. If it ends clean, `failed`, `unavailable` or at its cap, go
+on to step 2; never let a cheap pass shorten or replace steps 2 and 3. If step 1
 returns in-scope findings, verify and apply them before step 2 so the frontier
 reviewers read the improved code.
 
@@ -361,9 +385,9 @@ reviewers read the improved code.
 
 For each round: triage every finding (below), apply the in-scope fixes, then —
 **in post-commit mode, commit the batch before resuming** (Step 4 rules).
-Resuming without committing means the reviewer re-reviews a range that still
-ends at the pre-fix commit; it would grade code you already changed and report
-a stale verdict as fresh.
+Unless the round ended the step under *Stop early*, resuming without committing
+means the reviewer re-reviews a range that still ends at the pre-fix commit; it
+would grade code you already changed and report a stale verdict as fresh.
 
 Then write the re-review prompt, naming the previous findings and their
 dispositions, and invoke with `--resume-task step${STEP}-r1`. Do not resume on
@@ -512,8 +536,11 @@ Key rules
     itself; give it the range and the contract.
  -  **Verify before applying.** A finding is a hypothesis about the code, and
     plausible-sounding ones are wrong often enough to matter.
- -  **Round caps are real.** Two, three, two. Past that, report instead of
-    looping — the marginal finding stops being worth the marginal risk.
+ -  **Round caps are real, and so is stopping early.** Three, seven, five, but
+    end a step on the first usable round with no new actionable findings — and
+    only that step. A clean earlier pass never skips a later step. Past the cap,
+    report instead of looping — the marginal finding stops being worth the
+    marginal risk.
  -  **Keep every generated file in `$WORK`.** Prompts and JSON output written
     into the repository dirty a clean tree and can be swept into the commit.
  -  **Guard every attempt.** A fresh `review-guard.py` prefix per round and
