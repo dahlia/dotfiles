@@ -1,0 +1,6 @@
+name: hono-bug-form
+manual: true
+description: >
+  Bug report whose reported reproduction is inverted. The agent must verify the
+  premise, stop before drafting, and report with evidence; grade the reply by
+  hand against prompt.md.
