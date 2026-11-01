@@ -736,6 +736,132 @@ class TestCrossSubagents(unittest.TestCase):
         self.assertIn("Bash", shell[shell.index("--tools") + 1].split(","))
         self.assertIn("Bash(*)", shell[shell.index("--allowedTools") + 1].split(","))
 
+    def test_claude_recipe_recovers_flags_hidden_by_truncated_help(self):
+        import probe
+
+        truncated_help = "--allowedTools, --allowed-tools <tools...>\n  --disallowedTools <tools...>"
+
+        def fake_run(cmd, **kwargs):
+            if cmd[1:] == ["--help"]:
+                return argparse.Namespace(returncode=0, stdout=truncated_help, stderr="")
+            return argparse.Namespace(
+                returncode=1,
+                stdout="error: unknown option '--cross-subagents-probe-unknown-option'\n",
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as td, patch.object(
+            probe, "run_cmd", side_effect=fake_run
+        ), patch.object(probe, "get_cache_dir", return_value=Path(td)):
+            flags = probe.cache_cli_help_and_recipe("claude-code", "/tmp/claude", "2.1.312")
+
+        # `--help` was truncated before `--tools`; the parser still accepts it.
+        self.assertTrue(flags["has_tools"])
+        self.assertTrue(flags["has_permission_mode"])
+        self.assertTrue(flags["has_safe_mode"])
+
+    def test_claude_recipe_keeps_flags_the_parser_rejects(self):
+        import probe
+
+        def fake_run(cmd, **kwargs):
+            if cmd[1:] == ["--help"]:
+                return argparse.Namespace(returncode=0, stdout="--allowedTools <tools...>", stderr="")
+            return argparse.Namespace(
+                returncode=1, stdout="", stderr="error: unknown option '--tools'\n"
+            )
+
+        with tempfile.TemporaryDirectory() as td, patch.object(
+            probe, "run_cmd", side_effect=fake_run
+        ), patch.object(probe, "get_cache_dir", return_value=Path(td)):
+            flags = probe.cache_cli_help_and_recipe("claude-code", "/tmp/claude", "2.1.312")
+
+        self.assertFalse(flags["has_tools"])
+
+    def test_claude_read_only_rescues_stale_recipe_flags(self):
+        from run import invoke_claude_code
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        captured: list[str] = []
+        payload = {
+            "session_id": "claude-session",
+            "is_error": False,
+            "subtype": "success",
+            "result": "CLAUDE ANSWER",
+            "usage": {"input_tokens": 2, "output_tokens": 3},
+            "modelUsage": {"claude-opus-5-5": {}},
+        }
+
+        def mock_run(cmd, *args, **kwargs):
+            captured.extend(cmd)
+            return 0, json.dumps(payload), "", False, True
+
+        stale_flags = {
+            key: False
+            for key in (
+                "has_tools",
+                "has_disallowed_tools",
+                "has_permission_mode",
+                "has_permission_prompts",
+                "has_safe_mode",
+                "has_strict_mcp_config",
+            )
+        }
+        with patch.object(run, "parser_accepts_flag", return_value=True), patch.object(
+            run, "run_process_with_timeout", side_effect=mock_run
+        ):
+            res = invoke_claude_code(
+                binary="claude",
+                route={
+                    "route_id": "claude-code/anthropic/claude-opus-5-5",
+                    "model_id": "claude-opus-5-5",
+                    "canonical_key": "claude-opus-5-5",
+                    "provider": "anthropic",
+                },
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="read-only",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+                recipe_flags=stale_flags,
+            )
+        self.assertNotEqual(res.get("error_class"), "permission")
+        self.assertIn("--tools", captured)
+        self.assertEqual(captured[captured.index("--tools") + 1], "Read,Grep,Glob")
+        self.assertIn("--disallowedTools", captured)
+
+    def test_claude_read_only_refusal_names_the_missing_flag(self):
+        from run import invoke_claude_code
+
+        with patch.object(run, "parser_accepts_flag", return_value=False), patch.object(
+            run, "run_process_with_timeout", side_effect=AssertionError("must not invoke")
+        ):
+            res = invoke_claude_code(
+                binary="claude",
+                route={
+                    "route_id": "claude-code/anthropic/claude-opus-5-5",
+                    "model_id": "claude-opus-5-5",
+                    "canonical_key": "claude-opus-5-5",
+                },
+                prompt_text="dummy",
+                attempt_dir=Path(tempfile.mkdtemp()),
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="read-only",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+                recipe_flags={"has_tools": False, "has_disallowed_tools": True},
+            )
+        self.assertEqual(res["status"], "failed")
+        self.assertEqual(res["error_class"], "permission")
+        self.assertIn("--tools", res["error"])
+        self.assertNotIn("--disallowedTools", res["error"])
+
     def test_opencode_read_only_config_postures(self):
         cfg, verified = opencode_read_only_config({}, major_ver=2, no_tools=True)
         self.assertTrue(verified)

@@ -127,10 +127,16 @@ Self-healing and host recursion stats
 -------------------------------------
 
 When a flag fails with an unknown option error, inspect `claude --help` to
-identify updated flag names. When Claude Code runs as the host agent and spawns
-native subagents, check
-`subagent_stats.refused.{depth_limit,concurrency_limit,budget}` in JSON outputs
-so host-level refusals are not double-counted in `$SKILL_CACHE_DIR/registry/`.
+identify updated flag names. Treat that help text as a hint, not as the
+capability list: Claude Code omits some supported options from `--help` (2.1.312
+lists no `--tools`) and truncates the output when stdout is a pipe, so a
+read-only posture can look unsupported while the flag works. `scripts/probe.py`
+confirms every flag the help does not show by running the CLI with that flag
+plus an unknown sentinel option, which makes the parser fail before any auth or
+model call. When Claude Code runs as the host agent and spawns native subagents,
+check `subagent_stats.refused.{depth_limit,concurrency_limit,budget}` in JSON
+outputs so host-level refusals are not double-counted in
+`$SKILL_CACHE_DIR/registry/`.
 
 
 Execution postures used by `scripts/run.py`
@@ -138,7 +144,10 @@ Execution postures used by `scripts/run.py`
 
 Read-only execution passes `--permission-mode dontAsk`, `--permission-prompts
 none`, `--tools`, and `--disallowedTools`. Three additional postures layer on
-top:
+top. `run.py` re-checks every flag the cached recipe marked unsupported against
+the CLI's argument parser before refusing a posture, so a recipe built from
+truncated `--help` output cannot block a supported read-only run. The postures
+are:
 
  -  `--no-tools`: `--tools ""` plus `--safe-mode` and `--strict-mcp-config`.
     No tool may run; this is the posture for prose review. `--tools ""` is

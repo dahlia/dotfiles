@@ -65,7 +65,15 @@ from common import (
 )
 from guard import snapshot as guard_snapshot, verify as guard_verify
 from models import collect_all_models, repair_codex_models, resolve_official_model_id
-from probe import cache_cli_help_and_recipe, get_agent_recipe, parse_semver, probe_all, strip_ansi
+from probe import (
+    CLAUDE_PARSER_FLAG_CHECKS,
+    cache_cli_help_and_recipe,
+    get_agent_recipe,
+    parse_semver,
+    parser_accepts_flag,
+    probe_all,
+    strip_ansi,
+)
 from quota import collect_quota, record_quota_observation
 from registry import acquire_lease, heartbeat_lease, is_pid_alive, release_lease
 from select_route import (
@@ -921,6 +929,21 @@ def claude_read_only_tool_args(
     return args
 
 
+def resolve_claude_recipe_flags(binary: str, flags: dict[str, Any]) -> dict[str, Any]:
+    """Re-check flags the cached recipe marked unsupported against the CLI parser.
+
+    Cached recipes are built from `--help`, which Claude Code truncates when
+    stdout is a pipe (hiding `--tools`, `--permission-mode`, and friends) and
+    which omits some supported options entirely. Asking the parser directly
+    keeps a stale cache from disabling a posture the installed CLI supports.
+    """
+    resolved = dict(flags)
+    for key, cli_flag, sample in CLAUDE_PARSER_FLAG_CHECKS:
+        if resolved.get(key) is False and parser_accepts_flag(binary, cli_flag, sample):
+            resolved[key] = True
+    return resolved
+
+
 def invoke_claude_code(
     binary: str,
     route: dict[str, Any],
@@ -946,6 +969,7 @@ def invoke_claude_code(
     stderr_file = attempt_dir / "stderr.log"
 
     flags = recipe_flags if recipe_flags is not None else get_agent_recipe("claude-code")
+    flags = resolve_claude_recipe_flags(binary, flags)
     # Pass the exact resolved model_id rather than a moving alias so model pinning is deterministic
     resolved_model = route.get("resolved_model_id") or route["model_id"]
     requested_model = route.get("requested_model") or resolved_model
@@ -961,7 +985,12 @@ def invoke_claude_code(
         cmd.append("--no-session-persistence")
 
     if sandbox_mode == "read-only":
-        if not (flags.get("has_tools", True) and flags.get("has_disallowed_tools", True)):
+        missing: list[str] = []
+        if not flags.get("has_tools", True):
+            missing.append("--tools")
+        if not flags.get("has_disallowed_tools", True):
+            missing.append("--disallowedTools")
+        if missing:
             return {
                 "status": "failed",
                 "exit_code": 2,
@@ -973,7 +1002,11 @@ def invoke_claude_code(
                 "session_cleaned_up": True,
                 "cleanup_verified": True,
                 "error_class": "permission",
-                "error": "Installed Claude Code CLI does not support --tools/--disallowedTools required for read-only enforcement.",
+                "error": (
+                    f"Installed Claude Code CLI rejects {' and '.join(missing)} "
+                    "required for read-only enforcement (the CLI parser refused the flag); "
+                    "use --sandbox workspace-write or upgrade Claude Code."
+                ),
             }
         cmd.extend(
             claude_read_only_tool_args(

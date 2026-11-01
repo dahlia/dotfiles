@@ -67,6 +67,49 @@ def extract_version_string(raw: str) -> str | None:
     return m.group(1) if m else (raw.strip().splitlines()[0] if raw.strip() else None)
 
 
+PARSER_PROBE_SENTINEL = "--cross-subagents-probe-unknown-option"
+
+# Claude Code flags that `--help` cannot be trusted to advertise. 2.1.312 hides
+# `--tools` and truncates the help text when stdout is a pipe, which can cut the
+# list off before `--permission-mode`, `--safe-mode`, or `--effort`. Each entry
+# is `(recipe key, CLI flag, sample value)`; the sample value is what the parser
+# needs to consume, and "" means the flag takes no value.
+CLAUDE_PARSER_FLAG_CHECKS: tuple[tuple[str, str, str], ...] = (
+    ("has_tools", "--tools", ""),
+    ("has_disallowed_tools", "--disallowedTools", "Edit"),
+    ("has_allowed_tools", "--allowedTools", "Read"),
+    ("has_permission_mode", "--permission-mode", "dontAsk"),
+    ("has_permission_prompts", "--permission-prompts", "none"),
+    ("has_safe_mode", "--safe-mode", ""),
+    ("has_strict_mcp_config", "--strict-mcp-config", ""),
+    ("has_no_session_persistence", "--no-session-persistence", ""),
+    ("has_effort", "--effort", "high"),
+    ("has_dangerously_skip_permissions", "--dangerously-skip-permissions", ""),
+)
+
+
+def parser_accepts_flag(binary: str, flag: str, value: str = "") -> bool | None:
+    """Ask a CLI's argument parser whether it knows `flag`.
+
+    `--help` is not authoritative: Claude Code omits supported options from it
+    (2.1.312 lists no `--tools`) and truncates the help text when stdout is not
+    a terminal. Appending a sentinel option makes the parser fail at argument
+    parsing, before authentication or any model call, and the error names
+    whichever option it rejected first. Returns `None` when inconclusive.
+    """
+    cmd = [binary, "-p", flag, value, PARSER_PROBE_SENTINEL, ""]
+    try:
+        proc = run_cmd(cmd, timeout=10, stdin_text="")
+    except Exception:
+        return None
+    text = strip_ansi(f"{proc.stdout or ''}\n{proc.stderr or ''}")
+    if PARSER_PROBE_SENTINEL in text:
+        return True
+    if "unknown option" in text.lower():
+        return False
+    return None
+
+
 def cache_cli_help_and_recipe(agent: str, binary: str, version: str | None) -> dict[str, Any]:
     """Capture `<agent> --help` (only when exit code is 0) and build versioned executable recipe flags."""
     help_dir = get_cache_dir() / "cli-help"
@@ -156,6 +199,17 @@ def cache_cli_help_and_recipe(agent: str, binary: str, version: str | None) -> d
         }
     else:
         flags = {}
+
+    if agent == "claude-code" and all_help:
+        # Help text is truncated when stdout is a pipe, so a flag that is
+        # missing there may still exist; confirm with the parser instead of
+        # recording a false "unsupported" that blocks read-only runs.
+        for key, cli_flag, sample in CLAUDE_PARSER_FLAG_CHECKS:
+            if flags.get(key) is not False:
+                continue
+            verdict = parser_accepts_flag(binary, cli_flag, sample)
+            if verdict is not None:
+                flags[key] = verdict
 
     recipe_entry = {
         "agent": agent,
