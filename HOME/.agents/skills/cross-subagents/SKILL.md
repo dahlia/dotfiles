@@ -162,6 +162,14 @@ Useful selection flags:
  -  `--speed <normal|fast|urgent>` (or `--prefer-fast` for `fast`) weights token
     generation throughput (`tokens_per_sec`) and latency tier into route
     selection when the user wants a rapid turnaround.
+ -  Recency is scored automatically: a route's release date (from a survey's
+    `released_at`, the local OpenCode model registry, or family priors) turns
+    into a small bonus for recent models and a small penalty for stale ones.
+    Six months is the neutral point, so a model released half a year ago
+    neither gains nor loses; unknown release dates stay neutral. No flag is
+    needed. Recency should break close calls in favor of the newer model, not
+    override a clearly stronger one, so mention the release age in the
+    rationale when it decided the outcome.
  -  `--min-headroom <float>` (default `0.15` for heavy tasks) and
     `--allow-micro-quota` prevent dispatching heavy subagent tasks to low-tier
     or free plans that lack the absolute token headroom to survive the run, even
@@ -178,12 +186,12 @@ Useful selection flags:
     instead of wasting an attempt; pass the same value to `run.py`.
 
 Always print the one-line selection rationale so the user can see which route
-was chosen and why (task fit, vision/speed traits when requested, vendor tier,
-limiting quota bucket usage, and time until reset). For the scoring formula,
-quality floor rules, vision and token-speed weighting, reset-imminence
-trade-offs, reset credit redemption policy, and canonical model survey workflow
-(`models.py survey-missing` and `survey-put`), read the
-[model selection reference](references/model-selection.md).
+was chosen and why (task fit, release age when it decided the result,
+vision/speed traits when requested, vendor tier, limiting quota bucket usage,
+and time until reset). For the scoring formula, quality floor rules, recency and
+token-speed weighting, reset-imminence trade-offs, reset credit redemption
+policy, and canonical model survey workflow (`models.py survey-missing` and
+`survey-put`), read the [model selection reference](references/model-selection.md).
 
 #### Multi-step plans
 

@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+from datetime import date
 from pathlib import Path
 import re
 import sys
@@ -743,6 +745,169 @@ def rebuild_survey_index(all_models: dict[str, Any] | None = None) -> dict[str, 
     return index_payload
 
 
+MODEL_REGISTRY_ENV = "CROSS_SUBAGENTS_MODEL_REGISTRY"
+
+_RELEASE_REGISTRY_CACHE: dict[str, Any] = {"key": None, "value": None}
+
+
+def _model_registry_paths() -> list[Path]:
+    """Candidate local model-registry files published by OpenCode (a models.dev snapshot).
+
+    The registry records `release_date` (and `last_updated`) per provider/model,
+    which is the only locally available, non-fabricated recency signal. The
+    `CROSS_SUBAGENTS_MODEL_REGISTRY` override exists for tests and for installs
+    that keep the registry elsewhere.
+    """
+    override = os.environ.get(MODEL_REGISTRY_ENV)
+    if override:
+        return [Path(override).expanduser()]
+    roots: list[Path] = []
+    xdg_cache = os.environ.get("XDG_CACHE_HOME")
+    if xdg_cache:
+        roots.append(Path(xdg_cache).expanduser())
+    roots.append(Path.home() / ".cache")
+    if sys.platform == "darwin":
+        roots.append(Path.home() / "Library" / "Caches")
+    if os.name == "nt" or sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            roots.append(Path(local_app_data))
+    return [root / "opencode" / "models.json" for root in roots]
+
+
+def _normalize_release_date(value: Any) -> str | None:
+    """Normalize a registry date (`2026-10-17` or an ISO timestamp) to `YYYY-MM-DD`."""
+    if not isinstance(value, str):
+        return None
+    m = re.match(r"^\s*(\d{4})-(\d{2})-(\d{2})", value)
+    if not m:
+        return None
+    year, month, day = (int(part) for part in m.groups())
+    try:
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return None
+
+
+def load_model_release_registry() -> dict[str, Any]:
+    """Load local model release dates, indexed by provider/model and by bare model id.
+
+    Returns an empty index (never raises) when no registry is installed, so
+    recency scoring degrades to a neutral signal instead of failing selection.
+    """
+    empty = {"by_provider_model": {}, "by_model": {}, "source": None, "count": 0}
+    path = next((p for p in _model_registry_paths() if p.is_file()), None)
+    if path is None:
+        return empty
+    try:
+        stat = path.stat()
+        cache_key = (str(path), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return empty
+    if stat.st_size > 64 * 1024 * 1024:
+        # Another tool's cache file of unknown provenance: refuse to parse
+        # something this large rather than block selection.
+        return empty
+    if _RELEASE_REGISTRY_CACHE.get("key") == cache_key and _RELEASE_REGISTRY_CACHE.get("value"):
+        return _RELEASE_REGISTRY_CACHE["value"]
+
+    # The registry is another tool's file and carries no `schema_version`, so
+    # it cannot go through `read_json_file` (which enforces our schema).
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return empty
+    if not isinstance(data, dict):
+        return empty
+
+    by_provider_model: dict[str, str] = {}
+    by_model_dates: dict[str, list[str]] = {}
+    for provider, provider_data in data.items():
+        if not isinstance(provider_data, dict):
+            continue
+        provider_models = provider_data.get("models")
+        if not isinstance(provider_models, dict):
+            continue
+        for model_id, model_data in provider_models.items():
+            if not isinstance(model_data, dict):
+                continue
+            released = _normalize_release_date(model_data.get("release_date"))
+            if released is None:
+                continue
+            provider_l = str(provider).strip().lower()
+            model_l = str(model_id).strip().lower()
+            by_provider_model[f"{provider_l}/{model_l}"] = released
+            by_model_dates.setdefault(model_l, []).append(released)
+
+    by_model: dict[str, str] = {}
+    for model_l, dates in by_model_dates.items():
+        # Providers occasionally publish different dates for the same model id.
+        # Take the most common one (ties go to the newest) so a single outlier
+        # cannot make a model look much older or newer than it is.
+        counts: dict[str, int] = {}
+        for value in dates:
+            counts[value] = counts.get(value, 0) + 1
+        by_model[model_l] = max(counts, key=lambda value: (counts[value], value))
+
+    value = {
+        "by_provider_model": by_provider_model,
+        "by_model": by_model,
+        "source": str(path),
+        "count": len(by_provider_model),
+    }
+    _RELEASE_REGISTRY_CACHE["key"] = cache_key
+    _RELEASE_REGISTRY_CACHE["value"] = value
+    return value
+
+
+_VARIANT_SUFFIXES = ("minimal", "medium", "high", "highspeed", "thinking", "fast", "low", "max")
+
+
+def lookup_model_release_date(
+    *,
+    provider: str | None,
+    model_id: str | None,
+    canonical_key: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve a model's release date from the local registry.
+
+    The date is a property of the model, not of the provider serving it, so the
+    canonical/bare model id is preferred (the registry agrees across providers
+    for the same model, and a provider-specific outlier — usually an update
+    timestamp filed as a release — must not make the same model look newer on
+    one route than another). Agents such as Antigravity append an effort suffix
+    to the model id, so those suffixes are stripped before the lookup; an exact
+    `(provider, model)` pair is the last resort. Returns `(iso_date, source)`
+    or `(None, None)`.
+    """
+    registry = load_model_release_registry()
+    by_provider_model = registry.get("by_provider_model") or {}
+    by_model = registry.get("by_model") or {}
+    if not by_provider_model and not by_model:
+        return None, None
+
+    provider_l = (provider or "").strip().lower()
+    tokens = [t.strip().lower() for t in (model_id, canonical_key) if isinstance(t, str) and t.strip()]
+
+    for token in tokens:
+        if token in by_model:
+            return by_model[token], "registry"
+    for token in tokens:
+        stripped = token
+        for suffix in _VARIANT_SUFFIXES:
+            if stripped.endswith(f"-{suffix}"):
+                stripped = stripped[: -(len(suffix) + 1)]
+                break
+        if stripped != token and stripped in by_model:
+            return by_model[stripped], "registry"
+    if provider_l:
+        for token in tokens:
+            exact = by_provider_model.get(f"{provider_l}/{token}")
+            if exact:
+                return exact, "registry"
+    return None, None
+
+
 def extract_version_tuple(canonical_key: str) -> tuple[int, ...]:
     """Extract numeric version components from a canonical model key (e.g. 'claude-opus-5-5' -> (5, 5))."""
     m = re.search(r"(\d+)(?:[.-](\d+))?", canonical_key)
@@ -914,6 +1079,13 @@ def validate_survey_payload(payload: dict[str, Any]) -> None:
         raise ValueError(
             f"Surveys with confidence='{conf}' require at least 2 valid http(s):// sources (found {valid_url_count})."
         )
+
+    released_at = payload.get("released_at")
+    if released_at is not None:
+        if not isinstance(released_at, str) or _normalize_release_date(released_at) is None:
+            raise ValueError(
+                f"Invalid released_at '{released_at}'. Must be an ISO date (YYYY-MM-DD) or null."
+            )
 
     _validate_capability_and_price_fields(payload, prefix="")
 

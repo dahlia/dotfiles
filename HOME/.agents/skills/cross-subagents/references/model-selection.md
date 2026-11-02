@@ -68,6 +68,7 @@ Illustrative schema example for `<family>/<canonical_key>.json`:
   "canonical_key": "claude-opus-5-5",
   "family": "claude-opus",
   "surveyed_at": "2026-10-28T12:00:00Z",
+  "released_at": "2026-09-22",
   "confidence": "high",
   "sources": [
     {"url": "https://docs.anthropic.com/...", "published": "2026-10-20", "kind": "official"},
@@ -114,6 +115,9 @@ Model capability surveys describe the model (`task_fit`, `context_window`,
 pricing in `cost`). Record `tokens_per_sec` as the median output throughput
 from independent measurements; providers may serve the same model at different
 speeds, so put provider-specific throughput under `provider_overrides`.
+Record `released_at` as the model's public release date (ISO `YYYY-MM-DD`) when
+release notes state it; it feeds recency scoring and overrides the local registry.
+
 Whether a given route is covered by a flat subscription or billed per API token
 depends on the route's own `(agent, provider, auth_plan)` tuple, which
 `select_route.py` evaluates per route at selection time.
@@ -158,6 +162,43 @@ qualify, so an urgent request still gets a model fit for the task. Throughput
 comes from the survey when available and otherwise from the family prior or a
 latency-tier default; `tps_estimated: true` in the candidate output marks the
 estimated case.
+
+
+Model recency
+-------------
+
+Within one model family the newer release is usually the better one, so a
+route's release date contributes a small, bounded term to the soft score:
+
+~~~~ text
+age <= 30 days        recency = +1.0
+age == 180 days       recency =  0.0   (six months: neither fresh nor stale)
+age >= 540 days       recency = -1.0
+~~~~
+
+Between those anchors the value interpolates linearly. With the `0.05` weight
+the whole range spans `0.10`, comparable to the cost and headroom terms: enough
+to break a close call in favor of the fresher model, not enough to promote a
+newer mid-tier model over a clearly stronger one. Release dates are resolved in
+this order:
+
+1. `released_at` in the model's survey, when the survey records an ISO date
+   (add the field to the survey JSON; it is evidence and overrides the rest).
+2. The local model registry that OpenCode maintains at
+   `$XDG_CACHE_HOME/opencode/models.json` (a models.dev snapshot with
+   `release_date` per provider and model). It covers every provider in that
+   snapshot, not just OpenCode routes. The date is resolved per model rather
+   than per provider, so the same model scores the same no matter which CLI or
+   provider serves it. Set `CROSS_SUBAGENTS_MODEL_REGISTRY=/path/to/models.json`
+   when the snapshot lives elsewhere.
+3. `released_at` on the matching family prior, if one is ever added there.
+
+When none of these knows the date, `recency` is `0.0`, so routes without release
+metadata rank exactly as before. Each candidate reports `release_date`,
+`model_age_days`, `recency_score`, and `recency_source`, and the one-line
+rationale includes the release age, so a freshness-driven pick is auditable
+rather than silent. Recency never bypasses the hard filters, the per-task
+quality floor, or `--max-tier`, which stays task-fit-only by design.
 
 
 Hierarchical cache TTLs
@@ -211,17 +252,19 @@ Five-step route selection
           + 0.14 * reset_imminence
           - 0.08 * cost_index
           + speed_weight * speed_score
+          + 0.05 * recency
     ~~~~
 
     Here `scarcity` is the maximum scarcity across all quota buckets that apply
     to the route, reflecting both `used_percent` and burn pace relative to the
     elapsed fraction of the quota window, scaled by the subscription plan's
     estimated capacity factor. `speed_weight` depends on `--speed` (see
-    [Token generation speed](#token-generation-speed)).
+    [Token generation speed](#token-generation-speed)). `recency` is explained
+    in [Model recency](#model-recency).
 
 4.  When scores are within `0.01`, prefer the route with greater effective quota
-    headroom, then lower latency tier, then higher `tokens_per_sec`, then lower
-    cost.
+    headroom, then lower latency tier, then a fresher model, then higher
+    `tokens_per_sec`, then lower cost.
 
 5.  Return the primary route alongside 2–3 fallback routes. The selector first
     picks routes with both a distinct quota bucket and a distinct canonical

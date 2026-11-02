@@ -1005,7 +1005,11 @@ class TestCrossSubagents(unittest.TestCase):
 
     def test_step_plan_never_repeats_a_canonical_model(self):
         catalog, quota_state = self._fake_selection_inputs()
+        # Recency is covered by its own tests; neutralize the local registry so
+        # this test only checks plan mechanics.
         with patch.object(select_route, "get_survey", return_value=None), patch.object(
+            select_route, "lookup_model_release_date", return_value=(None, None)
+        ), patch.object(
             select_route, "collect_all_models", return_value=catalog
         ), patch.object(select_route, "collect_quota", return_value=quota_state):
             plan = select_step_plan(
@@ -1036,6 +1040,164 @@ class TestCrossSubagents(unittest.TestCase):
     def test_zero_steps_is_rejected(self):
         self.assertEqual(select_route.main(["--steps", "0"]), 2)
 
+    def test_recency_score_anchors(self):
+        self.assertEqual(select_route.compute_recency_score(None), 0.0)
+        self.assertEqual(select_route.compute_recency_score(0), 1.0)
+        self.assertEqual(select_route.compute_recency_score(30), 1.0)
+        self.assertEqual(select_route.compute_recency_score(180), 0.0)
+        self.assertEqual(select_route.compute_recency_score(540), -1.0)
+        self.assertEqual(select_route.compute_recency_score(900), -1.0)
+        # Monotonic decay between the anchors.
+        scores = [select_route.compute_recency_score(d) for d in (30, 90, 180, 300, 540)]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+        self.assertGreater(select_route.compute_recency_score(105), 0.0)
+        self.assertLess(select_route.compute_recency_score(200), 0.0)
+
+    def test_model_age_days_from_iso_date(self):
+        from datetime import date
+
+        self.assertEqual(
+            select_route.model_age_days("2026-10-04", today=date(2026, 11, 3)), 30
+        )
+        self.assertIsNone(select_route.model_age_days(None))
+        self.assertIsNone(select_route.model_age_days("not-a-date"))
+
+    def test_release_registry_lookup_by_model_and_variant_suffix(self):
+        with tempfile.TemporaryDirectory() as td:
+            registry = Path(td) / "models.json"
+            registry.write_text(
+                json.dumps(
+                    {
+                        "github-copilot": {
+                            "models": {
+                                "kimi-k3": {"release_date": "2026-07-16"},
+                                "kimi-k3.1-pro": {"release_date": "2026-10-23T00:00:00Z"},
+                            }
+                        },
+                        "moonshotai": {
+                            "models": {
+                                "kimi-k3": {"release_date": "2026-07-16"},
+                                "kimi-k3.1-pro": {"release_date": "2026-10-23"},
+                            }
+                        },
+                        "google": {"models": {"gemini-4-argon": {"release_date": "2026-10-13"}}},
+                        "deepseek": {"models": {"deepseek-flash": {"release_date": "2026-10-17"}}},
+                        "acme": {"models": {"deepseek-flash": {"release_date": "2026-09-10"}}},
+                        "contoso": {"models": {"deepseek-flash": {"release_date": "2026-09-10"}}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"CROSS_SUBAGENTS_MODEL_REGISTRY": str(registry)}):
+                self.assertEqual(
+                    models.lookup_model_release_date(
+                        provider="github-copilot", model_id="kimi-k3", canonical_key="kimi-k3"
+                    ),
+                    ("2026-07-16", "registry"),
+                )
+                # Effort-suffixed ids resolve through their canonical key.
+                self.assertEqual(
+                    models.lookup_model_release_date(
+                        provider="google",
+                        model_id="gemini-4-argon-high",
+                        canonical_key="gemini-4-argon",
+                    ),
+                    ("2026-10-13", "registry"),
+                )
+                # Unknown providers fall back to the bare model id.
+                self.assertEqual(
+                    models.lookup_model_release_date(
+                        provider="unknown-provider", model_id="kimi-k3.1-pro"
+                    ),
+                    ("2026-10-23", "registry"),
+                )
+                # The release date is model-level: a provider-specific outlier
+                # does not make the same model look newer on one route.
+                self.assertEqual(
+                    models.lookup_model_release_date(
+                        provider="deepseek", model_id="deepseek-flash", canonical_key="deepseek-flash"
+                    ),
+                    ("2026-09-10", "registry"),
+                )
+                self.assertEqual(
+                    models.lookup_model_release_date(provider="google", model_id="no-such-model"),
+                    (None, None),
+                )
+
+    def test_missing_release_registry_is_neutral(self):
+        with tempfile.TemporaryDirectory() as td, patch.dict(
+            os.environ, {"CROSS_SUBAGENTS_MODEL_REGISTRY": str(Path(td) / "absent.json")}
+        ):
+            self.assertEqual(
+                models.lookup_model_release_date(provider="openai", model_id="gpt-6.1-sol"),
+                (None, None),
+            )
+            traits = evaluate_route_traits(
+                self._fake_route("codex", "openai", "gpt-6.1-sol", "gpt-6.1-sol", "codex:codex"),
+                task="code_review",
+            )
+            self.assertEqual(traits["recency_score"], 0.0)
+            self.assertIsNone(traits["release_date"])
+
+    def test_newer_model_wins_a_close_selection(self):
+        catalog = {
+            "opencode": {
+                "usable": True,
+                "routes": [
+                    self._fake_route(
+                        "opencode", "deepseek", "deepseek-flash", "deepseek-flash", "opencode:deepseek"
+                    ),
+                    self._fake_route("opencode", "opencode-go", "glm-5.3", "glm-5.3", "opencode:opencode-go"),
+                ],
+            },
+        }
+        quota_state = {
+            "buckets": {
+                bucket: {
+                    "bucket_id": bucket,
+                    "status": "ample",
+                    "used_percent": 10.0,
+                    "scarcity": 0.0,
+                    "effective_headroom": 0.9,
+                    "is_micro_capacity": False,
+                    "exhausted": False,
+                }
+                for bucket in ("opencode:deepseek", "opencode:opencode-go")
+            },
+            "agents": {"opencode": {"stale": False}},
+        }
+        surveys = {
+            "deepseek-flash": {
+                "confidence": "low",
+                "task_fit": {"code_review": 0.80},
+                "released_at": "2024-01-01",  # ~2.8 years old: stale
+            },
+            "glm-5.3": {
+                "confidence": "low",
+                "task_fit": {"code_review": 0.80},
+                "released_at": "2026-11-01",  # two days old
+            },
+        }
+        with patch.object(select_route, "get_survey", side_effect=lambda key: surveys.get(key)):
+            res = select_routes(
+                task="code_review",
+                all_models=catalog,
+                quota_state=quota_state,
+                use_saved_pins=False,
+            )
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["selected"]["canonical_key"], "glm-5.3")
+        self.assertGreater(res["selected"]["recency_score"], 0.9)
+
+    def test_survey_rejects_invalid_released_at(self):
+        with self.assertRaises(ValueError):
+            models.validate_survey_payload(
+                {"confidence": "low", "released_at": "last tuesday", "sources": []}
+            )
+        models.validate_survey_payload(
+            {"confidence": "low", "released_at": "2026-09-22", "sources": []}
+        )
+
     def test_provider_model_not_supported_is_model_unavailable(self):
         self.assertEqual(
             run.classify_failure(
@@ -1049,6 +1211,125 @@ class TestCrossSubagents(unittest.TestCase):
             run.classify_failure(1, '{"code":"model_not_supported"}', ""),
             "model_unavailable",
         )
+
+    def test_provider_no_route_is_model_unavailable(self):
+        # Regression: OpenCode emits this payload when its provider cannot
+        # route a model. It used to classify as `failed`, which is not a
+        # fallback-triggering class, so a pinned route that lost its model
+        # returned after one attempt instead of walking the planned chain.
+        self.assertEqual(
+            run.classify_failure(
+                1,
+                '{"type": "provider.no-route", "message": "Model unavailable: github-copilot/kimi-k3"}',
+                "",
+            ),
+            "model_unavailable",
+        )
+        self.assertEqual(
+            run.classify_failure(1, '{"type":"provider.no-route","message":"No provider for model."}', ""),
+            "model_unavailable",
+        )
+
+    def test_pinned_route_falls_back_on_provider_no_route(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache = Path(td) / "cache"
+            repo = Path(td) / "repo"
+            repo.mkdir()
+            pinned = {
+                "route_id": "opencode/github-copilot/kimi-k3",
+                "agent": "opencode",
+                "provider": "github-copilot",
+                "model_id": "kimi-k3",
+                "canonical_key": "kimi-k3",
+                "official_model_id": "kimi-k3",
+                "quota_bucket": "opencode:github-copilot",
+                "applicable_buckets": ["opencode:github-copilot"],
+            }
+            fallback = {
+                "route_id": "opencode/deepseek/deepseek-flash",
+                "agent": "opencode",
+                "provider": "deepseek",
+                "model_id": "deepseek-flash",
+                "canonical_key": "deepseek-flash",
+                "official_model_id": "deepseek-flash",
+                "quota_bucket": "opencode:deepseek",
+                "applicable_buckets": ["opencode:deepseek"],
+            }
+            payload = '{"type": "provider.no-route", "message": "Model unavailable: github-copilot/kimi-k3"}'
+            calls: list[str] = []
+
+            def fake_invoke(binary, route, *args, **kwargs):
+                attempt_dir = args[1]
+                calls.append(route["route_id"])
+                if route["route_id"] == pinned["route_id"]:
+                    return {
+                        "status": "failed",
+                        "exit_code": 1,
+                        "session_id": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                        "requested_model": route["model_id"],
+                        "resolved_model": route["model_id"],
+                        "observed_model": None,
+                        "session_cleaned_up": True,
+                        "cleanup_verified": True,
+                        "error_class": run.classify_failure(1, payload, ""),
+                        "error": payload,
+                    }
+                (attempt_dir / "result.md").write_text("fallback answer", encoding="utf-8")
+                return {
+                    "status": "ok",
+                    "exit_code": 0,
+                    "session_id": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                    "requested_model": route["model_id"],
+                    "resolved_model": route["model_id"],
+                    "observed_model": route["model_id"],
+                    "session_cleaned_up": True,
+                    "cleanup_verified": True,
+                    "error_class": None,
+                }
+
+            with patch.dict(os.environ, {"CROSS_SUBAGENTS_CACHE_DIR": str(cache)}), patch.object(
+                run, "resolve_explicit_route", return_value=dict(pinned)
+            ), patch.object(
+                run,
+                "resolve_pinned_fallback_constraints",
+                return_value={"scope": "planned_constraints"},
+            ), patch.object(
+                run,
+                "select_routes",
+                return_value={"status": "ok", "selected": dict(fallback), "fallbacks": []},
+            ), patch.object(
+                run,
+                "probe_all",
+                return_value={
+                    "agents": {
+                        "opencode": {
+                            "usable": True,
+                            "binary": "true",
+                            "version": "2.2.0",
+                            "recipe_flags": {"cli_major": 2, "has_agent_flag": True},
+                        }
+                    }
+                },
+            ), patch.object(run, "invoke_opencode", side_effect=fake_invoke):
+                res = run.execute_task(
+                    run_id="no-route-fallback-run",
+                    task_id="t1",
+                    route_str=pinned["route_id"],
+                    prompt_text="x",
+                    cwd=str(repo),
+                    sandbox_mode="read-only",
+                    force_route=True,
+                )
+
+            self.assertEqual(calls, [pinned["route_id"], fallback["route_id"]])
+            self.assertEqual(res["status"], "ok")
+            self.assertEqual(res["route_id"], fallback["route_id"])
+            self.assertEqual(
+                res["prior_failed_attempts"],
+                [{"route_id": pinned["route_id"], "error_class": "model_unavailable"}],
+            )
 
     def test_opencode_export_is_authoritative_and_must_be_current(self):
         from run import invoke_opencode

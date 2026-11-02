@@ -5,8 +5,8 @@ Implements the 5-step selection procedure:
   1. Hard filters (availability, non-stale multi-bucket quota exhaustion, verified context window & modalities, pins/exclusions)
   2. Task-specific quality floor (`min_task_fit`)
   3. Soft trade-off scoring:
-       score = task_fit - lambda*scarcity + mu*credit_expiry_pressure + nu*reset_imminence - omicron*cost
-  4. Tie-breaking (effective headroom -> latency tier -> cost)
+       score = task_fit - lambda*scarcity + mu*credit_expiry_pressure + nu*reset_imminence - omicron*cost + rho*recency
+  4. Tie-breaking (effective headroom -> latency tier -> recency -> cost)
   5. Fallback chain construction (prioritizing distinct quota buckets, plus same-bucket model alternatives tagged for non-quota failover)
 
 Usage:
@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import date
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -46,7 +48,7 @@ from common import (
     read_json_file,
     validate_safe_identifier,
 )
-from models import collect_all_models, get_survey, resolve_official_model_id
+from models import collect_all_models, get_survey, lookup_model_release_date, resolve_official_model_id
 from probe import get_agent_recipe
 from quota import collect_quota
 
@@ -461,11 +463,20 @@ WEIGHT_SCARCITY = 0.22  # lambda
 WEIGHT_CREDIT_EXPIRY = 0.18  # mu
 WEIGHT_RESET_IMMINENCE = 0.14  # nu
 WEIGHT_COST = 0.08  # omicron
+WEIGHT_RECENCY = 0.05  # rho
 SPEED_WEIGHTS: dict[str, float] = {
     "normal": 0.03,
     "fast": 0.15,
     "urgent": 0.30,
 }
+
+# Recency anchors, in days since release. Within one model family the newer
+# release is usually the better one, and a model that is half a year old is
+# already behind the current generation, so the neutral point sits at six
+# months: fresher models earn a bonus, stale ones take a small penalty.
+RECENCY_FRESH_DAYS = 30
+RECENCY_NEUTRAL_DAYS = 180
+RECENCY_STALE_DAYS = 540
 TIER_DEFAULT_TPS: dict[int, float] = {
     1: 120.0,
     2: 65.0,
@@ -559,6 +570,73 @@ def _safe_latency_tier(val: Any, default: int = 2) -> int:
     if not isinstance(val, bool) and isinstance(val, int) and val in (1, 2, 3):
         return val
     return default
+
+
+def _parse_release_date(value: Any) -> date | None:
+    """Parse a `YYYY-MM-DD` (or ISO timestamp) release date, ignoring unusable values."""
+    if not isinstance(value, str):
+        return None
+    m = re.match(r"^\s*(\d{4})-(\d{2})-(\d{2})", value)
+    if not m:
+        return None
+    try:
+        return date(*(int(part) for part in m.groups()))
+    except ValueError:
+        return None
+
+
+def model_age_days(release_date: str | None, today: date | None = None) -> int | None:
+    """Days since a model's release, or None when the release date is unknown."""
+    released = _parse_release_date(release_date)
+    if released is None:
+        return None
+    ref = today or date.today()
+    return max(0, (ref - released).days)
+
+
+def compute_recency_score(age_days: int | None) -> float:
+    """Map a model's age to a recency score in [-1.0, 1.0] (0.0 when unknown).
+
+    `RECENCY_FRESH_DAYS` and younger score 1.0, `RECENCY_NEUTRAL_DAYS` (six
+    months) scores 0.0, and `RECENCY_STALE_DAYS` or older scores -1.0, with
+    linear interpolation in between. Unknown ages stay neutral so routes
+    without release metadata rank exactly as they did before.
+    """
+    if age_days is None:
+        return 0.0
+    if age_days <= RECENCY_FRESH_DAYS:
+        return 1.0
+    if age_days <= RECENCY_NEUTRAL_DAYS:
+        span = RECENCY_NEUTRAL_DAYS - RECENCY_FRESH_DAYS
+        return round(1.0 - (age_days - RECENCY_FRESH_DAYS) / span, 4)
+    if age_days <= RECENCY_STALE_DAYS:
+        span = RECENCY_STALE_DAYS - RECENCY_NEUTRAL_DAYS
+        return round(-(age_days - RECENCY_NEUTRAL_DAYS) / span, 4)
+    return -1.0
+
+
+def resolve_route_release_date(
+    route: dict[str, Any],
+    survey: dict[str, Any] | None,
+    prior: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    """Resolve a route's release date: survey evidence, then the local registry, then priors."""
+    for field in ("released_at", "release_date"):
+        parsed = _parse_release_date((survey or {}).get(field))
+        if parsed is not None:
+            return parsed.isoformat(), "survey"
+    registered, source = lookup_model_release_date(
+        provider=route.get("provider"),
+        model_id=route.get("model_id"),
+        canonical_key=route.get("canonical_key"),
+    )
+    if registered:
+        return registered, source
+    for field in ("released_at", "release_date"):
+        parsed = _parse_release_date(prior.get(field))
+        if parsed is not None:
+            return parsed.isoformat(), "prior"
+    return None, None
 
 
 def evaluate_route_traits(route: dict[str, Any], task: str) -> dict[str, Any]:
@@ -720,6 +798,10 @@ def evaluate_route_traits(route: dict[str, Any], task: str) -> dict[str, Any]:
     tier_norm = (4 - int(latency_tier)) / 3.0
     speed_score = round(0.65 * tps_norm + 0.35 * tier_norm, 4)
 
+    release_date, recency_source = resolve_route_release_date(route, survey, prior)
+    age_days = model_age_days(release_date)
+    recency_score = compute_recency_score(age_days)
+
     return {
         "task_fit": fit,
         "context_window": estimated_ctx,
@@ -735,6 +817,10 @@ def evaluate_route_traits(route: dict[str, Any], task: str) -> dict[str, Any]:
         "tokens_per_sec": round(tokens_per_sec, 1),
         "tps_estimated": tps_estimated,
         "speed_score": speed_score,
+        "release_date": release_date,
+        "model_age_days": age_days,
+        "recency_score": recency_score,
+        "recency_source": recency_source,
         "trait_source": source_kind,
     }
 
@@ -1242,6 +1328,7 @@ def select_routes(
                 + WEIGHT_RESET_IMMINENCE * reset_imminence
                 - WEIGHT_COST * cost_idx
                 + speed_weight * speed_score
+                + WEIGHT_RECENCY * traits["recency_score"]
                 + headroom_bonus
             )
             score = round(score, 4)
@@ -1262,6 +1349,11 @@ def select_routes(
                 else ""
             )
             vision_str = ", vision=ok" if "image" in req_mods else ""
+            age_str = (
+                f", released {traits['release_date']} ({traits['model_age_days']}d old)"
+                if traits["release_date"] and traits["model_age_days"] is not None
+                else ""
+            )
             off_agent = route.get("official_agent") or official_agent_name(agent)
             off_model = route.get("official_model_id") or resolve_official_model_id(
                 route.get("resolved_model_id") or route["model_id"], all_models=all_models
@@ -1270,7 +1362,7 @@ def select_routes(
             tier_str = f", vendor tier {tier_rank}" if tier_rank else ""
             rationale = (
                 f"{r_id} [{off_agent} / {off_model}] selected — {task_norm} fit {traits['task_fit']:.2f} "
-                f"({traits['trait_source']}){vision_str}{speed_str}{tier_str}, "
+                f"({traits['trait_source']}){vision_str}{speed_str}{tier_str}{age_str}, "
                 f"{q_eval['bucket_id']} {used_str}{reset_str}, score {score:.3f}"
             )
 
@@ -1297,6 +1389,10 @@ def select_routes(
                     "latency_tier": traits["latency_tier"],
                     "tokens_per_sec": traits["tokens_per_sec"],
                     "speed_score": speed_score,
+                    "release_date": traits["release_date"],
+                    "model_age_days": traits["model_age_days"],
+                    "recency_score": traits["recency_score"],
+                    "recency_source": traits["recency_source"],
                     "quota": q_eval,
                     "vendor_tier_rank": tier_ranks.get(route["canonical_key"]),
                     "_headroom_sort": headroom_sort,
@@ -1324,6 +1420,7 @@ def select_routes(
             round(c["score"], 2),
             c["_headroom_sort"],
             -c["latency_tier"],
+            c.get("recency_score") or 0.0,
             c["tokens_per_sec"],
             -c["cost_index"],
             c["score"],
@@ -1806,10 +1903,12 @@ def main(argv: list[str] | None = None) -> int:
                 selected = entry["selected"]
                 tier = selected.get("vendor_tier_rank")
                 tier_note = f", tier={tier}" if tier else ""
+                age = selected.get("model_age_days")
+                age_note = f", age={age}d" if age is not None else ""
                 print(
                     f"step {entry['step']}: {selected['route_id']} "
                     f"(score={selected['score']:.3f}, fit={selected['task_fit']:.2f}"
-                    f"{tier_note}, bucket={selected['quota']['bucket_id']})"
+                    f"{tier_note}{age_note}, bucket={selected['quota']['bucket_id']})"
                 )
                 for fb_idx, fb in enumerate(entry.get("fallbacks") or [], 1):
                     print(f"  fallback {fb_idx}: {fb['route_id']}")
@@ -1849,9 +1948,11 @@ def main(argv: list[str] | None = None) -> int:
         print(res["rationale"])
         for idx, fb in enumerate(res.get("fallbacks") or [], 1):
             same_b = " [same-bucket]" if fb.get("same_bucket_as_primary") else ""
+            age = fb.get("model_age_days")
+            age_note = f", age={age}d" if age is not None else ""
             print(
                 f"  fallback {idx}: {fb['route_id']} (score={fb['score']:.3f}, "
-                f"fit={fb['task_fit']:.2f}, bucket={fb['quota']['bucket_id']}{same_b})"
+                f"fit={fb['task_fit']:.2f}{age_note}, bucket={fb['quota']['bucket_id']}{same_b})"
             )
         return 0
 

@@ -391,6 +391,14 @@ def classify_failure(exit_code: int, stdout_text: str, stderr_text: str, timed_o
             "unsupported model",
             "model_not_supported",
             "model is not supported",
+            "model unavailable",
+            "model not available",
+            "model_unavailable",
+            # OpenCode reports a model its provider cannot route as a
+            # provider.no-route error; the message may be terse, so match the
+            # structured error type as well. Without this the failure looks
+            # like a generic `failed` and the fallback chain is never tried.
+            "provider.no-route",
         )
     ):
         return "model_unavailable"
@@ -2828,6 +2836,9 @@ def execute_task(
                         "cost_estimated": traits["cost_estimated"],
                         "tokens_per_sec": traits["tokens_per_sec"],
                         "supports_vision": traits["supports_vision"],
+                        "release_date": traits["release_date"],
+                        "model_age_days": traits["model_age_days"],
+                        "recency_score": traits["recency_score"],
                         "quota": q_eval,
                     }
                 else:
@@ -2839,6 +2850,9 @@ def execute_task(
                         "cost_estimated": traits["cost_estimated"],
                         "tokens_per_sec": traits["tokens_per_sec"],
                         "supports_vision": traits["supports_vision"],
+                        "release_date": traits["release_date"],
+                        "model_age_days": traits["model_age_days"],
+                        "recency_score": traits["recency_score"],
                     }
 
                 selection_rationale = f"{explicit_route['route_id']} selected explicitly by caller"
@@ -2955,6 +2969,9 @@ def execute_task(
                 "cost_estimated": planned.get("cost_estimated", True),
                 "tokens_per_sec": planned.get("tokens_per_sec"),
                 "supports_vision": planned.get("supports_vision"),
+                "release_date": planned.get("release_date"),
+                "model_age_days": planned.get("model_age_days"),
+                "recency_score": planned.get("recency_score"),
                 "rationale": selection_rationale,
                 "fallbacks": [r["route_id"] for r in route_chain[1:]],
                 "prompt_files": {
