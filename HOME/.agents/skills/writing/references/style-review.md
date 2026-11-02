@@ -35,10 +35,10 @@ Build one prompt file containing:
    meaning, factual claims, and necessary qualifications.
 
 Require the reviewer to follow the writing criteria, including the checks for
-excessive anthropomorphism and proper-noun spelling, and to apply the same
-checks to any proposed rewrite. Prohibit tools, edits, delegation, and
-recursive reviews. Ask for specific revisions, or exactly
-`NO ACTIONABLE FINDINGS` when none help.
+excessive anthropomorphism, proper-noun spelling, and type-name formatting in
+ActivityPub prose, and to apply the same checks to any proposed rewrite.
+Prohibit tools, edits, delegation, and recursive reviews. Ask for specific
+revisions, or exactly `NO ACTIONABLE FINDINGS` when none help.
 
 Do not pass the draft as a command argument; write it to `$review_dir/prompt.txt`
 with a file-writing tool.
