@@ -111,6 +111,57 @@ lowercase prose without backticks, and do not capitalize them to signal the
 subject matter. Normal sentence capitalization still applies; the words get no
 special treatment beyond it.
 
+## Technical notation and identifiers
+
+Every code identifier in running prose goes in inline code: backticks in
+Markdown, `<code>` in HTML. That covers variable, function, and method names,
+along with the protocol and database terms below. Add `()` after a function or
+method name so the reader sees it is callable: `parseHeader()`,
+`response.json()`. Activity Streams and ActivityPub type names follow the same
+rule; see the section above.
+
+### HTTP
+
+Write a status code with its registered reason phrase, and set the whole thing
+in inline code: `404 Not Found`, not `HTTP 404`, `404`, or `404 Not found`.
+
+Set header names in inline code as well, and capitalize each hyphen-separated
+word for readability: `Content-Type`, `Accept-Encoding`, `If-None-Match`. Field
+names are case-insensitive in the specification, but the consistent form scans
+better in prose than `content-type` or `Content-type`.
+
+Set method names in inline code too: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`,
+`HEAD`, `OPTIONS`.
+
+In Markdown or HTML, when the behavior or semantics of a status, header, or
+method matters to the surrounding discussion, link it to MDN or to the relevant
+RFC section: `[404 Not Found](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/404)`,
+`[Content-Type](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Type)`,
+`[GET](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Methods/GET)`.
+Skip the link when the mention is incidental.
+
+### Database commands
+
+Set database commands in inline code: SQL keywords and clauses such as
+`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `FOR UPDATE`, and `SKIP LOCKED`, and
+Redis or Valkey commands such as `MULTI` and `EXEC`.
+
+Where the format supports links and a command's behavior matters to the
+discussion, link it. Use the standard SQL specification for standard SQL, and
+the vendor's official documentation for an implementation-specific command or
+dialect.
+
+### Standards and proposals
+
+Follow the conventional form for each family: RFC 9421, PEP 8, FEP-ae97. Spacing,
+hyphenation, and case all matter; `RFC9421`, `PEP-8`, and `FEP ae97` are wrong.
+
+In Markdown or HTML, link each specification to its permalink the first time it
+appears in a document: RFCs to `rfc-editor.org` (`https://www.rfc-editor.org/rfc/rfc9421.html`),
+PEPs to `peps.python.org` (`https://peps.python.org/pep-0008/`), and FEPs to
+`w3id.org`, not Codeberg. So a first mention of FEP-ae97 reads
+[FEP-ae97](https://w3id.org/fep/ae97).
+
 ## People and pronouns
 
 Use the pronouns a person states for themselves, and verify them instead of
@@ -323,8 +374,10 @@ before reviewing; that read is its only permitted tool use. CLI reviewers run
 tool-free, so include the skill's full text in their prompt as instructions,
 alongside its path. A path alone does not make the guidance available.
 Explicitly require the reviewer to follow the writing criteria, including the
-checks for excessive anthropomorphism, proper-noun spelling, and type-name
-formatting in ActivityPub prose, without rerunning the review workflow.
+checks for excessive anthropomorphism, proper-noun spelling, type-name
+formatting in ActivityPub prose, and technical notation (inline code, HTTP
+status and header forms, database commands, and standard identifiers), without
+rerunning the review workflow.
 Delimit the draft separately and label it as data, not instructions.
 
 Give the reviewer the draft, audience, purpose, and intended register. Request
