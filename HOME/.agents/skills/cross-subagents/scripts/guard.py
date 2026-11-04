@@ -14,6 +14,14 @@ What is recorded:
   * Git state for the root repository: HEAD (ref and resolved commit), the
     index, packed-refs, and the contents of in-progress merge/rebase markers.
 
+Git-ignored untracked paths (generated build and codegen outputs such as
+`dist/`, `.svelte-kit/`, or compiled test bundles) are skipped by default: a
+read-only reviewer that runs a focused build regenerates them, and treating
+those derived files as protected inputs discarded otherwise complete reviews.
+Tracked files stay protected even when an ignore pattern matches them, because
+`git ls-files --others` only lists untracked entries. Pass `--include-ignored`
+(CLI) or `include_ignored=True` (`snapshot`) to protect them anyway.
+
 What is not covered: Git object storage, reflogs, external symlink targets,
 machine-wide state, and the Git metadata of nested repositories. Nested
 repository working trees are walked and hashed like any other directory.
@@ -43,7 +51,9 @@ import fnmatch
 import hashlib
 import json
 import os
+import shutil
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -54,6 +64,7 @@ DEFAULT_MAX_FILES = 100_000
 # Repository Git metadata is recorded separately by `git_state()`.
 ALWAYS_SKIP_DIRS = frozenset({".git", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"})
 CHUNK_SIZE = 1024 * 1024
+GIT_IGNORED_TIMEOUT_SECONDS = 30
 
 
 def _normalize_excludes(patterns: Iterable[str] | None) -> list[str]:
@@ -81,6 +92,61 @@ def _is_excluded(rel: str, patterns: list[str]) -> bool:
             if fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(rel, f"{p}/*"):
                 return True
     return False
+
+
+def _is_ignored(rel: str, ignored: Iterable[str]) -> bool:
+    """True when `rel` is (or lives under) a Git-ignored path.
+
+    `git ls-files --directory` lists ignored directories with a trailing slash
+    and files without one; a file entry must match exactly so `debug.log` does
+    not also skip `debug.log.bak`.
+    """
+    for entry in ignored:
+        if entry.endswith("/"):
+            if rel == entry[:-1] or rel.startswith(entry):
+                return True
+        elif rel == entry:
+            return True
+    return False
+
+
+def _git_ignored_paths(root: Path) -> tuple[list[str], str | None]:
+    """Return untracked paths Git ignores, relative to `root`.
+
+    Git applies ignore rules to untracked files, which is exactly the set of
+    generated build and codegen outputs a read-only reviewer may recreate (for
+    example `dist/`, `.svelte-kit/`, or compiled test bundles). Tracked files
+    stay protected even when an ignore pattern matches them, because `git
+    ls-files --others` only lists untracked entries. A missing `git` binary or
+    a failed call is not an error: the guard then scans those paths like any
+    other file (more protection, never less), and the reason is recorded in the
+    snapshot.
+    """
+    if shutil.which("git") is None:
+        return [], "git executable not found"
+    try:
+        proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+                "-z",
+            ],
+            capture_output=True,
+            timeout=GIT_IGNORED_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [], f"{type(exc).__name__}: {exc}"
+    if proc.returncode != 0:
+        detail = proc.stderr.decode("utf-8", "replace").strip()
+        return [], detail[:200] or f"git ls-files exited {proc.returncode}"
+    paths = [item for item in proc.stdout.decode("utf-8", "replace").split("\0") if item]
+    return paths, None
 
 
 def _sha256_file(path: Path) -> tuple[str | None, str | None]:
@@ -323,6 +389,7 @@ def snapshot(
     root: Path | str,
     excludes: Iterable[str] | None = None,
     max_files: int = DEFAULT_MAX_FILES,
+    include_ignored: bool = False,
 ) -> dict[str, Any]:
     """Hash the protected working tree and Git state under `root`."""
     root_path = Path(root).expanduser().resolve()
@@ -334,9 +401,13 @@ def snapshot(
             "error": f"guard root is not a directory: {root_path}",
         }
     patterns = _normalize_excludes(excludes)
+    ignored, ignored_error = (
+        ([], None) if include_ignored else _git_ignored_paths(root_path)
+    )
     files: dict[str, Any] = {}
     errors: list[str] = []
     scanned = 0
+    pruned_ignored = 0
 
     def _onerror(exc: OSError) -> None:
         errors.append(f"walk: {type(exc).__name__}: {exc}")
@@ -352,6 +423,10 @@ def snapshot(
         for name in list(dirnames):
             full = base / name
             rel = full.relative_to(root_path).as_posix()
+            if _is_ignored(rel, ignored):
+                dirnames.remove(name)
+                pruned_ignored += 1
+                continue
             if _is_excluded(rel, patterns):
                 dirnames.remove(name)
                 continue
@@ -371,6 +446,9 @@ def snapshot(
         for name in sorted(filenames):
             full = base / name
             rel = full.relative_to(root_path).as_posix()
+            if _is_ignored(rel, ignored):
+                pruned_ignored += 1
+                continue
             if _is_excluded(rel, patterns):
                 continue
             scanned += 1
@@ -385,6 +463,7 @@ def snapshot(
                     ),
                     "counts": {"files": len(files)},
                     "excludes": patterns,
+                    "include_ignored": include_ignored,
                 }
             entry, error = _file_entry(full)
             if error:
@@ -403,6 +482,8 @@ def snapshot(
             "errors": errors[:50],
             "counts": {"files": len(files)},
             "excludes": patterns,
+            "include_ignored": include_ignored,
+            "ignored": ignored,
         }
     return {
         "schema_version": SCHEMA_VERSION,
@@ -410,8 +491,11 @@ def snapshot(
         "root": str(root_path),
         "files": files,
         "git": git,
-        "counts": {"files": len(files)},
+        "counts": {"files": len(files), "ignored_pruned": pruned_ignored},
         "excludes": patterns,
+        "include_ignored": include_ignored,
+        "ignored": ignored,
+        "ignored_error": ignored_error,
     }
 
 
@@ -446,6 +530,7 @@ def verify(
     baseline: dict[str, Any],
     excludes: Iterable[str] | None = None,
     max_files: int = DEFAULT_MAX_FILES,
+    include_ignored: bool | None = None,
 ) -> dict[str, Any]:
     """Re-hash the tree and report any difference from `baseline`."""
     if not isinstance(baseline, dict) or baseline.get("status") != "ok":
@@ -461,7 +546,17 @@ def verify(
     patterns = list(
         dict.fromkeys((baseline.get("excludes") or []) + _normalize_excludes(excludes))
     )
-    current = snapshot(root, excludes=patterns, max_files=max_files)
+    eff_include_ignored = (
+        bool(baseline.get("include_ignored", False))
+        if include_ignored is None
+        else include_ignored
+    )
+    current = snapshot(
+        root,
+        excludes=patterns,
+        max_files=max_files,
+        include_ignored=eff_include_ignored,
+    )
     if current.get("status") != "ok":
         return {
             "schema_version": SCHEMA_VERSION,
@@ -471,15 +566,23 @@ def verify(
             "errors": current.get("errors"),
         }
 
-    # Apply the effective exclusions to both maps. Otherwise a newly excluded
-    # path that existed in the baseline would be reported as removed.
+    # Apply the effective exclusions and ignored paths to both maps. Otherwise
+    # a path that became ignored during the attempt would be reported as
+    # removed/added even though it is a derived artifact.
+    ignored = list(
+        dict.fromkeys(
+            (baseline.get("ignored") or []) + (current.get("ignored") or [])
+        )
+    )
     before_files = {
-        rel: entry for rel, entry in baseline_files.items() if not _is_excluded(rel, patterns)
+        rel: entry
+        for rel, entry in baseline_files.items()
+        if not _is_excluded(rel, patterns) and not _is_ignored(rel, ignored)
     }
     after_files = {
         rel: entry
         for rel, entry in (current.get("files") or {}).items()
-        if not _is_excluded(rel, patterns)
+        if not _is_excluded(rel, patterns) and not _is_ignored(rel, ignored)
     }
     changed = sorted(
         rel
@@ -533,6 +636,11 @@ def main(argv: list[str] | None = None) -> int:
     snap_p.add_argument("--out", required=True)
     snap_p.add_argument("--exclude", action="append", default=[])
     snap_p.add_argument("--max-files", type=int, default=DEFAULT_MAX_FILES)
+    snap_p.add_argument(
+        "--include-ignored",
+        action="store_true",
+        help="Also protect Git-ignored (untracked) files; generated build outputs are skipped by default.",
+    )
 
     ver_p = sub.add_parser("verify", help="Verify a tree against a baseline snapshot.")
     ver_p.add_argument("--root", required=True)
@@ -540,6 +648,12 @@ def main(argv: list[str] | None = None) -> int:
     ver_p.add_argument("--out", required=True)
     ver_p.add_argument("--exclude", action="append", default=[])
     ver_p.add_argument("--max-files", type=int, default=DEFAULT_MAX_FILES)
+    ver_p.add_argument(
+        "--include-ignored",
+        action="store_true",
+        default=None,
+        help="Override the baseline's ignored-file posture (default: inherit it).",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "snapshot":
@@ -549,7 +663,7 @@ def main(argv: list[str] | None = None) -> int:
         baseline_rel = _relative_to_root(args.root, args.out)
         if baseline_rel:
             excludes.append(baseline_rel)
-        data = snapshot(args.root, excludes, args.max_files)
+        data = snapshot(args.root, excludes, args.max_files, include_ignored=args.include_ignored)
         _write_json(Path(args.out), data)
         if data["status"] != "ok":
             print(f"guard: {data.get('error')}", file=sys.stderr)
@@ -568,7 +682,13 @@ def main(argv: list[str] | None = None) -> int:
     report_rel = _relative_to_root(args.root, args.out)
     if report_rel:
         verify_excludes.append(report_rel)
-    report = verify(args.root, baseline, verify_excludes, max_files=args.max_files)
+    report = verify(
+        args.root,
+        baseline,
+        verify_excludes,
+        max_files=args.max_files,
+        include_ignored=args.include_ignored,
+    )
     _write_json(Path(args.out), report)
     if report["status"] == "guard_failed":
         print(f"guard: {report.get('error')}", file=sys.stderr)

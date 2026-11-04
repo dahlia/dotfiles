@@ -372,6 +372,7 @@ def collect_opencode_models(
     console_authenticated = any(p in provider_methods for p in console_providers)
 
     routes: list[dict[str, Any]] = []
+    unverified_providers: set[str] = set()
     for raw_line in strip_ansi(proc.stdout or "").splitlines():
         line = raw_line.strip()
         if not line or "/" not in line:
@@ -379,13 +380,26 @@ def collect_opencode_models(
         provider, model_part = line.split("/", 1)
         provider_slug = provider.strip().lower()
         is_free_tagged = "free" in model_part.lower()
+        credentials_unverified = False
         if provider_slug not in provider_methods:
             if provider_slug == "opencode-go" and console_authenticated:
                 pass
             elif provider_slug == "opencode" and is_free_tagged:
                 pass
-            else:
+            elif provider_slug in console_providers or provider_slug == "opencode-go":
+                # The OpenCode Console credential is decisive for its own
+                # catalogs: without it those routes cannot run at all.
                 continue
+            else:
+                # `opencode models` is the CLI's own catalog of routeable models,
+                # and `auth list` sometimes labels a credential differently from
+                # the provider slug the catalog uses (for example Kimi For Coding
+                # vs `kimi-code-plan-global`). Keep catalog-only providers as
+                # hidden routes instead of dropping them: an explicit --route
+                # then works without --force-route, while automatic selection
+                # still avoids a route whose credentials could not be verified.
+                credentials_unverified = True
+                unverified_providers.add(provider_slug)
 
         auth_method = provider_methods.get(
             provider_slug,
@@ -414,6 +428,9 @@ def collect_opencode_models(
             if route.get("variant")
             else f"{provider_slug}/{route['model_id']}"
         )
+        if credentials_unverified:
+            route["hidden"] = True
+            route["hidden_reason"] = "unverified-provider-credentials"
         routes.append(route)
 
     # The metered `opencode` (Zen) catalog mirrors many `opencode-go` subscription
@@ -439,6 +456,7 @@ def collect_opencode_models(
         "method": "opencode-models",
         "authenticated_providers": sorted(provider_methods.keys()),
         "derived_providers": sorted({"opencode-go"}) if console_authenticated and go_models else [],
+        "unverified_providers": sorted(unverified_providers),
     }
     return routes, meta
 

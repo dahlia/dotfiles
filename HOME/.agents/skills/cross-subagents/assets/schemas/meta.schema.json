@@ -53,6 +53,11 @@
       "enum": ["workspace-write", "read-only", "bypass"]
     },
     "cwd": { "type": ["string", "null"] },
+    "workspace_dirs": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Extra roots granted to the child outside --cwd (explicit --add-dir plus directories implied by --context-file)."
+    },
     "requested_model": { "type": ["string", "null"] },
     "observed_model": { "type": ["string", "null"] },
     "status": {

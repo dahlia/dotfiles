@@ -91,6 +91,70 @@ The output stream emits `{"event":"init","conversation_id":"..."}`,
 `{"event":"result","result":{"conversation_id":"...","status":"SUCCESS","response":"...","usage":{...}}}`
 line.
 
+
+Read access outside the working directory
+-----------------------------------------
+
+Headless `agy` cannot open an approval prompt. A `read_file` call for a path
+outside the session workspace is auto-denied even under
+`--mode accept-edits --sandbox` (workspace-write) and `--mode plan --sandbox`
+(read-only). The turn still ends with
+`{"event":"result","result":{"status":"SUCCESS","response":""}}`, and the only
+evidence is a stderr note:
+
+~~~~ text
+jetski: no output produced — a tool required the "read_file" permission that
+headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under
+permissions.allow in settings.json (e.g. read_file(<target>)). Alternatively,
+re-run with --dangerously-skip-permissions to auto-approve all tools.
+~~~~
+
+Pass `--add-dir <absolute-path>` (repeatable, before `--print ""`) for every
+external root the prompt references. Adding the directory to the workspace is
+the supported way to grant those reads without `--dangerously-skip-permissions`:
+
+~~~~ bash
+agy --model gemini-4-argon-high \
+    --add-dir /home/alice/Projects/deno \
+    --mode accept-edits --sandbox ...
+~~~~
+
+`scripts/run.py` forwards its own `--add-dir` (plus the directories holding
+`--context-file` entries) this way, and classifies the auto-denial as
+`permission`: it records the denied tool and target in `denials_observed` and
+does not fall back to another model, because a headless approval gap is
+deterministic. A `permissions.allow` rule in settings.json
+(`read_file(<absolute-path>)`, `command(<binary> <subcommand>)`,
+`write_file(<absolute-path>)`) is an alternative for roots reused across runs;
+never use the blanket `read_file(*)`/`read_file(/)` form.
+
+Shell commands in read-only review
+----------------------------------
+
+A read-only review that passes `--allow-shell` still needs a `command` approval,
+which headless mode auto-denies the same way (`a tool required the "command"
+permission ... auto-denied`; the turn ends empty with `status: SUCCESS`). Grant
+it with a session-only settings override that carries an allow-rule:
+
+~~~~ bash
+agy --mode plan --sandbox --disable-slash-commands \
+    --settings '{"permissions":{"allow":["command(*)"]}}' ...
+~~~~
+
+This does not weaken the posture: `--sandbox` mounts a read-only filesystem, so
+a `touch` returns `Read-only file system` even with `command(*)` allowed
+(verified against `agy` 1.4.12). `scripts/run.py` builds this override from the
+user's `~/.gemini/antigravity-cli/settings.json` when `--allow-shell` is set,
+merging any existing `permissions` so a session override cannot drop a user's
+deny rule.
+
+`--mode plan` emits `warning: --mode plan has no effect while slash command
+expansion is disabled.` when combined with `--disable-slash-commands`, which
+`scripts/run.py` passes. Read-only execution therefore relies on `--sandbox`
+alone for mechanical enforcement (it enforces a read-only filesystem), and on
+allow-rules for the inspection tools the run needs. Inspect `denials_observed`
+when a read-only run looks incomplete.
+
 For coroutine resumption across turns, pass `--conversation <conversation_id>`
 before `--print ""`.
 

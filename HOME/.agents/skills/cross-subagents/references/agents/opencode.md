@@ -13,6 +13,15 @@ If the version cannot be parsed or is below `2.0.0`, do not attempt to run it;
 select another agent or ask the user to upgrade. Never upgrade the user's
 installation automatically.
 
+Duplicate installs are resolved by capability, not by `PATH` order. When a
+mise shim resolves to an old global version while a newer version is installed,
+`scripts/probe.py` also scans `$MISE_DATA_DIR/installs/opencode/*/`
+(`MISE_DATA_DIR` defaults to `~/.local/share/mise`) for
+`node_modules/.bin/opencode`, `bin/opencode`, and `opencode`, probes each
+candidate with `--version`, and selects the first one whose major version is at
+least 2. The choice and every probed candidate are recorded in the warning list
+so a surprising binary is explainable.
+
 Inspect configured providers with:
 
 ~~~~ bash
@@ -39,6 +48,15 @@ entry.
 opencode models | grep -E '^(opencode|opencode-go)/'
 ~~~~
 
+Any other provider that `opencode models` lists but `opencode auth list` does not
+name (for example `kimi-code-plan-global`, whose credential can be labeled
+`Kimi For Coding`) is kept as a `hidden` route with `hidden_reason:
+"unverified-provider-credentials"`. The CLI's own catalog is authoritative about
+routeability, so an explicit `--route` works without `--force-route`, while
+automatic selection still avoids a route whose credentials could not be
+cross-checked. `models.py collect` records these provider slugs under
+`unverified_providers` in the collection metadata.
+
 When the same canonical model exists in both catalogs, the `opencode-go`
 subscription route is selected. Its Zen duplicate remains in the catalog as
 `hidden` (reachable with an explicit pin or `--force-route`) so automatic
@@ -57,10 +75,11 @@ opencode models
 
 Each line uses the `provider/model` format (for example,
 `deepseek/deepseek-flash`, `opencode-go/deepseek-v4.1-flash`,
-`anthropic/claude-opus-5-5`). Filter the catalog to providers that appear in
+`anthropic/claude-opus-5-5`). Accept providers that appear in
 `opencode auth list --format json`, plus `opencode-go` when the OpenCode
 Console credential is present, plus `free`-tagged models served under the
-built-in `opencode` provider.
+built-in `opencode` provider. Catalog-only providers are kept as hidden routes
+as described above rather than dropped.
 
 During normalization, map provider-specific versioned aliases for the same
 underlying model to a shared `canonical_key` (for example, both
@@ -160,8 +179,8 @@ that deny edit/write/patch and, by default, shell/bash. Two postures extend it:
 
  -  `--allow-shell`: adds `{"action":"shell","effect":"allow"}` and the same
     for `bash`, and injects a dedicated `review-shell` agent with ordered
-    permissions (deny all, allow read/glob/grep/shell, deny `.env` reads and
-    external directories). A builtin agent can carry its own restrictions, so
+    permissions (deny all, allow read/glob/grep/shell, deny `.env` reads). A
+    builtin agent can carry its own restrictions, so
     the dedicated agent is what actually makes shell available. Editing tools
     stay denied.
  -  `--isolate`: disables `share`, `update`, and `snapshots`, adds the
@@ -174,3 +193,16 @@ that deny edit/write/patch and, by default, shell/bash. Two postures extend it:
     builtin `plan` agent, and verifies the agent and permission list before
     execution. This is the only OpenCode posture where "no tool call" is
     enforced by configuration rather than by prompt.
+
+### External directories (`--add-dir` and `--context-file`)
+
+`external_directory` gates every path-taking tool (`read`, `glob`, `grep`, and
+many shell commands) that targets a path outside the project worktree. Read-only
+runs allow the roots passed with `--add-dir` and the directories holding
+`--context-file` entries by appending, for each root,
+`{"action":"external_directory","resource":"<root>/*","effect":"allow"}`.
+OpenCode evaluates permission rules with **last match wins**, so these allow
+rules are appended after any broad `external_directory: deny` (the `review-shell`
+agent previously denied every external path, which made `/tmp/...` snapshots
+unreadable). Reads inside an allowed directory follow the workspace defaults;
+the explicit `edit`/`write`/`patch` denials and `.env` read denials still apply.

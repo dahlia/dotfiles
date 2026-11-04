@@ -1,1 +1,3 @@
 .dojang/
+__pycache__/
+*.pyc

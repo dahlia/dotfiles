@@ -530,12 +530,24 @@ def classify_route_billing(route: dict[str, Any]) -> str:
     ):
         return "subscription"
 
-    if (
-        agent == "claude-code"
-        and provider == "anthropic"
-        and auth_plan in ("max", "pro", "claude max", "claude pro", "team", "enterprise", "claude.ai", "subscription")
-    ):
-        return "subscription"
+    if agent == "claude-code" and provider == "anthropic":
+        if auth_plan in (
+            "max",
+            "pro",
+            "claude max",
+            "claude pro",
+            "team",
+            "enterprise",
+            "claude.ai",
+            "subscription",
+        ):
+            return "subscription"
+        # Newer plan names (for example "Claude Ultra") are still subscriptions;
+        # only API/key/token plans are metered.
+        if auth_plan.startswith("claude") and not any(
+            marker in auth_plan for marker in ("api", "key", "token")
+        ):
+            return "subscription"
 
     if agent == "antigravity" and auth_plan in ("subscription", "pro", "max"):
         return "subscription"

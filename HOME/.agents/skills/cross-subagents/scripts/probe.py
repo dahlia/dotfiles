@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
-from typing import Any
+from typing import Any, Callable
 
 from common import (
     AGENT_BINARIES,
@@ -32,6 +33,79 @@ from common import (
 
 PROBE_TTL_SECONDS = 86400  # 24 hours
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def probe_binary_version(binary: str) -> str | None:
+    """Return a CLI's version string, or `None` when it cannot be probed."""
+    try:
+        proc = run_cmd([binary, "--version"], timeout=8)
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return extract_version_string(proc.stdout or proc.stderr)
+
+
+def mise_version_candidates(agent: str) -> list[str]:
+    """Return binaries from installed mise versions, not just the active shim.
+
+    `resolve_agent_binary` prefers the first executable on `PATH`. When that is
+    a mise shim pinned to an old global version, a newer installed version is
+    invisible to the probe even though the CLI supports the required flags. Scan
+    the install tree for the usual layouts (`node_modules/.bin`, `bin`, and the
+    install root) so the probe can prefer a supported version.
+    """
+    canon = canonical_agent_name(agent)
+    names = AGENT_BINARIES.get(canon) or []
+    data_dir = Path(
+        os.environ.get("MISE_DATA_DIR") or (Path.home() / ".local" / "share" / "mise")
+    )
+    installs = data_dir / "installs" / canon
+    if not installs.is_dir():
+        return []
+    found: list[str] = []
+    for version_dir in sorted(
+        (entry for entry in installs.iterdir() if entry.is_dir()), reverse=True
+    ):
+        for name in names:
+            for rel in (Path("node_modules") / ".bin" / name, Path("bin") / name, Path(name)):
+                candidate = version_dir / rel
+                try:
+                    if candidate.is_file() and os.access(str(candidate), os.X_OK):
+                        path = str(candidate)
+                        if path not in found:
+                            found.append(path)
+                except OSError:
+                    continue
+    return found
+
+
+def select_supported_binary(
+    candidates: list[str],
+    min_major: int,
+    *,
+    version_probe: Callable[[str], str | None] = probe_binary_version,
+) -> tuple[str | None, str | None, list[tuple[str, str]]]:
+    """Pick the first candidate whose major version is at least `min_major`.
+
+    Returns `(binary, version, probed)` where `probed` lists every candidate
+    that answered a version query, in preference order. When no candidate meets
+    the floor, the first probeable candidate is returned so the caller can
+    report the unsupported version it actually has.
+    """
+    probed: list[tuple[str, str]] = []
+    for candidate in candidates:
+        version = version_probe(candidate)
+        if version:
+            probed.append((candidate, version))
+    for candidate, version in probed:
+        parsed = parse_semver(version)
+        if parsed is not None and parsed[0] >= min_major:
+            return candidate, version, probed
+    if probed:
+        return probed[0][0], probed[0][1], probed
+    return (candidates[0] if candidates else None), None, probed
+
 
 
 def strip_ansi(text: str) -> str:
@@ -175,6 +249,7 @@ def cache_cli_help_and_recipe(agent: str, binary: str, version: str | None) -> d
             "has_dangerously_skip_permissions": "--dangerously-skip-permissions" in all_help or not all_help,
             "has_safe_mode": "--safe-mode" in all_help or not all_help,
             "has_strict_mcp_config": "--strict-mcp-config" in all_help or not all_help,
+            "has_add_dir": "--add-dir" in all_help or not all_help,
         }
     elif agent == "opencode":
         flags = {
@@ -196,6 +271,8 @@ def cache_cli_help_and_recipe(agent: str, binary: str, version: str | None) -> d
             "has_dangerously_skip_permissions": "--dangerously-skip-permissions" in all_help or not all_help,
             "has_disable_slash_commands": "--disable-slash-commands" in all_help or not all_help,
             "has_print_timeout": "--print-timeout" in all_help or not all_help,
+            "has_add_dir": "--add-dir" in all_help or not all_help,
+            "has_settings": "--settings" in all_help or not all_help,
         }
     else:
         flags = {}
@@ -452,18 +529,28 @@ def probe_opencode() -> dict[str, Any]:
         }
 
     binary = base["binary"]
-    version = None
-    try:
-        v_proc = run_cmd([binary, "--version"], timeout=8)
-        if v_proc.returncode == 0:
-            version = extract_version_string(v_proc.stdout or v_proc.stderr)
-    except Exception:
-        pass
+    candidates: list[str] = []
+    for candidate in [binary] + list(base.get("all_paths") or []) + mise_version_candidates(
+        "opencode"
+    ):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+
+    selected_binary, version, probed = select_supported_binary(candidates, 2)
+    binary = selected_binary or binary
+    warnings: list[str] = []
+    if binary != base["binary"]:
+        warnings.append(
+            "Selected OpenCode binary "
+            f"'{binary}' (version {version or 'unknown'}) instead of the PATH default "
+            f"'{base['binary']}' because cross-subagents requires OpenCode v2 or later. "
+            f"Probed: {', '.join(f'{path} ({ver})' for path, ver in probed)}."
+        )
+    base = {**base, "binary": binary, "all_paths": candidates}
 
     ver_tuple = parse_semver(version or "")
     major = ver_tuple[0] if ver_tuple is not None else 0
     version_ok = major >= 2
-    warnings: list[str] = []
 
     if base["duplicate_installs"]:
         warnings.append(

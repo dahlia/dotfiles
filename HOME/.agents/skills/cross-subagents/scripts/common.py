@@ -876,6 +876,9 @@ def infer_model_vendor(canonical_key: str, provider: str = "") -> str:
         return "zhipu"
     if k.startswith("kimi-"):
         return "moonshot"
+    # Kimi K-series IDs (k3, k3-256k, k3.1-pro) carry no `kimi-` prefix.
+    if re.match(r"^k\d+(?:\.\d+)?(?:-|$)", k):
+        return "moonshot"
     if k.startswith("minimax-"):
         return "minimax"
     if k.startswith("mimo-"):
@@ -885,6 +888,13 @@ def infer_model_vendor(canonical_key: str, provider: str = "") -> str:
     if k.startswith("mistral-") or k.startswith("codestral"):
         return "mistral"
     prov = provider.strip().lower()
+    provider_vendors = {
+        "kimi-code-plan-global": "moonshot",
+        "kimi-for-coding": "moonshot",
+        "moonshotai": "moonshot",
+    }
+    if prov in provider_vendors:
+        return provider_vendors[prov]
     if prov and prov not in ("opencode", "opencode-go", "github-copilot", "antigravity", "default"):
         return prov
     parts = k.split("-")

@@ -229,6 +229,86 @@ def _denial_error(denials: list[Any]) -> str | None:
     return ("Tool call(s) denied: " + "; ".join(cleaned))[:500]
 
 
+# Antigravity headless mode cannot open an approval prompt, so a tool call that
+# is not covered by an allow-rule is auto-denied. The turn still finishes with
+# `status: SUCCESS` and an empty response, and the only evidence is this stderr
+# note. Reading a path outside the workspace triggers it even in
+# workspace-write mode.
+ANTIGRAVITY_AUTO_DENIAL_MARKERS = (
+    "auto-denied",
+    "headless mode cannot prompt",
+)
+
+
+def _antigravity_auto_denial(
+    stderr_text: str, last_tool: dict[str, Any] | None = None
+) -> str | None:
+    """Describe the tool Antigravity auto-denied in headless mode, if any."""
+    text = stderr_text or ""
+    lowered = text.lower()
+    if not any(marker in lowered for marker in ANTIGRAVITY_AUTO_DENIAL_MARKERS):
+        return None
+    match = re.search(r'the "([^"]+)" permission', text)
+    last_tool = last_tool or {}
+    tool = (match.group(1) if match else None) or last_tool.get("name") or "tool"
+    detail = f"{tool}: auto-denied (headless Antigravity cannot prompt for approval)"
+    params = last_tool.get("parameters") or {}
+    target = params.get("Path") or params.get("path") or params.get("TargetFile")
+    if target:
+        detail += f" on {target}"
+    return detail
+
+
+def normalize_workspace_dirs(
+    workspace_dirs: list[str] | None,
+    context_files: list[str] | None,
+    cwd: str,
+) -> list[str]:
+    """Resolve extra roots a subagent may touch outside `cwd`.
+
+    `--context-file` entries imply their parent directory: the documented
+    workflow is to point the subagent at large files instead of pasting them,
+    so a sandbox that only allows tool access inside `cwd` would silently make
+    those pointers unreadable. Explicit `--add-dir` paths take precedence and
+    are pruned to the shallowest roots to keep the child command line short.
+    """
+    base = Path(cwd)
+
+    def _resolve(raw: str) -> Path | None:
+        try:
+            path = Path(str(raw).strip()).expanduser()
+            if not path.is_absolute():
+                path = base / path
+            path = path.resolve()
+        except (OSError, RuntimeError):
+            return None
+        if path.is_file():
+            path = path.parent
+        if not path.is_dir() or path == base:
+            return None
+        try:
+            path.relative_to(base)
+        except ValueError:
+            return path
+        return None
+
+    roots: list[Path] = []
+    for raw in list(workspace_dirs or []) + list(context_files or []):
+        if not str(raw).strip():
+            continue
+        resolved = _resolve(str(raw))
+        if resolved is not None and resolved not in roots:
+            roots.append(resolved)
+
+    roots.sort(key=lambda p: len(p.parts))
+    pruned: list[Path] = []
+    for path in roots:
+        if any(parent == path or parent in path.parents for parent in pruned):
+            continue
+        pruned.append(path)
+    return [str(path) for path in pruned]
+
+
 def get_run_dir(run_id: str) -> Path:
     validate_safe_identifier(run_id, "run_id")
     runs_root = get_cache_dir() / "runs"
@@ -402,6 +482,10 @@ def classify_failure(exit_code: int, stdout_text: str, stderr_text: str, timed_o
         )
     ):
         return "model_unavailable"
+    # Checked before the generic permission markers: an auto-denied headless
+    # tool is a deterministic policy gap, not a transient sandbox error.
+    if any(k in combined for k in ANTIGRAVITY_AUTO_DENIAL_MARKERS):
+        return "permission"
     if any(k in combined for k in ("permission denied", "approval required", "sandbox", "blocked by policy")):
         return "permission"
     return "failed"
@@ -971,6 +1055,7 @@ def invoke_claude_code(
     allow_gh: bool = False,
     allow_network: bool = False,
     policy: dict[str, Any] | None = None,
+    workspace_dirs: list[str] | None = None,
 ) -> dict[str, Any]:
     policy = policy or {}
     result_file = attempt_dir / "result.md"
@@ -1038,6 +1123,30 @@ def invoke_claude_code(
             cmd.extend(["--allowedTools", "Read,Grep,Glob,Edit,Write,NotebookEdit,Bash"])
     else:
         cmd.append("--dangerously-skip-permissions")
+
+    extra_roots = [str(p) for p in (workspace_dirs or []) if str(p).strip()]
+    if extra_roots and sandbox_mode != "bypass":
+        if not flags.get("has_add_dir", True):
+            return {
+                "status": "failed",
+                "exit_code": 2,
+                "session_id": resume_session_id,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+                "requested_model": requested_model,
+                "resolved_model": resolved_model,
+                "observed_model": None,
+                "session_cleaned_up": True,
+                "cleanup_verified": True,
+                "error_class": "no_option",
+                "error": (
+                    "Installed Claude Code CLI rejects --add-dir, so the requested workspace "
+                    f"roots ({', '.join(extra_roots)}) cannot be granted; "
+                    "use --sandbox bypass or upgrade Claude Code."
+                ),
+            }
+        # `--add-dir <directories...>` is variadic; the following flag ends it.
+        cmd.append("--add-dir")
+        cmd.extend(extra_roots)
 
     cmd.extend(["--output-format", "json"])
 
@@ -1207,6 +1316,22 @@ def invoke_claude_code(
     }
 
 
+def _opencode_external_directory_rules(workspace_dirs: list[str] | None) -> list[dict[str, str]]:
+    """Allow specific directories outside the OpenCode project worktree.
+
+    OpenCode matches permission rules last-wins, so these allow rules must come
+    after any broad `external_directory: deny` rule. `external_directory` gates
+    path-taking tools (`read`, `glob`, `grep`, and many shell commands).
+    """
+    rules: list[dict[str, str]] = []
+    for root in workspace_dirs or []:
+        if not str(root).strip():
+            continue
+        resource = Path(root).as_posix().rstrip("/") + "/*"
+        rules.append({"action": "external_directory", "resource": resource, "effect": "allow"})
+    return rules
+
+
 def opencode_read_only_config(
     existing_cfg: dict[str, Any],
     *,
@@ -1215,6 +1340,7 @@ def opencode_read_only_config(
     allow_shell: bool = False,
     allow_network: bool = False,
     isolate: bool = False,
+    workspace_dirs: list[str] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Apply and verify the OpenCode read-only permission config for one attempt."""
     cfg = dict(existing_cfg or {})
@@ -1264,6 +1390,8 @@ def opencode_read_only_config(
         perm_rules.append({"action": "webfetch", "resource": "*", "effect": "allow"})
     elif no_tools:
         perm_rules.append({"action": "webfetch", "resource": "*", "effect": "deny"})
+    external_rules = _opencode_external_directory_rules(workspace_dirs)
+    perm_rules.extend(external_rules)
     cfg["permissions"] = perm_rules
 
     if isolate or no_tools:
@@ -1304,6 +1432,7 @@ def opencode_read_only_config(
             {"action": "external_directory", "resource": "*", "effect": "deny"},
             {"action": "shell", "resource": "*", "effect": "allow"},
         ]
+        shell_permissions.extend(external_rules)
         if net_allowed:
             shell_permissions.append({"action": "webfetch", "resource": "*", "effect": "allow"})
         agents["review-shell"] = {
@@ -1353,6 +1482,7 @@ def invoke_opencode(
     allow_gh: bool = False,
     allow_network: bool = False,
     policy: dict[str, Any] | None = None,
+    workspace_dirs: list[str] | None = None,
 ) -> dict[str, Any]:
     policy = policy or {}
     result_file = attempt_dir / "result.md"
@@ -1448,6 +1578,7 @@ def invoke_opencode(
             allow_shell=bool(policy.get("allow_shell")),
             allow_network=allow_network,
             isolate=bool(policy.get("isolate")),
+            workspace_dirs=workspace_dirs,
         )
 
         if not verified_ro:
@@ -1883,6 +2014,30 @@ def invoke_opencode(
     }
 
 
+def antigravity_shell_permission_settings() -> str:
+    """Build a session-only `--settings` override that permits shell commands.
+
+    Headless `agy` auto-denies every tool call that would need an interactive
+    approval, so `--allow-shell` cannot work without an explicit allow-rule. The
+    read-only posture stays intact because `--sandbox` still mounts a read-only
+    filesystem (verified against `agy` 1.4.12). Existing user permissions are
+    merged in so a session override cannot silently drop a deny rule.
+    """
+    permissions: dict[str, Any] = {}
+    raw = read_json_file(
+        Path.home() / ".gemini" / "antigravity-cli" / "settings.json",
+        require_schema=False,
+    )
+    if isinstance(raw, dict) and isinstance(raw.get("permissions"), dict):
+        permissions = dict(raw["permissions"])
+    allow = permissions.get("allow")
+    allow_list = [str(item) for item in allow] if isinstance(allow, list) else []
+    if "command(*)" not in allow_list:
+        allow_list.append("command(*)")
+    permissions["allow"] = allow_list
+    return json.dumps({"permissions": permissions}, ensure_ascii=False)
+
+
 def invoke_antigravity(
     binary: str,
     route: dict[str, Any],
@@ -1897,6 +2052,7 @@ def invoke_antigravity(
     child_env: dict[str, str],
     recipe_flags: dict[str, Any] | None = None,
     policy: dict[str, Any] | None = None,
+    workspace_dirs: list[str] | None = None,
 ) -> dict[str, Any]:
     """Invoke Antigravity (`agy`) using stream-json stdin so arbitrary prompt lengths work safely."""
     policy = policy or {}
@@ -1937,6 +2093,27 @@ def invoke_antigravity(
             ),
         }
 
+    extra_roots = [str(p) for p in (workspace_dirs or []) if str(p).strip()]
+    if extra_roots and sandbox_mode != "bypass":
+        if not flags.get("has_add_dir", True):
+            return {
+                "status": "failed",
+                "exit_code": 2,
+                "session_id": resume_session_id,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+                "requested_model": requested_model,
+                "resolved_model": resolved_model,
+                "observed_model": None,
+                "session_cleaned_up": False,
+                "cleanup_verified": True,
+                "error_class": "no_option",
+                "error": (
+                    "Installed Antigravity CLI does not support --add-dir, so the requested "
+                    f"workspace roots ({', '.join(extra_roots)}) cannot be granted; "
+                    "retry with --sandbox bypass or choose another agent."
+                ),
+            }
+
     eff = effort or route.get("variant")
     cmd: list[str] = [
         binary,
@@ -1947,6 +2124,9 @@ def invoke_antigravity(
         "--output-format",
         "stream-json",
     ]
+    for root in extra_roots:
+        if sandbox_mode != "bypass":
+            cmd.extend(["--add-dir", root])
     if flags.get("has_disable_slash_commands", True):
         cmd.append("--disable-slash-commands")
     if eff and eff in ("low", "medium", "high") and flags.get("has_effort", True):
@@ -1964,6 +2144,26 @@ def invoke_antigravity(
 
     if flags.get("has_print_timeout", True):
         cmd.extend(["--print-timeout", f"{timeout_sec}s"])
+    if policy.get("allow_shell") and sandbox_mode != "bypass":
+        if not flags.get("has_settings", True):
+            return {
+                "status": "failed",
+                "exit_code": 2,
+                "session_id": resume_session_id,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+                "requested_model": requested_model,
+                "resolved_model": resolved_model,
+                "observed_model": None,
+                "session_cleaned_up": False,
+                "cleanup_verified": True,
+                "error_class": "no_option",
+                "error": (
+                    "Installed Antigravity CLI does not support --settings, which is required "
+                    "to grant --allow-shell commands in headless mode; retry with "
+                    "--sandbox bypass or choose another agent."
+                ),
+            }
+        cmd.extend(["--settings", antigravity_shell_permission_settings()])
     cmd.extend(["--print", ""])
 
     ndjson_input = json.dumps({"event": "user", "message": {"content": prompt_text}}, ensure_ascii=False) + "\n"
@@ -1981,6 +2181,7 @@ def invoke_antigravity(
     observed_model: str | None = None
     stream_models: list[str] = []
     denials_observed: list[str] = []
+    last_tool: dict[str, Any] | None = None
 
     for line in out.splitlines():
         line = line.strip()
@@ -1992,7 +2193,16 @@ def invoke_antigravity(
             continue
         if ev.get("conversation_id") and not session_id:
             session_id = ev["conversation_id"]
-        for key in ("step", "tool", "result"):
+        step_update = ev.get("step_update")
+        if isinstance(step_update, dict):
+            tool_name = step_update.get("tool_name")
+            if tool_name:
+                info = step_update.get("tool_info") or {}
+                last_tool = {
+                    "name": tool_name,
+                    "parameters": info.get("parameters") if isinstance(info, dict) else None,
+                }
+        for key in ("step", "step_update", "tool", "result"):
             candidate = ev.get(key)
             if isinstance(candidate, dict):
                 denial = _tool_denial(candidate)
@@ -2024,6 +2234,9 @@ def invoke_antigravity(
     )
 
     err_combined = f"{err}\n{result_error or ''}".strip()
+    auto_denial = _antigravity_auto_denial(err_combined, last_tool)
+    if auto_denial and auto_denial not in denials_observed:
+        denials_observed.append(auto_denial)
     model_changed = bool(stream_models) and not _models_compatible(stream_models)
     if model_changed:
         err_combined = (
@@ -2069,6 +2282,18 @@ def invoke_antigravity(
         err_class = classify_failure(code, "", err_combined, timed_out=False)
         if model_changed:
             err_class = "model_unavailable"
+        elif auto_denial and err_class not in (
+            "quota",
+            "auth",
+            "model_unavailable",
+            "no_option",
+            "timeout",
+        ):
+            # A headless approval gap is deterministic. Do not relabel it as a
+            # protocol `format` failure: that would let run.py fall back to a
+            # different (possibly weaker) model and hide the lost permissions.
+            # A specific quota/auth/model class still wins.
+            err_class = "permission"
         elif code == 0 and result_status == "SUCCESS" and not response_text:
             err_class = "format"
         elif code == 0 and result_status is None and not model_changed:
@@ -2076,6 +2301,11 @@ def invoke_antigravity(
             # provider failure. Classify as format so self-repair and fallback
             # can run instead of reporting an opaque "failed".
             err_class = "format"
+        if auto_denial:
+            err_combined = (
+                f"{err_combined} Grant access to the referenced paths with run.py "
+                "--add-dir <path> (repeatable), or add an Antigravity permissions.allow rule."
+            ).strip()
         return {
             "status": "quota" if err_class == "quota" else "failed",
             "exit_code": code,
@@ -2380,6 +2610,8 @@ def _adapt_recipe_from_error(
         "--auto": "has_auto",
         "--disable-slash-commands": "has_disable_slash_commands",
         "--print-timeout": "has_print_timeout",
+        "--add-dir": "has_add_dir",
+        "--settings": "has_settings",
         "--json": "has_json",
         "--format": "has_format_json",
         "--safe-mode": "has_safe_mode",
@@ -2687,6 +2919,7 @@ def execute_task(
     context_files: list[str] | None = None,
     references: list[str] | None = None,
     recommend_inspect: bool = False,
+    workspace_dirs: list[str] | None = None,
     allow_gh: bool = False,
     allow_network: bool = False,
     no_tools: bool = False,
@@ -2695,6 +2928,7 @@ def execute_task(
     guard_enabled: bool = False,
     guard_excludes: list[str] | None = None,
     guard_max_files: int = 100_000,
+    guard_include_ignored: bool = False,
     task_summary: str | None = None,
     outcome_summary: str | None = None,
     significant: bool | None = None,
@@ -2788,6 +3022,9 @@ def execute_task(
                 recommend_inspect=recommend_inspect,
             )
             prompt_sha256 = hashlib.sha256(combined_prompt.encode("utf-8")).hexdigest()
+            effective_workspace_dirs = normalize_workspace_dirs(
+                workspace_dirs, context_files, effective_cwd
+            )
 
             task_norm = task_category.strip().lower().replace("-", "_")
             route_chain: list[dict[str, Any]] = []
@@ -2982,6 +3219,7 @@ def execute_task(
                 "prompt_size_warning": prompt_size_warning,
                 "sandbox_mode": effective_sandbox,
                 "cwd": effective_cwd,
+                "workspace_dirs": effective_workspace_dirs,
                 "keep_session": keep_session,
                 "resume_session_id": resume_session_id,
                 "tool_policy": execution_policy,
@@ -3022,6 +3260,7 @@ def execute_task(
                 "effort": effort or planned.get("variant"),
                 "sandbox_mode": effective_sandbox,
                 "cwd": effective_cwd,
+                "workspace_dirs": effective_workspace_dirs,
                 "requested_model": planned.get("requested_model") or planned["model_id"],
                 "resolved_model": planned.get("resolved_model_id") or planned["model_id"],
                 "observed_model": None,
@@ -3171,7 +3410,12 @@ def execute_task(
                     if guard_enabled:
                         guard_dir = attempt_dir / "guard"
                         guard_dir.mkdir(parents=True, exist_ok=True)
-                        guard_baseline = guard_snapshot(effective_cwd, guard_patterns, guard_max_files)
+                        guard_baseline = guard_snapshot(
+                            effective_cwd,
+                            guard_patterns,
+                            guard_max_files,
+                            include_ignored=guard_include_ignored,
+                        )
                         atomic_write_json(guard_dir / "baseline.json", guard_baseline)
 
                     try:
@@ -3246,6 +3490,7 @@ def execute_task(
                                 allow_gh=allow_gh,
                                 allow_network=allow_network,
                                 policy=execution_policy,
+                                workspace_dirs=effective_workspace_dirs,
                             )
                         elif agent == "opencode":
                             res = invoke_opencode(
@@ -3264,6 +3509,7 @@ def execute_task(
                                 allow_gh=allow_gh,
                                 allow_network=allow_network,
                                 policy=execution_policy,
+                                workspace_dirs=effective_workspace_dirs,
                             )
                         elif agent == "antigravity":
                             res = invoke_antigravity(
@@ -3280,6 +3526,7 @@ def execute_task(
                                 child_env,
                                 recipe_flags=current_recipe_flags,
                                 policy=execution_policy,
+                                workspace_dirs=effective_workspace_dirs,
                             )
                         else:
                             res = {
@@ -3329,7 +3576,10 @@ def execute_task(
                             }
                         else:
                             guard_report = guard_verify(
-                                effective_cwd, guard_baseline, max_files=guard_max_files
+                                effective_cwd,
+                                guard_baseline,
+                                max_files=guard_max_files,
+                                include_ignored=guard_include_ignored,
                             )
                         atomic_write_json(guard_dir / "report.json", guard_report)
                         res["guard"] = {
@@ -3451,6 +3701,7 @@ def execute_task(
                         "effort": effort or route.get("variant"),
                         "sandbox_mode": effective_sandbox,
                         "cwd": effective_cwd,
+                        "workspace_dirs": effective_workspace_dirs,
                         "requested_model": res.get("requested_model") or route.get("requested_model") or route["model_id"],
                         "resolved_model": res.get("resolved_model") or route.get("resolved_model_id") or route["model_id"],
                         "observed_model": res.get("observed_model"),
@@ -3937,48 +4188,151 @@ def format_human_run_report(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _route_cost_index(route: dict[str, Any], default: float = 0.20) -> float:
+    """Coerce a route's cost index, tolerating null/absent catalog values."""
+    value = (route or {}).get("cost_index")
+    try:
+        return float(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _catalog_routes(route_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Index discovered catalog routes by lowercase route ID for the given agents."""
+    agents = sorted(
+        {route_id.split("/", 1)[0] for route_id in route_ids if "/" in route_id}
+    )
+    try:
+        catalog = collect_all_models(agents=agents or None, refresh=False)
+    except Exception:
+        return {}
+    index: dict[str, dict[str, Any]] = {}
+    for entry in (catalog or {}).values():
+        for route in entry.get("routes") or []:
+            route_id = str(route.get("route_id") or "").lower()
+            if route_id:
+                index[route_id] = dict(route)
+    return index
+
+
 def evaluate_cost_gate(
     num_calls: int,
     task_category: str = "general",
     run_id: str | None = None,
     include_fallback_allowance: bool = True,
+    route_str: str | None = None,
+    force_route: bool = False,
+    max_tier: int | None = None,
+    exclude_vendors: list[str] | None = None,
+    include_vendors: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Check whether a planned fan-out exceeds the cost/call confirmation gate."""
-    sel = select_routes(task=task_category, run_id=run_id)
-    top = sel.get("selected") or {}
-    fallbacks = sel.get("fallbacks") or []
-    unit_cost = float(top.get("cost_index", 0.20))
-    billing_mode = top.get("billing_mode") or "unknown"
-    cost_estimated = bool(top.get("cost_estimated", True))
+    """Check whether a planned fan-out exceeds the cost/call confirmation gate.
+
+    The estimate follows the plan the caller actually intends to run: an
+    explicit `--route`, the run's saved selection plan, or (as a last resort) an
+    auto-selected representative route. The last case is labelled `generic`,
+    because mixing models in a multi-round plan makes a single auto route a poor
+    proxy for the real cost.
+    """
+    selection_source = "auto"
+    plan_routes: list[dict[str, Any]] = []
+    top: dict[str, Any] = {}
+    fallbacks: list[dict[str, Any]] = []
+    estimate_scope = "generic auto-selected representative route (not a planned route)"
+
+    if route_str:
+        top = resolve_explicit_route(route_str, force_route=force_route)
+        selection_source = "explicit_route"
+        estimate_scope = f"explicit route {top.get('route_id')}"
+        if top.get("in_catalog") is False:
+            selection_source = "explicit_route_unverified"
+            estimate_scope = (
+                f"explicit route {top.get('route_id')} (unlisted model, family-prior cost)"
+            )
+        unit_cost = _route_cost_index(top)
+        billing_mode = top.get("billing_mode") or classify_route_billing(top)
+        cost_estimated = bool(top.get("cost_estimated", True))
+    else:
+        plan = load_selection_plan(run_id)
+        planned_ids = [str(step.get("route_id") or "").strip() for step in plan.get("steps") or []]
+        catalog_index = _catalog_routes(planned_ids)
+        resolved_plan = [
+            catalog_index[route_id.lower()]
+            for route_id in planned_ids
+            if route_id and route_id.lower() in catalog_index
+        ]
+        if resolved_plan:
+            selection_source = "saved_plan"
+            plan_routes = [
+                {
+                    "route_id": route.get("route_id"),
+                    "cost_index": _route_cost_index(route),
+                }
+                for route in resolved_plan
+            ]
+            unit_cost = round(
+                sum(_route_cost_index(route) for route in resolved_plan)
+                / len(resolved_plan),
+                3,
+            )
+            modes = {
+                str(route.get("billing_mode") or classify_route_billing(route))
+                for route in resolved_plan
+            }
+            billing_mode = modes.pop() if len(modes) == 1 else "mixed"
+            cost_estimated = any(bool(route.get("cost_estimated", True)) for route in resolved_plan)
+            estimate_scope = (
+                f"saved selection plan ({len(resolved_plan)} step(s): "
+                + ", ".join(str(route.get("route_id")) for route in resolved_plan)
+                + ")"
+            )
+        else:
+            sel = select_routes(
+                task=task_category,
+                run_id=run_id,
+                max_tier=max_tier,
+                exclude_vendors=exclude_vendors,
+                include_vendors=include_vendors,
+            )
+            top = sel.get("selected") or {}
+            fallbacks = sel.get("fallbacks") or []
+            unit_cost = _route_cost_index(top)
+            billing_mode = top.get("billing_mode") or "unknown"
+            cost_estimated = bool(top.get("cost_estimated", True))
 
     requires_orchestrator = num_calls >= 3
     orchestrator_calls = 1 if requires_orchestrator else 0
     effective_calls = num_calls + orchestrator_calls
 
     fallback_buffer = 0.0
-    if include_fallback_allowance and fallbacks:
-        fb_cost = float(fallbacks[0].get("cost_index", unit_cost))
+    if include_fallback_allowance:
+        fb_cost = _route_cost_index(fallbacks[0], unit_cost) if fallbacks else unit_cost
         fallback_buffer = round(0.15 * fb_cost * num_calls, 3)
 
     total_cost_idx = round(effective_calls * unit_cost + fallback_buffer, 3)
     requires_confirmation = (
         effective_calls >= COST_GATE_MAX_CALLS
         or total_cost_idx >= COST_GATE_MAX_COST_INDEX
-        or billing_mode == "unknown"
+        or billing_mode in ("unknown", "mixed")
     )
     est_tag = "estimated" if cost_estimated else "verified"
+    route_label = top.get("route_id") or f"{len(plan_routes)} planned route(s)"
     summary = (
         f"Planned fan-out: {num_calls} worker call(s)"
-        f"{' + 1 orchestrator' if requires_orchestrator else ''} on {top.get('route_id', 'auto')} "
-        f"(billing={billing_mode}, {est_tag} cost index {total_cost_idx:.2f}) — "
+        f"{' + 1 orchestrator' if requires_orchestrator else ''} on {route_label} "
+        f"(billing={billing_mode}, {est_tag} cost index {total_cost_idx:.2f}; "
+        f"scope: {estimate_scope}) — "
         f"{'CONFIRMATION REQUIRED' if requires_confirmation else 'within auto gate'}; "
         f"{'spawn dedicated orchestrator subagent' if requires_orchestrator else 'direct invocation allowed'}."
     )
-    return {
+    result = {
         "planned_worker_calls": num_calls,
         "orchestrator_calls": orchestrator_calls,
         "total_planned_calls": effective_calls,
         "primary_route": top.get("route_id"),
+        "selection_source": selection_source,
+        "estimate_scope": estimate_scope,
+        "planned_routes": plan_routes,
         "billing_mode": billing_mode,
         "cost_estimated": cost_estimated,
         "unit_cost_index": unit_cost,
@@ -3988,6 +4342,13 @@ def evaluate_cost_gate(
         "requires_orchestrator_subagent": requires_orchestrator,
         "summary": summary,
     }
+    if selection_source == "auto":
+        result["note"] = (
+            "No explicit --route and no saved selection plan were available, so the cost index "
+            "uses one auto-selected representative route. Re-run with --route or pass the run ID "
+            "whose plan was saved to price the actual work plan."
+        )
+    return result
 
 
 def main() -> int:
@@ -4101,6 +4462,17 @@ def main() -> int:
         "--context-file",
         action="append",
         help="Local file path pointer to include in the prompt so the subagent can read large inputs on demand.",
+    )
+    parser.add_argument(
+        "--add-dir",
+        action="append",
+        dest="add_dir",
+        help=(
+            "Extra directory the subagent may read outside --cwd (repeatable). Granted to "
+            "Antigravity and Claude Code via --add-dir and to OpenCode via an external_directory "
+            "allow rule; directories containing --context-file entries are added automatically. "
+            "Antigravity headless mode otherwise auto-denies those reads."
+        ),
     )
     parser.add_argument(
         "--reference",
@@ -4236,6 +4608,14 @@ def main() -> int:
         default=100_000,
         help="Guard fails closed above this many files; narrow --cwd or add --guard-exclude.",
     )
+    parser.add_argument(
+        "--guard-include-ignored",
+        action="store_true",
+        help=(
+            "Protect Git-ignored untracked files too. By default generated build/codegen "
+            "outputs are skipped so a focused test run does not report a false mutation."
+        ),
+    )
     parser.add_argument("--no-fallback", action="store_true", help="Disable automatic fallback chain on failure.")
     parser.add_argument("--dry-run", action="store_true", help="Print planned route and prompt paths without running.")
     parser.add_argument("--cost-gate", type=int, metavar="NUM_CALLS", help="Evaluate cost/call gate for NUM_CALLS fan-out.")
@@ -4258,7 +4638,22 @@ def main() -> int:
         return 0
 
     if args.cost_gate is not None:
-        gate = evaluate_cost_gate(args.cost_gate, task_category=args.task, run_id=args.run_id)
+        try:
+            gate = evaluate_cost_gate(
+                args.cost_gate,
+                task_category=args.task,
+                run_id=args.run_id,
+                route_str=args.route,
+                force_route=args.force_route,
+                max_tier=args.max_tier,
+                exclude_vendors=args.exclude_vendor,
+                include_vendors=args.include_vendor,
+            )
+        except ValueError as exc:
+            print(
+                json.dumps({"status": "error", "error": str(exc)}, indent=2, ensure_ascii=False)
+            )
+            return 2
         print(json.dumps(gate, indent=2, ensure_ascii=False))
         return 0
 
@@ -4301,6 +4696,7 @@ def main() -> int:
         context_files=args.context_file,
         references=args.reference,
         recommend_inspect=args.recommend_inspect,
+        workspace_dirs=args.add_dir,
         allow_gh=args.allow_gh,
         allow_network=args.allow_network,
         no_tools=args.no_tools,
@@ -4309,6 +4705,7 @@ def main() -> int:
         guard_enabled=args.guard,
         guard_excludes=args.guard_exclude,
         guard_max_files=args.guard_max_files,
+        guard_include_ignored=args.guard_include_ignored,
         task_summary=args.summary,
         outcome_summary=args.outcome_summary,
         significant=sig_flag,

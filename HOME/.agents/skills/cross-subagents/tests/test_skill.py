@@ -284,6 +284,57 @@ class TestCrossSubagents(unittest.TestCase):
             self.assertEqual(perm_actions.get("shell"), "deny")
             self.assertEqual(perm_actions.get("write"), "deny")
 
+    def test_opencode_read_only_grants_external_context_root(self):
+        from run import invoke_opencode
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        captured_env: dict[str, str] = {}
+        root = "/tmp/claude-1000/scratchpad"
+
+        def mock_run(cmd, prompt_text, cwd, timeout_sec, env=None):
+            captured_env.update(env or {})
+            return 0, '{"type": "step_finish"}', "", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+            invoke_opencode(
+                binary="echo",
+                route={
+                    "route_id": "opencode/opencode-go/kimi-k2.7-code",
+                    "model_id": "kimi-k2.7-code",
+                    "provider": "opencode-go",
+                },
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="read-only",
+                cwd=None,
+                timeout_sec=5,
+                child_env={},
+                recipe_flags={"cli_major": 2, "has_agent_flag": True},
+                policy={"allow_shell": True, "isolate": True},
+                workspace_dirs=[root],
+            )
+
+        cfg = json.loads(captured_env["OPENCODE_CONFIG_CONTENT"])
+        agent_rules = cfg["agents"]["review-shell"]["permissions"]
+        allows = [
+            rule
+            for rule in agent_rules
+            if rule["action"] == "external_directory"
+            and rule["resource"] == root + "/*"
+            and rule["effect"] == "allow"
+        ]
+        self.assertEqual(len(allows), 1)
+        # The catch-all deny must still be present and precede the allow rule.
+        deny_index = next(
+            i
+            for i, rule in enumerate(agent_rules)
+            if rule["action"] == "external_directory" and rule["resource"] == "*"
+        )
+        self.assertLess(deny_index, agent_rules.index(allows[0]))
+
     def test_record_native_task_schema_atomicity_and_locking(self):
         with tempfile.TemporaryDirectory() as td:
             run_id = "test-atomic-native"
@@ -803,6 +854,78 @@ class TestCrossSubagents(unittest.TestCase):
             # Verification applies the same exclusion to both maps.
             self.assertEqual(guard_verify(root, baseline)["status"], "clean")
 
+    def test_guard_ignored_path_matching_is_exact_for_files(self):
+        self.assertTrue(guard._is_ignored("dist/a.js", ["dist/"]))
+        self.assertTrue(guard._is_ignored("dist", ["dist/"]))
+        self.assertTrue(guard._is_ignored("debug.log", ["debug.log"]))
+        self.assertFalse(guard._is_ignored("debug.log.bak", ["debug.log"]))
+        self.assertFalse(guard._is_ignored("dist/a.js", ["dist"]))
+
+    def test_guard_skips_gitignored_build_outputs(self):
+        import shutil
+        import subprocess as sp
+
+        if shutil.which("git") is None:
+            self.skipTest("git is not installed")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            sp.run(["git", "init", "-q", str(root)], check=True)
+            ident = ["-c", "user.name=Test", "-c", "user.email=test@example.com"]
+            (root / ".gitignore").write_text("dist/\n*.log\n", encoding="utf-8")
+            (root / "src.txt").write_text("source", encoding="utf-8")
+            # A tracked file that happens to match an ignore pattern must stay
+            # protected: `git ls-files --others` only lists untracked entries.
+            (root / "tracked.log").write_text("tracked", encoding="utf-8")
+            sp.run(
+                ["git", "-C", str(root), "add", ".gitignore", "src.txt"], check=True
+            )
+            sp.run(
+                ["git", "-C", str(root), "add", "-f", "tracked.log"], check=True
+            )
+            sp.run(["git", "-C", str(root), *ident, "commit", "-qm", "init"], check=True)
+
+            baseline = guard_snapshot(root)
+            self.assertEqual(baseline["status"], "ok")
+            self.assertIn("src.txt", baseline["files"])
+            self.assertIn("tracked.log", baseline["files"])
+            self.assertEqual(baseline["ignored"], [])
+
+            (root / "dist").mkdir()
+            (root / "dist" / "bundle.js").write_text("generated", encoding="utf-8")
+            (root / "debug.log").write_text("log", encoding="utf-8")
+            report = guard_verify(root, baseline)
+            self.assertEqual(report["status"], "clean", report)
+
+            (root / "tracked.log").write_text("changed tracked file", encoding="utf-8")
+            report = guard_verify(root, baseline)
+            self.assertEqual(report["status"], "mutated")
+            self.assertIn("tracked.log", report["changed"])
+
+    def test_guard_can_protect_ignored_files_on_request(self):
+        import shutil
+        import subprocess as sp
+
+        if shutil.which("git") is None:
+            self.skipTest("git is not installed")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            sp.run(["git", "init", "-q", str(root)], check=True)
+            ident = ["-c", "user.name=Test", "-c", "user.email=test@example.com"]
+            (root / ".gitignore").write_text("dist/\n", encoding="utf-8")
+            (root / "src.txt").write_text("source", encoding="utf-8")
+            sp.run(["git", "-C", str(root), "add", ".gitignore", "src.txt"], check=True)
+            sp.run(["git", "-C", str(root), *ident, "commit", "-qm", "init"], check=True)
+
+            baseline = guard_snapshot(root, include_ignored=True)
+            self.assertEqual(baseline["status"], "ok")
+            self.assertEqual(baseline["ignored"], [])
+
+            (root / "dist").mkdir()
+            (root / "dist" / "bundle.js").write_text("generated", encoding="utf-8")
+            report = guard_verify(root, baseline, include_ignored=True)
+            self.assertEqual(report["status"], "mutated")
+            self.assertIn("dist/bundle.js", report["added"])
+
     def test_guard_detects_marker_content_change(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -994,6 +1117,98 @@ class TestCrossSubagents(unittest.TestCase):
             ("edit", "deny"),
             shell_rules,
         )
+
+    def test_opencode_external_directories_override_review_shell_deny(self):
+        root = "/tmp/claude-1000/scratchpad"
+        cfg, verified = opencode_read_only_config(
+            {}, major_ver=2, allow_shell=True, isolate=True, workspace_dirs=[root]
+        )
+        self.assertTrue(verified)
+
+        def last_rule(rules, action, resource):
+            matched = None
+            for rule in rules:
+                if rule["action"] == action and rule["resource"] == resource:
+                    matched = rule
+            return matched
+
+        self.assertEqual(
+            last_rule(cfg["permissions"], "external_directory", root + "/*")["effect"],
+            "allow",
+        )
+        agent_rules = cfg["agents"]["review-shell"]["permissions"]
+        # review-shell denies every external path first; the allow rule must
+        # come afterwards because OpenCode evaluates permissions last-match-wins.
+        self.assertEqual(
+            last_rule(agent_rules, "external_directory", "*")["effect"], "deny"
+        )
+        self.assertEqual(
+            last_rule(agent_rules, "external_directory", root + "/*")["effect"],
+            "allow",
+        )
+
+    def test_antigravity_shell_settings_merge_user_permissions(self):
+        user_settings = {
+            "permissions": {"deny": ["command(rm)"], "allow": ["read_file(/data/reference)"]}
+        }
+        with patch.object(run, "read_json_file", return_value=user_settings):
+            override = json.loads(run.antigravity_shell_permission_settings())
+
+        self.assertEqual(override["permissions"]["deny"], ["command(rm)"])
+        self.assertIn("read_file(/data/reference)", override["permissions"]["allow"])
+        self.assertIn("command(*)", override["permissions"]["allow"])
+        self.assertEqual(override["permissions"]["allow"].count("command(*)"), 1)
+
+    def test_antigravity_allow_shell_passes_settings_override(self):
+        from run import invoke_antigravity
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        result = {
+            "event": "result",
+            "result": {
+                "conversation_id": "conv-1",
+                "status": "SUCCESS",
+                "response": "ok",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        }
+        captured: dict[str, list[str]] = {}
+
+        def mock_run(cmd, prompt="", *args, **kwargs):
+            captured["cmd"] = list(cmd)
+            return 0, json.dumps(result), "warning: --mode plan has no effect", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run), patch.object(
+            run,
+            "read_json_file",
+            return_value={"permissions": {"allow": ["read_file(/data/reference)"]}},
+        ):
+            res = invoke_antigravity(
+                binary="echo",
+                route={
+                    "route_id": "antigravity/google/gemini-4-argon-high",
+                    "model_id": "gemini-4-argon-high",
+                    "canonical_key": "gemini-4-argon-high",
+                },
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="read-only",
+                cwd="/tmp/work",
+                timeout_sec=5,
+                child_env={},
+                policy={"allow_shell": True},
+            )
+
+        self.assertEqual(res["status"], "ok")
+        cmd = captured["cmd"]
+        self.assertIn("--settings", cmd)
+        settings = json.loads(cmd[cmd.index("--settings") + 1])
+        self.assertIn("command(*)", settings["permissions"]["allow"])
+        self.assertIn("read_file(/data/reference)", settings["permissions"]["allow"])
+        self.assertLess(cmd.index("--settings"), cmd.index("--print"))
 
     def test_tools_enforcement_reporting(self):
         self.assertIs(tools_enforcement("claude-code", {"no_tools": True}), True)
@@ -1978,6 +2193,238 @@ class TestCrossSubagents(unittest.TestCase):
         self.assertEqual(res["error_class"], "format")
         self.assertIn("no terminal result event", res["error"])
 
+    def test_antigravity_auto_denied_read_is_a_permission_failure(self):
+        from run import invoke_antigravity
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        tool_event = {
+            "event": "step_update",
+            "step_update": {
+                "tool_name": "read_file",
+                "tool_info": {
+                    "name": "read_file",
+                    "parameters": {"Path": "/home/dev/Projects/deno/libs/resolver/workspace.rs"},
+                },
+            },
+        }
+        result = {
+            "event": "result",
+            "result": {"conversation_id": "conv-1", "status": "SUCCESS", "response": ""},
+        }
+        stderr = (
+            'jetski: no output produced \u2014 a tool required the "read_file" permission that '
+            "headless mode cannot prompt for, so it was auto-denied."
+        )
+
+        def mock_run(cmd, prompt="", *args, **kwargs):
+            return 0, "\n".join([json.dumps(tool_event), json.dumps(result)]), stderr, False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+            res = invoke_antigravity(
+                binary="echo",
+                route={
+                    "route_id": "antigravity/google/gemini-4-argon-high",
+                    "model_id": "gemini-4-argon-high",
+                    "canonical_key": "gemini-4-argon-high",
+                },
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="workspace-write",
+                cwd="/tmp/work",
+                timeout_sec=5,
+                child_env={},
+            )
+
+        # An empty SUCCESS turn caused by auto-denied reads must not look like a
+        # protocol `format` error: that class is fallback-eligible and would
+        # silently swap the requested model for another one.
+        self.assertEqual(res["status"], "failed")
+        self.assertEqual(res["error_class"], "permission")
+        self.assertIn("--add-dir", res["error"])
+        denial = " ".join(res["denials_observed"])
+        self.assertIn("read_file", denial)
+        self.assertIn("/home/dev/Projects/deno/libs/resolver/workspace.rs", denial)
+
+    def test_antigravity_forwards_add_dir_for_external_roots(self):
+        from run import invoke_antigravity
+
+        attempt_dir = Path(tempfile.mkdtemp())
+        result = {
+            "event": "result",
+            "result": {
+                "conversation_id": "conv-1",
+                "status": "SUCCESS",
+                "response": "ANSWER",
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            },
+        }
+        captured: dict[str, list[str]] = {}
+
+        def mock_run(cmd, prompt="", *args, **kwargs):
+            captured["cmd"] = list(cmd)
+            return 0, json.dumps(result), "", False, True
+
+        with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+            res = invoke_antigravity(
+                binary="echo",
+                route={
+                    "route_id": "antigravity/google/gemini-4-argon-high",
+                    "model_id": "gemini-4-argon-high",
+                    "canonical_key": "gemini-4-argon-high",
+                },
+                prompt_text="dummy",
+                attempt_dir=attempt_dir,
+                resume_session_id=None,
+                effort=None,
+                keep_session=False,
+                sandbox_mode="workspace-write",
+                cwd="/tmp/work",
+                timeout_sec=5,
+                child_env={},
+                workspace_dirs=["/home/dev/Projects/deno", "/home/dev/Projects/fedify"],
+            )
+
+        self.assertEqual(res["status"], "ok")
+        cmd = captured["cmd"]
+        self.assertEqual(cmd.count("--add-dir"), 2)
+        self.assertIn("/home/dev/Projects/deno", cmd)
+        self.assertIn("/home/dev/Projects/fedify", cmd)
+
+    def test_normalize_workspace_dirs_adds_context_parents_and_skips_cwd(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            work = root / "work"
+            external = root / "external"
+            nested = external / "nested"
+            work.mkdir()
+            nested.mkdir(parents=True)
+            inside = work / "input.md"
+            inside.write_text("x", encoding="utf-8")
+            brief = external / "brief.md"
+            brief.write_text("x", encoding="utf-8")
+
+            dirs = run.normalize_workspace_dirs(
+                [str(nested), str(external), str(root / "missing")],
+                [str(brief), str(inside)],
+                str(work),
+            )
+
+            # The explicit root wins over its nested child, the directory
+            # holding a --context-file is added automatically, and anything
+            # already inside --cwd (or nonexistent) is dropped.
+            self.assertEqual(dirs, [str(external)])
+
+    def test_permission_failure_does_not_fall_back_to_another_model(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache = Path(td) / "cache"
+            repo = Path(td) / "repo"
+            repo.mkdir()
+            pinned = {
+                "route_id": "antigravity/google/gemini-4-argon-high",
+                "agent": "antigravity",
+                "provider": "google",
+                "model_id": "gemini-4-argon-high",
+                "canonical_key": "gemini-4-argon-high",
+                "official_model_id": "gemini-4-argon",
+                "quota_bucket": "antigravity:default",
+                "applicable_buckets": ["antigravity:default"],
+            }
+            weaker = {
+                "route_id": "opencode/google/gemini-3.8-flash",
+                "agent": "opencode",
+                "provider": "google",
+                "model_id": "gemini-3.8-flash",
+                "canonical_key": "gemini-3.8-flash",
+                "official_model_id": "gemini-3.8-flash",
+                "quota_bucket": "opencode:google",
+                "applicable_buckets": ["opencode:google"],
+            }
+            calls: list[str] = []
+
+            def fake_antigravity(binary, route, *args, **kwargs):
+                calls.append(route["route_id"])
+                return {
+                    "status": "failed",
+                    "exit_code": 0,
+                    "session_id": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                    "requested_model": route["model_id"],
+                    "resolved_model": route["model_id"],
+                    "observed_model": None,
+                    "session_cleaned_up": False,
+                    "cleanup_verified": True,
+                    "denials_observed": ["read_file: auto-denied"],
+                    "error_class": "permission",
+                    "error": "read_file: auto-denied; grant access with --add-dir",
+                }
+
+            def fake_opencode(binary, route, *args, **kwargs):
+                calls.append(route["route_id"])
+                return {
+                    "status": "ok",
+                    "exit_code": 0,
+                    "session_id": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                    "requested_model": route["model_id"],
+                    "resolved_model": route["model_id"],
+                    "observed_model": route["model_id"],
+                    "session_cleaned_up": True,
+                    "cleanup_verified": True,
+                    "error_class": None,
+                }
+
+            with patch.dict(os.environ, {"CROSS_SUBAGENTS_CACHE_DIR": str(cache)}), patch.object(
+                run, "resolve_explicit_route", return_value=dict(pinned)
+            ), patch.object(
+                run,
+                "resolve_pinned_fallback_constraints",
+                return_value={"scope": "planned_constraints"},
+            ), patch.object(
+                run,
+                "select_routes",
+                return_value={"status": "ok", "selected": dict(weaker), "fallbacks": []},
+            ), patch.object(
+                run,
+                "probe_all",
+                return_value={
+                    "agents": {
+                        "antigravity": {
+                            "usable": True,
+                            "binary": "true",
+                            "version": "1.4.12",
+                            "recipe_flags": {"has_mode": True, "has_sandbox": True},
+                        },
+                        "opencode": {
+                            "usable": True,
+                            "binary": "true",
+                            "version": "2.2.0",
+                            "recipe_flags": {"cli_major": 2},
+                        },
+                    }
+                },
+            ), patch.object(
+                run, "invoke_antigravity", side_effect=fake_antigravity
+            ), patch.object(
+                run, "invoke_opencode", side_effect=fake_opencode
+            ):
+                res = run.execute_task(
+                    run_id="permission-no-fallback-run",
+                    task_id="t1",
+                    route_str=pinned["route_id"],
+                    prompt_text="x",
+                    cwd=str(repo),
+                    sandbox_mode="workspace-write",
+                    force_route=True,
+                )
+
+            self.assertEqual(calls, [pinned["route_id"]])
+            self.assertEqual(res["status"], "failed")
+            self.assertEqual(res["error_class"], "permission")
+            self.assertEqual(res["route_id"], pinned["route_id"])
+
     def test_opencode_recovered_stream_error_is_a_warning(self):
         from run import invoke_opencode
 
@@ -2710,6 +3157,140 @@ class TestCrossSubagents(unittest.TestCase):
         )
         self.assertTrue(timed_out)
         self.assertTrue(cleanup)
+
+    def test_probe_prefers_a_supported_version_over_the_path_shim(self):
+        import probe
+
+        versions = {"/shims/opencode": "1.19.4", "/installs/2.2.2/opencode": "2.2.2"}
+        binary, version, probed = probe.select_supported_binary(
+            list(versions), 2, version_probe=versions.get
+        )
+        self.assertEqual((binary, version), ("/installs/2.2.2/opencode", "2.2.2"))
+        self.assertEqual(probed[0], ("/shims/opencode", "1.19.4"))
+
+        # With only an unsupported version, keep the probeable candidate so the
+        # caller can report the version it actually has.
+        binary, version, _ = probe.select_supported_binary(
+            ["/shims/opencode"], 2, version_probe=versions.get
+        )
+        self.assertEqual((binary, version), ("/shims/opencode", "1.19.4"))
+
+    def test_mise_version_candidates_scans_installed_versions(self):
+        import probe
+
+        with tempfile.TemporaryDirectory() as td:
+            data_dir = Path(td)
+            bin_dir = data_dir / "installs" / "opencode" / "2.2.2" / "node_modules" / ".bin"
+            bin_dir.mkdir(parents=True)
+            binary = bin_dir / "opencode"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            binary.chmod(0o755)
+            with patch.dict(os.environ, {"MISE_DATA_DIR": str(data_dir)}):
+                candidates = probe.mise_version_candidates("opencode")
+            self.assertEqual(candidates, [str(binary)])
+
+    def test_opencode_catalog_keeps_unverified_provider_as_hidden_route(self):
+        agent_info = {
+            "usable": True,
+            "target_usable": True,
+            "cli_major": 2,
+            "authenticated_providers": [{"provider": "deepseek", "auth_method": "key"}],
+        }
+        output = "deepseek/deepseek-flash\nkimi-code-plan-global/k3.1-pro\n"
+        fake = __import__("subprocess").CompletedProcess(
+            args=[], returncode=0, stdout=output, stderr=""
+        )
+        with patch.object(models, "run_cmd", return_value=fake):
+            routes, meta = models.collect_opencode_models("opencode", agent_info)
+
+        by_id = {route["route_id"]: route for route in routes}
+        kimi = by_id["opencode/kimi-code-plan-global/k3.1-pro"]
+        self.assertTrue(kimi.get("hidden"))
+        self.assertEqual(kimi["hidden_reason"], "unverified-provider-credentials")
+        self.assertEqual(meta["unverified_providers"], ["kimi-code-plan-global"])
+        self.assertFalse(by_id["opencode/deepseek/deepseek-flash"].get("hidden"))
+
+    def test_cost_gate_prices_an_explicit_route(self):
+        route = {
+            "route_id": "claude-code/anthropic/claude-fable-5-1",
+            "cost_index": 0.9,
+            "billing_mode": "subscription",
+            "cost_estimated": False,
+            "in_catalog": True,
+        }
+        with patch.object(run, "resolve_explicit_route", return_value=dict(route)), patch.object(
+            run, "select_routes"
+        ) as auto:
+            gate = run.evaluate_cost_gate(
+                3, task_category="architecture", route_str=route["route_id"]
+            )
+        auto.assert_not_called()
+        self.assertEqual(gate["selection_source"], "explicit_route")
+        self.assertEqual(gate["primary_route"], route["route_id"])
+        self.assertEqual(gate["unit_cost_index"], 0.9)
+        self.assertIn(route["route_id"], gate["summary"])
+
+    def test_cost_gate_prices_a_saved_selection_plan(self):
+        fable = "claude-code/anthropic/claude-fable-5-1"
+        sol = "codex/openai/gpt-6.1-sol"
+        plan = {
+            "steps": [
+                {"step": 1, "route_id": fable, "constraints": {}},
+                {"step": 2, "route_id": sol, "constraints": {}},
+            ]
+        }
+        index = {
+            fable.lower(): {
+                "route_id": fable,
+                "agent": "claude-code",
+                "provider": "anthropic",
+                "model_id": "claude-fable-5-1",
+                "cost_index": 1.0,
+                "auth_plan": "Claude Ultra",
+                "cost_estimated": False,
+            },
+            sol.lower(): {
+                "route_id": sol,
+                "cost_index": 0.5,
+                "billing_mode": "subscription",
+                "cost_estimated": False,
+            },
+        }
+        with patch.object(run, "load_selection_plan", return_value=plan), patch.object(
+            run, "_catalog_routes", return_value=index
+        ), patch.object(run, "select_routes") as auto:
+            gate = run.evaluate_cost_gate(4, run_id="plan-run")
+        auto.assert_not_called()
+        self.assertEqual(gate["selection_source"], "saved_plan")
+        self.assertEqual(gate["unit_cost_index"], 0.75)
+        self.assertEqual(gate["billing_mode"], "subscription")
+        self.assertEqual([entry["route_id"] for entry in gate["planned_routes"]], [fable, sol])
+
+    def test_claude_newer_plan_names_are_subscription_billing(self):
+        route = {
+            "agent": "claude-code",
+            "provider": "anthropic",
+            "model_id": "claude-fable-5-1",
+            "auth_plan": "Claude Ultra",
+        }
+        self.assertEqual(select_route.classify_route_billing(route), "subscription")
+        route["auth_plan"] = "key"
+        self.assertEqual(select_route.classify_route_billing(route), "api_metered")
+
+    def test_cost_gate_labels_a_generic_estimate(self):
+        selected = {
+            "route_id": "opencode/deepseek/deepseek-flash",
+            "cost_index": 0.2,
+            "billing_mode": "api_key",
+            "cost_estimated": True,
+        }
+        with patch.object(run, "load_selection_plan", return_value={}), patch.object(
+            run, "select_routes", return_value={"selected": selected, "fallbacks": []}
+        ):
+            gate = run.evaluate_cost_gate(2)
+        self.assertEqual(gate["selection_source"], "auto")
+        self.assertIn("not a planned route", gate["estimate_scope"])
+        self.assertIn("note", gate)
 
 
 if __name__ == "__main__":

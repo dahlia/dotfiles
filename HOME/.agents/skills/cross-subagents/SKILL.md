@@ -263,6 +263,8 @@ Follow three rules when writing every subagent task prompt:
     in `meta.json`). Never paste large source files, diffs, or logs inline.
     Instead, save or reference them as separate files, grant the subagent file
     read access (`Read`), and pass their paths via `--context-file <path>`.
+    Directories containing those context files are granted to agents that scope
+    tool access to the working directory, so external snapshots stay readable.
 3.  **Provide primary source pointers (`--reference`) and recommend inspection
     when valuable (`--recommend-inspect`).** When the root session relies on
     issue tracker items (issues, related issues, or discussions), pull requests,
@@ -304,6 +306,17 @@ limited to the primary route's own vendor unless `--include-vendor` gives a
 wider allow-list. Pass `--no-fallback` when a user gate requires that exact
 model or nothing.
 
+When the task prompt points at checkouts or files outside `--cwd` (a dependency
+checkout, a sibling repository, a scratchpad snapshot), pass `--add-dir <path>`
+(repeatable). Antigravity's headless mode auto-denies `read_file` for paths
+outside the workspace in every sandbox posture and returns an empty `SUCCESS`
+turn, Claude Code restricts tool access to its working directories, and OpenCode
+rejects external paths through its `external_directory` permission; `run.py`
+grants the roots through each CLI's mechanism. Directories containing
+`--context-file` entries are added automatically. Codex needs no equivalent
+because its sandbox restricts writes, not reads, so the directory is already
+readable there.
+
 Three flags shape the execution posture:
 
  -  `--no-tools` is the tool-free posture for prose and other text-only review.
@@ -316,6 +329,8 @@ Three flags shape the execution posture:
     guaranteed.
  -  `--allow-shell` keeps editing tools denied but permits shell commands in
     read-only mode, for inspection and focused tests in a code review.
+    Antigravity needs a session `--settings` allow-rule for this, which
+    `run.py` supplies; its `--sandbox` still enforces a read-only filesystem.
  -  `--isolate` suppresses ambient behavior in read-only execution: Claude safe
     mode and strict MCP, OpenCode instruction/skill plugins and
     share/update/snapshots off, Codex rules off. Use it for reviewers that must
@@ -349,6 +364,17 @@ turn or a missing answer fails. Ordinary command output is never treated as
 evidence of a denial, so a failing test or a file that happens to contain the
 word "permission" cannot fail a task. Inspect the list when the answer looks
 short, and tell the user when a refusal plausibly changed the result.
+
+Antigravity's headless mode cannot open an approval prompt, so a tool call not
+covered by an allow-rule is auto-denied; the turn still ends with
+`status: SUCCESS` and an empty response, and the only evidence is a
+`jetski: no output produced` note on stderr. `run.py` classifies that as
+`permission` (not the fallback-eligible `format`), records the denied tool and
+target in `denials_observed`, and stops instead of switching to another model,
+because the gap is deterministic. Re-run with `--add-dir <path>` for a read, or
+add an Antigravity `permissions.allow` rule. `--allow-shell` is granted
+automatically through a session `--settings` override (`command(*)`); the
+sandbox still mounts a read-only filesystem in read-only mode.
 
 When an attempt fails but did produce text (for example a turn that stopped
 before `turn.completed`), `meta.json` points at it with `attempt_result_file`
@@ -437,9 +463,14 @@ python3 <skill-dir>/scripts/run.py --run-id <run-id> --task-id <task-id> \
 The guard is opt-in and costs one tree walk plus hashing per attempt. It
 records file contents, modes, symlink targets (including directory symlinks),
 HEAD, the index, packed-refs, and the contents of in-progress merge/rebase
-markers. An attempt whose process group cannot be confirmed gone is treated as
-`guard_failed`, because a surviving descendant could still write after
-verification. It does not cover Git object storage,
+markers. Git-ignored untracked paths (`dist/`, `.svelte-kit/`, compiled test
+bundles) are skipped by default, because a read-only reviewer that runs a
+focused build regenerates them and they are derived artifacts, not protected
+inputs; tracked files stay protected even when an ignore pattern matches them.
+Pass `--guard-include-ignored` to protect ignored files as well. An attempt
+whose process group cannot be confirmed gone is treated as `guard_failed`,
+because a surviving descendant could still write after verification. It does
+not cover Git object storage,
 reflogs, external symlink targets, or the Git metadata of nested repositories,
 and it fails closed above `--guard-max-files` (default 100000). It can also run
 standalone: `python3 <skill-dir>/scripts/guard.py snapshot|verify`. The guard is
@@ -553,7 +584,12 @@ batch:
  -  Run
     `python3 <skill-dir>/scripts/run.py --cost-gate <num_calls> --task <category>`
     before any fan-out. Print the estimated call count and cost index, and ask
-    for user confirmation when dispatching 5 or more calls.
+    for user confirmation when dispatching 5 or more calls. The estimate follows
+    the plan you intend to run: pass `--route <agent>/<provider>/<model>` for a
+    specific model or `--run-id <run-id>` to price the saved selection plan
+    (`selection_source: explicit_route|saved_plan`). Without either, the result
+    is labelled `auto` and its `note` says the index is a generic representative
+    route, not the work plan; treat it as a rough gate, not a route estimate.
  -  For 3 or more parallel subagents, spawn one orchestrator subagent to manage
     the fan-out and return a consolidated summary so the main session context
     stays clean.

@@ -90,10 +90,11 @@ Review the diff in `fix-412.patch` ...
 Keep the inline prompt short. `run.py` warns (`prompt_size_warning`) when a task
 prompt exceeds 8,000 characters. Write large inputs (diffs, logs, specs,
 previous subagent results) to files and pass them with `--context-file`;
-`run.py` appends a pointer list to the prompt. The subagent needs read access to
-those paths, which every sandbox mode grants for the working directory. Put
-files outside the working directory under it or under
-`$SKILL_CACHE_DIR/runs/<run-id>/` so read-only sandboxes can still reach them.
+`run.py` appends a pointer list to the prompt and grants the containing
+directory to agents that scope tool access to the working directory. Files may
+also live under `$SKILL_CACHE_DIR/runs/<run-id>/` (inside the run) or outside
+`--cwd`; when a path outside the working tree is not covered by `--context-file`
+(an external checkout the prompt names), pass its directory with `--add-dir`.
 
 ### Primary source pointers
 
@@ -266,8 +267,15 @@ Cost gate and observability
 Before launching a parallel fan-out, run:
 
 ~~~~ bash
-python3 <skill-dir>/scripts/run.py --cost-gate <num_calls> --task <category>
+python3 <skill-dir>/scripts/run.py --cost-gate <num_calls> --task <category> \
+  [--route <agent>/<provider>/<model>] [--run-id <run-id>]
 ~~~~
+
+`--route` prices that exact model (resolved from the catalog), and `--run-id`
+prices the routes saved in that run's `selection-plan.json` (the mean unit cost
+across planned steps, listed under `planned_routes`). Without either, the JSON
+is labelled `selection_source: "auto"` and its `note` states that the estimate
+is a generic representative route rather than the work plan.
 
 Print the one-line summary showing the planned call count, primary route, and
 estimated cost index. If the fan-out involves 5 or more calls (or exceeds the
