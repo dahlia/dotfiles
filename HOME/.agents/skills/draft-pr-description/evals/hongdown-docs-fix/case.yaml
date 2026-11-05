@@ -1,0 +1,5 @@
+name: hongdown-docs-fix
+description: >
+  Small documentation change in an English-only repository with no PR template.
+  Tests the why/how body, italic paths, house punctuation, outside-repo save,
+  hongdown formatting, and clipboard copy.
