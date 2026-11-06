@@ -108,7 +108,7 @@ def tree(root, allowed, tracked, nested_roots=None):
 def metadata(root, marker=True):
     # Git paths can live outside the working directory in a linked worktree,
     # and a submodule's live in the superproject's .git/modules.
-    names = ['HEAD', 'index', 'refs', 'config', 'config.worktree', 'commondir', 'packed-refs',
+    names = ['HEAD', 'index', 'config', 'config.worktree', 'commondir', 'packed-refs',
              'MERGE_HEAD', 'MERGE_MSG', 'MERGE_MODE', 'ORIG_HEAD',
              'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'AUTO_MERGE',
              'rebase-merge', 'rebase-apply', 'sequencer', 'info/sparse-checkout']
@@ -118,15 +118,50 @@ def metadata(root, marker=True):
     shared_names = {path.name for path in sorted(index.parent.glob('sharedindex.*'))}
     names.extend(sorted(shared_names))
     result, paths = {}, {}
+    # Refs belong to the shared repository, so another linked worktree may
+    # change them without changing this checkout. Protect only HEAD's symbolic
+    # chain and resolved object, independent of loose/packed storage.
+    current, chain = 'HEAD', []
+    while True:
+        if current in [entry[0] for entry in chain] or len(chain) >= 32:
+            raise ValueError('cyclic or excessively deep HEAD symbolic ref')
+        try:
+            target = os.fsdecode(git(root, 'symbolic-ref', '--quiet', '--no-recurse', current)).strip()
+        except subprocess.CalledProcessError as error:
+            if error.returncode != 1:
+                raise
+            break
+        chain.append([current, target])
+        if target not in names:
+            names.append(target)
+        current = target
+    try:
+        resolved = os.fsdecode(git(root, 'rev-parse', '--verify', '--quiet', 'HEAD')).strip()
+    except subprocess.CalledProcessError as error:
+        if error.returncode != 1:
+            raise
+        # An unborn branch has no object yet, but malformed refs must not
+        # silently look like an unborn branch.
+        if not chain:
+            raise ValueError('cannot resolve detached HEAD') from error
+        try:
+            git(root, 'show-ref', '--verify', '--quiet', current)
+        except subprocess.CalledProcessError as ref_error:
+            if ref_error.returncode != 1:
+                raise
+        resolved = None
+    result['head-refs'] = chain
+    result['head-object'] = resolved
+    ref_names = {entry[1] for entry in chain}
     for name in names:
         path = Path(os.fsdecode(git(root, 'rev-parse', '--git-path', name)).strip())
         if not path.is_absolute():
             path = root / path
         paths[name] = path
-        if name in shared_names:
-            # Back these up for recovery but do not compare raw bytes: Git
-            # rewrites a shared index during a stat refresh even when staging
-            # is unchanged. The semantic index below covers real changes.
+        if name in shared_names or name in ref_names or name == 'packed-refs':
+            # Preserve recovery inputs without comparing storage bytes: ref
+            # packing and shared-index refreshes do not change review inputs.
+            # Semantic HEAD and index state cover the relevant changes.
             continue
         if path.exists() or path.is_symlink():
             if name == 'index':
@@ -152,7 +187,6 @@ def metadata(root, marker=True):
     if marker and (marker_path.is_file() or marker_path.is_symlink()):
         result['git-marker'] = record(marker_path)
         paths['git-marker'] = marker_path
-    result['refs-list'] = os.fsdecode(git(root, 'for-each-ref', '--format=%(refname) %(objectname) %(symref)'))
     return result, paths
 
 

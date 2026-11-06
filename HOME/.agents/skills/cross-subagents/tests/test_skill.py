@@ -60,6 +60,82 @@ from run import (
 
 
 class TestCrossSubagents(unittest.TestCase):
+    def test_antigravity_individual_quota_isolated_from_other_models(self):
+        opus = common.normalize_model_route("antigravity", "anthropic", "claude-opus-5-5-high")
+        low = common.normalize_model_route("antigravity", "anthropic", "claude-opus-5-5-low")
+        gemini = common.normalize_model_route("antigravity", "google", "gemini-4-argon-high")
+        # Resumed sessions and catalogs saved before model scopes were added.
+        for route in (opus, low, gemini):
+            route["applicable_buckets"] = ["antigravity:default"]
+        error = "RESOURCE_EXHAUSTED (code 429): Individual quota reached."
+        with tempfile.TemporaryDirectory() as td, patch.dict(
+            os.environ, {"CROSS_SUBAGENTS_CACHE_DIR": td}
+        ):
+            bucket = quota.quota_observation_bucket(opus, error)
+            quota.record_quota_observation(bucket, error)
+            state = quota.overlay_observations({"buckets": {}, "agents": {"antigravity": {}}})
+            self.assertEqual(bucket, "antigravity:model:claude-opus-5-5")
+            self.assertTrue(evaluate_route_quota(opus, state["buckets"], False)["exhausted"])
+            self.assertTrue(evaluate_route_quota(low, state["buckets"], False)["exhausted"])
+            self.assertFalse(evaluate_route_quota(gemini, state["buckets"], False)["exhausted"])
+            # Shared subscription exhaustion must still block both models.
+            error = "Subscription quota reached"
+            bucket = quota.quota_observation_bucket(opus, error)
+            self.assertEqual(bucket, "antigravity:default")
+            quota.record_quota_observation(bucket, error)
+            state = quota.overlay_observations({"buckets": {}, "agents": {"antigravity": {}}})
+            self.assertTrue(evaluate_route_quota(gemini, state["buckets"], False)["exhausted"])
+
+    def test_antigravity_legacy_individual_observation_does_not_block_shared_pool(self):
+        with tempfile.TemporaryDirectory() as td, patch.dict(
+            os.environ, {"CROSS_SUBAGENTS_CACHE_DIR": td}
+        ):
+            quota.record_quota_observation("antigravity:default", "Individual quota reached")
+            state = quota.overlay_observations({"buckets": {}, "agents": {"antigravity": {}}})
+            self.assertNotIn("antigravity:default", state["buckets"])
+
+    def test_antigravity_individual_quota_allows_in_run_fallback(self):
+        opus = common.normalize_model_route("antigravity", "anthropic", "claude-opus-5-5-high")
+        gemini = common.normalize_model_route("antigravity", "google", "gemini-4-argon-high")
+        # Exercise the old cached-route representation too.
+        opus["applicable_buckets"] = gemini["applicable_buckets"] = ["antigravity:default"]
+        calls = []
+
+        def invoke(binary, route, prompt, attempt_dir, *args, **kwargs):
+            calls.append(route["route_id"])
+            success = route["provider"] == "google"
+            if success:
+                (attempt_dir / "result.md").write_text("review complete", encoding="utf-8")
+            return {
+                "status": "ok" if success else "quota", "exit_code": 0 if success else 3,
+                "error_class": None if success else "quota",
+                "error": None if success else "Individual quota reached",
+                "session_id": "gemini-session" if success else None,
+                "usage": {}, "requested_model": route["model_id"],
+                "resolved_model": route["model_id"],
+                "observed_model": route["model_id"] if success else None,
+                "session_cleaned_up": False, "cleanup_verified": True,
+            }
+
+        with tempfile.TemporaryDirectory() as td, patch.dict(
+            os.environ, {"CROSS_SUBAGENTS_CACHE_DIR": str(Path(td) / "cache")}
+        ), patch.object(run, "select_routes", return_value={
+            "status": "ok", "selected": opus, "fallbacks": [gemini],
+            "rationale": "test selection",
+        }), patch.object(run, "probe_all", return_value={"agents": {"antigravity": {
+            "usable": True, "binary": "true", "version": "1.4.12",
+            "recipe_flags": {"has_mode": True, "has_sandbox": True},
+        }}}), patch.object(run, "invoke_antigravity", side_effect=invoke):
+            result = run.execute_task(
+                run_id="individual-quota", task_id="review", prompt_text="review", cwd=td,
+                sandbox_mode="workspace-write", keep_session=True,
+            )
+            self.assertEqual(result["status"], "ok", result)
+            self.assertEqual(result["route_id"], gemini["route_id"])
+            self.assertEqual(calls, [opus["route_id"], gemini["route_id"]])
+            state = quota.overlay_observations({"buckets": {}, "agents": {"antigravity": {}}})
+            self.assertFalse(evaluate_route_quota(gemini, state["buckets"], False)["exhausted"])
+
     def test_colon_sanitization_and_normalization(self):
         cases = [
             ("qwen2.5-coder:latest", "qwen2.5-coder-latest"),

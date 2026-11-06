@@ -38,6 +38,7 @@ from common import (
     ensure_child_path,
     get_cache_dir,
     infer_applicable_quota_buckets,
+    route_quota_buckets,
     infer_model_vendor as infer_vendor_from_common,
     infer_model_family,
     is_bare_generation_prefix,
@@ -1015,9 +1016,7 @@ def evaluate_route_quota(
     agent_stale: bool,
 ) -> dict[str, Any]:
     """Evaluate all applicable quota buckets for a route (e.g. session + weekly + model-specific)."""
-    app_buckets = route.get("applicable_buckets") or infer_applicable_quota_buckets(
-        route["agent"], route["provider"], route["canonical_key"], route["model_id"]
-    )
+    app_buckets = route_quota_buckets(route)
     exhausted_buckets: list[str] = []
     max_scarcity = 0.0
     max_imminence = 0.0

@@ -246,7 +246,10 @@ it archives protected files, tracks nested repositories and Git metadata, and
 writes a per-attempt report under `$WORK`. Read-only Git inspection
 (`git status`, `git diff`) can refresh the index stat cache; the guard compares
 staged entries semantically, so that refresh is not a mutation. Staging,
-unstaging or changing a staged entry still is.
+unstaging or changing a staged entry still is. HEAD, its symbolic ref chain,
+and its resolved commit remain protected, including in nested repositories.
+Changes to unrelated shared refs from other worktrees and ref packing do not
+invalidate the review; loose/packed ref storage is compared by its HEAD meaning.
 
 Pick the prompt template from `references/review-prompts.md`:
 

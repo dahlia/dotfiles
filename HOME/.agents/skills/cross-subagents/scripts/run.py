@@ -52,6 +52,7 @@ from common import (
     file_lock,
     get_cache_dir,
     infer_applicable_quota_buckets,
+    route_quota_buckets,
     is_bare_generation_prefix,
     locked_update_json,
     make_bounded_instance_id,
@@ -74,7 +75,7 @@ from probe import (
     probe_all,
     strip_ansi,
 )
-from quota import collect_quota, record_quota_observation
+from quota import collect_quota, record_quota_observation, quota_observation_bucket
 from registry import acquire_lease, heartbeat_lease, is_pid_alive, release_lease
 from select_route import (
     check_route_eligibility,
@@ -263,6 +264,8 @@ def normalize_workspace_dirs(
     workspace_dirs: list[str] | None,
     context_files: list[str] | None,
     cwd: str,
+    *,
+    include_cwd: bool = False,
 ) -> list[str]:
     """Resolve extra roots a subagent may touch outside `cwd`.
 
@@ -271,6 +274,8 @@ def normalize_workspace_dirs(
     so a sandbox that only allows tool access inside `cwd` would silently make
     those pointers unreadable. Explicit `--add-dir` paths take precedence and
     are pruned to the shallowest roots to keep the child command line short.
+    `include_cwd` retains the process cwd when a resumed session's tool project
+    can still point at a different checkout.
     """
     base = Path(cwd)
 
@@ -284,8 +289,10 @@ def normalize_workspace_dirs(
             return None
         if path.is_file():
             path = path.parent
-        if not path.is_dir() or path == base:
+        if not path.is_dir():
             return None
+        if path == base:
+            return path if include_cwd else None
         try:
             path.relative_to(base)
         except ValueError:
@@ -293,7 +300,7 @@ def normalize_workspace_dirs(
         return None
 
     roots: list[Path] = []
-    for raw in list(workspace_dirs or []) + list(context_files or []):
+    for raw in list(workspace_dirs or []) + list(context_files or []) + ([cwd] if include_cwd else []):
         if not str(raw).strip():
             continue
         resolved = _resolve(str(raw))
@@ -2038,6 +2045,26 @@ def antigravity_shell_permission_settings() -> str:
     return json.dumps({"permissions": permissions}, ensure_ascii=False)
 
 
+def _antigravity_native_timeout(stderr_text: str, result_error: Any, finished_reason: Any) -> bool:
+    """Recognize CLI deadline metadata, without searching agent/tool output."""
+    if finished_reason == "print_timeout":
+        return True
+    errors = [result_error] if isinstance(result_error, dict) else []
+    for line in stderr_text.splitlines():
+        if not line.strip().startswith("AGY_ERROR:"):
+            continue
+        try:
+            error = json.loads(line.strip()[len("AGY_ERROR:"):].strip())
+        except (ValueError, TypeError):
+            continue
+        if isinstance(error, dict):
+            errors.append(error)
+    return any(
+        error.get("reason") == "print_timeout" or error.get("status") == "DEADLINE_EXCEEDED"
+        for error in errors
+    )
+
+
 def invoke_antigravity(
     binary: str,
     route: dict[str, Any],
@@ -2178,6 +2205,7 @@ def invoke_antigravity(
     response_text = ""
     result_status = None
     result_error = None
+    finished_reason = None
     observed_model: str | None = None
     stream_models: list[str] = []
     denials_observed: list[str] = []
@@ -2218,6 +2246,7 @@ def invoke_antigravity(
             raw_status = res_obj.get("status")
             result_status = str(raw_status).strip().upper() if raw_status is not None else None
             result_error = res_obj.get("error")
+            finished_reason = res_obj.get("finished_reason")
             if res_obj.get("model"):
                 stream_models.append(str(res_obj["model"]))
                 if not observed_model:
@@ -2244,7 +2273,10 @@ def invoke_antigravity(
             + " model changed within the stream: "
             + ", ".join(sorted(set(stream_models)))
         ).strip()
-    if timed_out:
+    native_timeout = _antigravity_native_timeout(err, result_error, finished_reason)
+    if timed_out or native_timeout:
+        if response_text:
+            (attempt_dir / "partial_result.md").write_text(response_text + "\n", encoding="utf-8")
         return {
             "status": "timeout",
             "exit_code": code,
@@ -2258,7 +2290,7 @@ def invoke_antigravity(
             "cleanup_note": cleanup_note,
             "denials_observed": denials_observed,
             "error_class": "timeout",
-            "error": "Execution timed out.",
+            "error": (err_combined[:500] or "Antigravity print timeout.") if native_timeout else "Execution timed out.",
         }
     if observed_model and not _verify_model_match(resolved_model, route["canonical_key"], observed_model):
         return {
@@ -3023,7 +3055,13 @@ def execute_task(
             )
             prompt_sha256 = hashlib.sha256(combined_prompt.encode("utf-8")).hexdigest()
             effective_workspace_dirs = normalize_workspace_dirs(
-                workspace_dirs, context_files, effective_cwd
+                workspace_dirs, context_files, effective_cwd,
+                # OpenCode retains its session's original tool project even
+                # when the invoking process moves to another --cwd. Grant
+                # the requested checkout explicitly, including on subsequent
+                # resumes whose saved cwd already reflects the new checkout.
+                include_cwd=bool(resume_session_id and route_str and
+                                 canonical_agent_name(route_str.split('/')[0]) == 'opencode'),
             )
 
             task_norm = task_category.strip().lower().replace("-", "_")
@@ -3345,12 +3383,7 @@ def execute_task(
                                 guard_patterns.append(pattern)
 
             for route_idx, route in enumerate(route_chain):
-                route_buckets = set(
-                    route.get("applicable_buckets")
-                    or infer_applicable_quota_buckets(
-                        route["agent"], route["provider"], route["canonical_key"], route["model_id"]
-                    )
-                )
+                route_buckets = set(route_quota_buckets(route))
                 if exhausted_buckets and (route_buckets & exhausted_buckets):
                     continue
 
@@ -3616,8 +3649,12 @@ def execute_task(
                     maintenance_notice: dict[str, Any] | None = None
                     if res.get("error_class") in ("quota", "auth"):
                         if res.get("error_class") == "quota":
-                            record_quota_observation(route["quota_bucket"], res.get("error") or "Rate limit reached")
-                        exhausted_buckets.add(route["quota_bucket"])
+                            error = res.get("error") or "Rate limit reached"
+                            bucket = quota_observation_bucket(route, error)
+                            record_quota_observation(bucket, error)
+                        else:
+                            bucket = route["quota_bucket"]
+                        exhausted_buckets.add(bucket)
                     elif res.get("error_class") in ("no_option", "format"):
                         prev_recipe_flags = dict(current_recipe_flags)
                         current_recipe_flags, maintenance_notice = _perform_self_repair(

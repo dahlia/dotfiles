@@ -47,7 +47,8 @@ Examples of distinct routes:
  -  `opencode/opencode-go/glm-5.1` and `opencode/opencode-go/kimi-k2.6`
     (OpenCode Go subscription, `opencode:opencode-go` bucket)
  -  `antigravity/anthropic/claude-opus-5-5-high` (Antigravity subscription,
-    `antigravity:default` bucket; normalized official model ID:
+    `antigravity:default` shared bucket and `antigravity:model:claude-opus-5-5`
+    individual bucket; normalized official model ID:
     `claude-opus-5-5`)
 
 If only a single route is usable on the machine and no cross-model
@@ -444,7 +445,7 @@ before deciding whether to retry or fall back.
 For a read-only review where a silent edit would invalidate the verdict, pass
 `--guard`. `run.py` hashes the working tree and Git state before the attempt,
 verifies them afterwards, and writes `attempt-<N>/guard/baseline.json` and
-`report.json`. A changed, added, or removed file, or any Git state change,
+`report.json`. A changed, added, or removed file, or a protected Git state change,
 turns the attempt into `status: failed` with `error_class: mutated` (or
 `guard_failed` when verification itself could not run); the task then stops
 instead of falling back and reviewing a different tree. If the baseline cannot
@@ -462,10 +463,11 @@ python3 <skill-dir>/scripts/run.py --run-id <run-id> --task-id <task-id> \
 
 The guard is opt-in and costs one tree walk plus hashing per attempt. It
 records file contents, modes, symlink targets (including directory symlinks),
-HEAD, the index, packed-refs, and the contents of in-progress merge/rebase
-markers. Git-ignored untracked paths (`dist/`, `.svelte-kit/`, compiled test
-bundles) are skipped by default, because a read-only reviewer that runs a
-focused build regenerates them and they are derived artifacts, not protected
+HEAD and its resolved current branch, the index, and the contents of in-progress
+merge/rebase markers. Unrelated shared refs and loose/packed ref storage changes
+do not invalidate the review. Git-ignored untracked paths (`dist/`,
+`.svelte-kit/`, compiled test bundles) are skipped by default, because a read-only
+reviewer that runs a focused build regenerates them and they are derived artifacts, not protected
 inputs; tracked files stay protected even when an ignore pattern matches them.
 Pass `--guard-include-ignored` to protect ignored files as well. An attempt
 whose process group cannot be confirmed gone is treated as `guard_failed`,

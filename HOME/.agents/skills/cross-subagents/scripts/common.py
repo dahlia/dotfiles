@@ -946,10 +946,21 @@ def infer_applicable_quota_buckets(
     if agent == "opencode":
         return [f"opencode:{provider}"]
     if agent == "antigravity":
-        return ["antigravity:default"]
+        model_key = normalize_official_model_id(model_id or canonical_key)[0]
+        return [f"antigravity:model:{model_key}", "antigravity:default"]
     return [f"{agent}:{provider}"]
 
 
 def infer_default_quota_bucket(agent: str, provider: str, canonical_key: str) -> str:
     """Infer primary quota bucket identifier for a route."""
     return infer_applicable_quota_buckets(agent, provider, canonical_key)[-1]
+
+
+def route_quota_buckets(route: dict[str, Any]) -> list[str]:
+    """Include newly introduced scopes even for routes saved by older versions."""
+    if route["agent"] != "antigravity" and route.get("applicable_buckets"):
+        return list(route["applicable_buckets"])
+    inferred = infer_applicable_quota_buckets(
+        route["agent"], route["provider"], route["canonical_key"], route.get("model_id")
+    )
+    return list(dict.fromkeys([*(route.get("applicable_buckets") or []), *inferred]))

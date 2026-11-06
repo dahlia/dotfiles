@@ -12,7 +12,8 @@ What is recorded:
     SHA-256, mode, size, and symlink target. Directory symlinks are recorded
     but never traversed;
   * Git state for the root repository: HEAD (ref and resolved commit), the
-    index, packed-refs, and the contents of in-progress merge/rebase markers.
+    index and the contents of in-progress merge/rebase markers. Unrelated
+    shared refs and changes to their loose/packed storage are not compared.
 
 Git-ignored untracked paths (generated build and codegen outputs such as
 `dist/`, `.svelte-kit/`, or compiled test bundles) are skipped by default: a
@@ -341,14 +342,6 @@ def git_state(root: Path) -> dict[str, Any]:
             "gitdir": str(gitdir),
             "error": f"cannot read Git index: {index_error}",
         }
-    packed = common_dir / "packed-refs"
-    packed_digest, packed_error = _sha256_file(packed) if packed.is_file() else (None, None)
-    if packed_error:
-        return {
-            "is_repo": True,
-            "gitdir": str(gitdir),
-            "error": f"cannot read packed-refs: {packed_error}",
-        }
     markers = {}
     for name in (
         "MERGE_HEAD",
@@ -380,7 +373,6 @@ def git_state(root: Path) -> dict[str, Any]:
         "head_ref": head_ref,
         "head_sha": resolved,
         "index_sha256": index_digest,
-        "packed_refs_sha256": packed_digest,
         "state_markers": markers,
     }
 
@@ -513,7 +505,6 @@ def _git_changes(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
         "head_ref",
         "head_sha",
         "index_sha256",
-        "packed_refs_sha256",
     ):
         if before.get(key) != after.get(key):
             changes.append(f"git:{key}")

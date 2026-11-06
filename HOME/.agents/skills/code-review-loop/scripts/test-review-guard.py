@@ -128,8 +128,69 @@ class GuardTests(unittest.TestCase):
         with tarfile.open(str(self.prefix) + '.backup.tar') as archive:
             self.assertTrue(any(name.startswith('git/sharedindex.') for name in archive.getnames()))
 
-    def test_ref_change_is_detected(self):
-        self.assertEqual(self.run_guard("import subprocess; subprocess.run(['git','branch','unexpected'],check=True)"), 40)
+    def test_unrelated_ref_creation_is_allowed(self):
+        self.assertEqual(self.run_guard("import subprocess; subprocess.run(['git','branch','unexpected'],check=True)"), 0)
+
+    def test_current_branch_object_change_is_detected(self):
+        self.git('commit', '--allow-empty', '-qm', 'second')
+        self.assertEqual(self.run_guard("import subprocess; subprocess.run(['git','update-ref','HEAD','HEAD~1'],check=True)"), 40)
+        self.assertIn('git:head-object', self.changes())
+
+    def test_current_branch_switch_at_same_commit_is_detected(self):
+        self.assertEqual(self.run_guard("import subprocess; subprocess.run(['git','checkout','-qb','other'],check=True)"), 40)
+        self.assertIn('git:HEAD', self.changes())
+
+    def test_other_worktree_commit_is_allowed(self):
+        other = self.base / 'other'
+        self.git('worktree', 'add', '-q', '-b', 'other', str(other))
+        code = ("import subprocess; subprocess.run(['git','-C'," + repr(str(other)) +
+                ",'commit','--allow-empty','-qm','other commit'],check=True)")
+        self.assertEqual(self.run_guard(code), 0)
+
+    def test_linked_checkout_ignores_main_worktree_commit(self):
+        original = self.root
+        linked = self.base / 'linked'
+        self.git('worktree', 'add', '-q', '-b', 'linked', str(linked))
+        self.root = linked
+        code = ("import subprocess; subprocess.run(['git','-C'," + repr(str(original)) +
+                ",'commit','--allow-empty','-qm','main commit'],check=True); "
+                "subprocess.run(['git','pack-refs','--all','--prune'],check=True)")
+        self.assertEqual(self.run_guard(code), 0)
+
+    def test_symbolic_head_chain_change_is_detected(self):
+        branch = self.git('symbolic-ref', 'HEAD').decode().strip()
+        self.git('symbolic-ref', 'refs/heads/alias', branch)
+        self.git('symbolic-ref', 'HEAD', 'refs/heads/alias')
+        self.git('branch', 'other')
+        code = "import subprocess; subprocess.run(['git','symbolic-ref','refs/heads/alias','refs/heads/other'],check=True)"
+        self.assertEqual(self.run_guard(code), 40)
+        self.assertIn('git:head-refs', self.changes())
+        self.assertNotIn('git:head-object', self.changes())
+
+    def test_ref_packing_is_allowed(self):
+        self.git('branch', 'other')
+        self.assertEqual(self.run_guard("import subprocess; subprocess.run(['git','pack-refs','--all','--prune'],check=True)"), 0)
+
+    def test_unrelated_packed_ref_update_and_delete_are_allowed(self):
+        self.git('branch', 'other')
+        self.git('pack-refs', '--all', '--prune')
+        self.assertEqual(self.run_guard("import subprocess; subprocess.run(['git','branch','-D','other'],check=True); subprocess.run(['git','pack-refs','--all','--prune'],check=True)"), 0)
+
+    def test_packed_current_branch_change_is_detected(self):
+        self.git('commit', '--allow-empty', '-qm', 'second')
+        self.git('pack-refs', '--all', '--prune')
+        code = "import subprocess; subprocess.run(['git','update-ref','HEAD','HEAD~1'],check=True); subprocess.run(['git','pack-refs','--all','--prune'],check=True)"
+        self.assertEqual(self.run_guard(code), 40)
+        self.assertIn('git:head-object', self.changes())
+
+    def test_detached_head_change_is_detected(self):
+        self.git('commit', '--allow-empty', '-qm', 'second')
+        self.git('checkout', '-q', '--detach')
+        self.assertEqual(self.run_guard("import subprocess; subprocess.run(['git','update-ref','HEAD','HEAD~1'],check=True)"), 40)
+
+    def test_unborn_branch_is_allowed(self):
+        self.git('checkout', '-q', '--orphan', 'unborn')
+        self.assertEqual(self.run_guard('pass'), 0)
 
     def test_allowed_output_and_nonzero_exit(self):
         self.assertEqual(self.run_guard("from pathlib import Path; Path('cache').mkdir(); Path('cache/output').write_text('ok'); print('test failed'); raise SystemExit(7)", ['cache']), 7)
@@ -216,7 +277,7 @@ class GuardTests(unittest.TestCase):
         (nested / 'file').write_text('nested file')
         subprocess.check_output(['git', '-C', str(nested), 'add', 'file'])
         subprocess.check_output(['git', '-C', str(nested), 'commit', '-qm', 'initial'])
-        self.assertEqual(self.run_guard("import subprocess; subprocess.run(['git','-C','nested','branch','unexpected'],check=True)"), 40)
+        self.assertEqual(self.run_guard("import subprocess; subprocess.run(['git','-C','nested','checkout','-qb','unexpected'],check=True)"), 40)
         self.assertTrue(any(change.startswith('git[nested]:') for change in self.changes()))
         with tarfile.open(str(self.prefix) + '.backup.tar') as archive:
             names = archive.getnames()

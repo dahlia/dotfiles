@@ -32,6 +32,7 @@ from common import (
     get_cache_dir,
     locked_update_json,
     now_iso,
+    normalize_official_model_id,
     parse_iso_age_seconds,
     read_json_file,
     validate_safe_identifier,
@@ -561,6 +562,16 @@ def get_observations_file() -> Path:
     return d / "observations.json"
 
 
+def quota_observation_bucket(route: dict[str, Any], error_text: str) -> str:
+    """Only an explicit individual limit narrows Antigravity's shared scope."""
+    if route["agent"] == "antigravity":
+        if re.search(r"\bindividual\s+(?:model\s+)?quota\b", error_text, re.IGNORECASE):
+            key = normalize_official_model_id(route["model_id"])[0]
+            return f"antigravity:model:{key}"
+        return "antigravity:default"
+    return route["quota_bucket"]
+
+
 def record_quota_observation(bucket_id: str, error_text: str, reset_seconds: int | None = None) -> dict[str, Any]:
     """Record an observed rate-limit / 429 event under an exclusive file lock."""
     obs_file = get_observations_file()
@@ -650,8 +661,8 @@ def overlay_observations(payload: dict[str, Any]) -> dict[str, Any]:
     obs_buckets = obs_data.get("buckets") or {}
 
     now_ts = int(time.time())
-    agents_map = out.get("agents") or {}
-    all_buckets = out.get("buckets") or {}
+    agents_map = out.setdefault("agents", {})
+    all_buckets = out.setdefault("buckets", {})
 
     # First ensure any expired persisted overlay in out is stripped
     for b_id, b_val in list(all_buckets.items()):
@@ -663,6 +674,13 @@ def overlay_observations(payload: dict[str, Any]) -> dict[str, Any]:
 
     for b_id, obs in obs_buckets.items():
         if not isinstance(obs, dict):
+            continue
+        # Older versions attributed individual errors to the shared pool without
+        # recording a model. That observation cannot identify an affected route;
+        # discard its overbroad veto and let the next attempt learn its scope.
+        if b_id == "antigravity:default" and re.search(
+            r"\bindividual\s+(?:model\s+)?quota\b", str(obs.get("error_excerpt") or ""), re.IGNORECASE
+        ):
             continue
         backoff_until = obs.get("backoff_until_epoch") or obs.get("resets_at_epoch")
         if not isinstance(backoff_until, int) or backoff_until <= now_ts:

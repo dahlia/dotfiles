@@ -206,3 +206,9 @@ rules are appended after any broad `external_directory: deny` (the `review-shell
 agent previously denied every external path, which made `/tmp/...` snapshots
 unreadable). Reads inside an allowed directory follow the workspace defaults;
 the explicit `edit`/`write`/`patch` denials and `.env` read denials still apply.
+
+Resumed sessions can retain their original tool project when `--cwd` changes.
+For OpenCode resumes, `run.py` also grants the effective `--cwd` as an external
+directory, even when it matches a saved follow-up cwd. This preserves access
+to the requested checkout across repeated resumes without removing read-only
+tool restrictions.

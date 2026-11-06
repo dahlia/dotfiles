@@ -47,6 +47,13 @@ Notice two properties of Antigravity's model catalog:
     `openai`) from `canonical_key` so cross-vendor diversity filters and
     canonical survey lookups match routes from Claude Code, Codex, and OpenCode.
 
+Shared quota errors use `antigravity:default`. An explicit individual quota
+error uses `antigravity:model:<normalized-model-id>` instead, so an Opus limit
+does not block Gemini. Effort variants share the model bucket. Eligibility
+checks include both scopes, including for routes cached before model buckets
+were introduced. Legacy individual errors attributed to the shared bucket are
+ignored because they do not identify the affected model.
+
 
 Subagent invocation and stdin delivery
 --------------------------------------
@@ -90,6 +97,13 @@ The output stream emits `{"event":"init","conversation_id":"..."}`,
 `{"event":"step_update",...}`, and a final
 `{"event":"result","result":{"conversation_id":"...","status":"SUCCESS","response":"...","usage":{...}}}`
 line.
+
+The native print deadline can exit with code 0 without a terminal result.
+`run.py` recognizes structured `AGY_ERROR` metadata with `reason: print_timeout`
+or `status: DEADLINE_EXCEEDED`, and a terminal `finished_reason: print_timeout`,
+as `error_class: timeout`. It preserves any returned partial response and skips
+CLI protocol repair; a missing result without deadline metadata remains a
+format failure.
 
 
 Read access outside the working directory
