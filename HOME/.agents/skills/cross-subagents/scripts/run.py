@@ -2260,6 +2260,14 @@ def invoke_antigravity(
                 denial = _tool_denial(candidate)
                 if denial:
                     denials_observed.append(denial)
+        # Current streams announce the model in init.init.model even when the
+        # terminal result omits it. Include it in substitution/change checks.
+        if ev.get("event") == "init" and isinstance(ev.get("init"), dict):
+            init_model = ev["init"].get("model")
+            if isinstance(init_model, str) and init_model.strip():
+                stream_models.append(init_model.strip())
+                if not observed_model:
+                    observed_model = init_model.strip()
         if ev.get("model"):
             stream_models.append(str(ev["model"]))
             if not observed_model:
