@@ -86,24 +86,30 @@ One-shot invocation (leaves no entry in the user's interactive session picker):
 ~~~~ bash
 claude -p --model <model-or-alias> \
   --effort <low|medium|high|xhigh|max> \
-  --output-format json \
+  --output-format stream-json --verbose \
   --no-session-persistence \
   --dangerously-skip-permissions \
   < <prompt-file> > <claude-output.json> 2> <stderr.log>
 ~~~~
 
-Extract `.result` for the response text, `.usage` (`input_tokens`,
-`output_tokens`) for token accounting, `.is_error` for error status, and
-`.modelUsage` to verify the exact model ID that served the request (ignoring
-internal `claude-haiku-*` bookkeeping entries). `modelUsage` can also list
-auxiliary models used by subagents; treat the requested model as verified when
-it appears in the map, and only report substitution when it is absent and a
+Read terminal `type: result` events from the NDJSON stream. Use the last result
+whose `origin.kind` is not `task-notification` as the prompt response. Background
+task notifications can arrive after the answer; retain them in `warnings`
+instead of publishing them as the task answer. If only notification results
+arrive, report a format failure. The selected result must have
+`subtype: success`, a nonempty `.result`, and no `.is_error`.
+
+Sum `.usage.input_tokens` and `.usage.output_tokens` across result events.
+Do not sum `.modelUsage`, which is cumulative session accounting. Verify the
+requested model against the selected prompt result's `.modelUsage`, ignoring
+internal `claude-haiku-*` bookkeeping entries. Auxiliary models can appear in
+that map; report substitution only when the requested model is absent and a
 different non-Haiku model is present.
 
-The CLI emits a single JSON document, but warnings can precede it on stdout.
-Parse the last valid JSON object rather than slicing from the first `{` to the
-last `}`; `run.py` does this and reports `Format` failures with an explicit
-"not valid JSON" message when nothing parses.
+`--verbose` is required for `--output-format stream-json`. Plain `json` output
+can retain only the final background notification and discard the prompt answer.
+`run.py` preserves the stream in `claude_output.json`, tolerates preceding stdout
+warnings, and also accepts legacy single-result JSON payloads.
 
 Coroutine invocation and resumption:
 
@@ -117,7 +123,7 @@ Coroutine invocation and resumption:
 claude -p --resume <session-id> \
   --model <model-or-alias> \
   --effort <level> \
-  --output-format json \
+  --output-format stream-json --verbose \
   --dangerously-skip-permissions \
   < <followup-prompt-file> > <claude-output.json> 2> <stderr.log>
 ~~~~

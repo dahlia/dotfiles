@@ -158,16 +158,10 @@ def _denied_flag(container: Any) -> bool:
     return False
 
 
-def _find_last_json_object(text: str) -> dict[str, Any] | None:
-    """Return the last JSON object in `text`, tolerating surrounding noise.
-
-    Some CLIs prepend warnings (or emit more than one JSON document) on
-    stdout. Slicing from the first `{` to the last `}` then fails to parse a
-    perfectly good payload, which used to turn a completed run into a
-    `format` failure with a misleading "subtype=None" message.
-    """
+def _find_json_objects(text: str) -> list[dict[str, Any]]:
+    """Decode top-level JSON objects in order, tolerating surrounding CLI noise."""
     decoder = json.JSONDecoder()
-    found: dict[str, Any] | None = None
+    found: list[dict[str, Any]] = []
     index = text.find("{")
     while index != -1:
         try:
@@ -176,9 +170,15 @@ def _find_last_json_object(text: str) -> dict[str, Any] | None:
             index = text.find("{", index + 1)
             continue
         if isinstance(obj, dict):
-            found = obj
+            found.append(obj)
         index = text.find("{", index + max(end, 1))
     return found
+
+
+def _find_last_json_object(text: str) -> dict[str, Any] | None:
+    """Return the last JSON object, tolerating noise and multiple documents."""
+    objects = _find_json_objects(text)
+    return objects[-1] if objects else None
 
 
 def _int_or_zero(value: Any) -> int:
@@ -1155,7 +1155,9 @@ def invoke_claude_code(
         cmd.append("--add-dir")
         cmd.extend(extra_roots)
 
-    cmd.extend(["--output-format", "json"])
+    # JSON mode retains only the last result, which may answer a background
+    # notification rather than our prompt. Stream mode preserves every result.
+    cmd.extend(["--output-format", "stream-json", "--verbose"])
 
     code, out, err, timed_out, cleanup_verified = run_process_with_timeout(
         cmd, prompt_text, cwd, timeout_sec, env=child_env
@@ -1172,18 +1174,33 @@ def invoke_claude_code(
     observed_models: list[str] = []
     payload_parsed = False
 
+    warnings: list[str] = []
     cleaned_out = strip_ansi(out).strip()
-    payload = _find_last_json_object(cleaned_out)
-    if isinstance(payload, dict):
+    results = [
+        obj for obj in _find_json_objects(cleaned_out)
+        if obj.get("type") == "result"
+        or ("type" not in obj and "subtype" in obj)  # Legacy JSON payloads.
+    ]
+    payload = None
+    for terminal in results:
         payload_parsed = True
+        u = terminal.get("usage") or {}
+        # usage is per result; modelUsage is cumulative across the session and
+        # must not be summed (or used to verify a notification's answering model).
+        usage["input_tokens"] += _int_or_zero(u.get("input_tokens"))
+        usage["output_tokens"] += _int_or_zero(u.get("output_tokens"))
+        denials_observed.extend(terminal.get("permission_denials") or [])
+        origin = terminal.get("origin") or {}
+        if origin.get("kind") == "task-notification":
+            warnings.append("Claude background task notification: " + json.dumps(terminal, ensure_ascii=False))
+        else:
+            payload = terminal
+
+    if payload is not None:
         session_id = payload.get("session_id") or session_id
         is_error = bool(payload.get("is_error", False))
         subtype = payload.get("subtype")
-        denials_observed = payload.get("permission_denials") or []
         result_text = (payload.get("result") or "").strip()
-        u = payload.get("usage") or {}
-        usage["input_tokens"] = _int_or_zero(u.get("input_tokens"))
-        usage["output_tokens"] = _int_or_zero(u.get("output_tokens"))
         m_usage = payload.get("modelUsage")
         if isinstance(m_usage, dict):
             observed_models = [str(k) for k in m_usage.keys()]
@@ -1223,6 +1240,7 @@ def invoke_claude_code(
             "exit_code": code or 1,
             "session_id": session_id,
             "usage": usage,
+            "warnings": warnings,
             "requested_model": requested_model,
             "resolved_model": resolved_model,
             "observed_model": observed_primary,
@@ -1243,6 +1261,7 @@ def invoke_claude_code(
             "exit_code": code,
             "session_id": session_id,
             "usage": usage,
+            "warnings": warnings,
             "requested_model": requested_model,
             "resolved_model": resolved_model,
             "observed_model": observed_primary,
@@ -1259,6 +1278,7 @@ def invoke_claude_code(
             "exit_code": code or 1,
             "session_id": session_id,
             "usage": usage,
+            "warnings": warnings,
             "requested_model": requested_model,
             "resolved_model": resolved_model,
             "observed_model": observed_primary,
@@ -1286,6 +1306,7 @@ def invoke_claude_code(
             "exit_code": code,
             "session_id": session_id,
             "usage": usage,
+            "warnings": warnings,
             "requested_model": requested_model,
             "resolved_model": resolved_model,
             "observed_model": observed_primary,
@@ -1300,7 +1321,8 @@ def invoke_claude_code(
                 "Claude output was not valid JSON."
                 if not payload_parsed
                 else (
-                    "Claude JSON payload had no result or subtype field."
+                    "Claude output had no prompt-response result."
+                    if payload is None else "Claude JSON payload had no result or subtype field."
                     if subtype is None and not result_text
                     else f"Claude terminal subtype={subtype!r} (expected 'success')."
                 )
@@ -1313,6 +1335,8 @@ def invoke_claude_code(
         "exit_code": 0,
         "session_id": session_id,
         "usage": usage,
+        "warnings": warnings,
+        "denials_observed": denials_observed,
         "requested_model": requested_model,
         "resolved_model": resolved_model,
         "observed_model": observed_primary,
