@@ -385,6 +385,17 @@ add an Antigravity `permissions.allow` rule. `--allow-shell` is granted
 automatically through a session `--settings` override (`command(*)`); the
 sandbox still mounts a read-only filesystem in read-only mode.
 
+`--allow-shell` therefore does not make every command succeed. When the
+sandbox blocks part of a command (typically a task runner creating its state
+directory), Antigravity's tool runner prints its own `There were sandbox
+errors` notice ahead of the command's output and the command exits non-zero
+while the turn still completes. `run.py` reads that notice — only from the
+runner-composed header, never from the command's output — and records a
+`sandbox blocked the command` entry, with the command line and the OS error,
+in `denials_observed`. A review that retried the check successfully still
+carries the entry, so treat a non-empty list as a reason to confirm the
+required checks ran rather than as noise.
+
 When an attempt fails but did produce text (for example a turn that stopped
 before `turn.completed`), `meta.json` points at it with `attempt_result_file`
 (`attempts/attempt-<N>/result.md` or `partial_result.md`). Read that file

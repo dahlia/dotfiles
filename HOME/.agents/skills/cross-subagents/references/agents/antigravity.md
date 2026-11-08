@@ -169,6 +169,28 @@ alone for mechanical enforcement (it enforces a read-only filesystem), and on
 allow-rules for the inspection tools the run needs. Inspect `denials_observed`
 when a read-only run looks incomplete.
 
+A command that needs to write inside that filesystem fails with the sandbox's
+own error (`Read-only file system (os error 30)`, for example a task runner
+creating its state directory) while the turn still completes. When the
+sandbox blocks part of a command, the runner prepends its own notice to the
+result:
+
+~~~~ text
+Command exited with code 1.
+
+There were sandbox errors that may or may not be related to the failure. If
+you think the failure is because of running in the sandbox, you can run the
+command again with `BypassSandbox` set to true to request explicit user
+permission.
+~~~~
+
+`scripts/run.py` recognizes that notice in the runner-composed header — the
+command's own output sits behind a `Command output:` line and is never
+scanned — and records `run_command: sandbox blocked the command` with the
+command line and OS error in `denials_observed`. The entry survives a
+successful retry, so a non-empty list means the first attempt lost its writes
+and the check deserves confirmation.
+
 For coroutine resumption across turns, pass `--conversation <conversation_id>`
 before `--print ""`.
 

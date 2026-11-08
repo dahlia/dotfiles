@@ -260,6 +260,61 @@ def _antigravity_auto_denial(
     return detail
 
 
+# The Antigravity tool runner composes its own `run_command` result: an exit
+# line, optionally this notice, and then the command's output behind a
+# `Command output:` header. Only the notice belongs to the runner, so it is
+# structured evidence that the sandbox blocked part of the call — even when the
+# command itself failed for an unrelated reason. A command that merely prints
+# the same words places them after the header and stays opaque.
+ANTIGRAVITY_SANDBOX_NOTICE = (
+    "there were sandbox errors that may or may not be related to the failure"
+)
+# The runner writes its notice ahead of the `Command output:` header, so only
+# that short prefix needs to be inspected.
+ANTIGRAVITY_SANDBOX_HEADER_MAX_CHARS = 1000
+ANTIGRAVITY_SANDBOX_REASON_MARKERS = (
+    "read-only file system",
+    "operation not permitted",
+    "permission denied",
+)
+
+
+def _antigravity_sandbox_denial(
+    tool: str | None, tool_info: Any
+) -> str | None:
+    """Describe a sandbox restriction Antigravity's tool runner reported.
+
+    Read-only mode still mounts a read-only filesystem and grants `command(*)`
+    through a settings override, so a command that needs to write (for example
+    a task runner creating its state directory) fails inside the sandbox while
+    the turn itself completes. Without this record the denial is invisible in
+    `meta.json` and a review can look clean even though a required check was
+    blocked.
+    """
+    if not isinstance(tool_info, dict):
+        return None
+    output = tool_info.get("output")
+    if not isinstance(output, str) or not output.strip():
+        return None
+    header = output.split("Command output:", 1)[0][:ANTIGRAVITY_SANDBOX_HEADER_MAX_CHARS]
+    if ANTIGRAVITY_SANDBOX_NOTICE not in header.lower():
+        return None
+
+    name = tool or tool_info.get("name") or "run_command"
+    detail = f"{name}: sandbox blocked the command"
+    params = tool_info.get("parameters")
+    if isinstance(params, dict):
+        command_line = params.get("CommandLine") or params.get("command")
+        if isinstance(command_line, str) and command_line.strip():
+            detail += f" `{command_line.strip()[:120]}`"
+    for line in output.splitlines():
+        lowered = line.lower()
+        if any(marker in lowered for marker in ANTIGRAVITY_SANDBOX_REASON_MARKERS):
+            detail += f" ({line.strip()[:160]})"
+            break
+    return detail
+
+
 def normalize_workspace_dirs(
     workspace_dirs: list[str] | None,
     context_files: list[str] | None,
@@ -2254,6 +2309,9 @@ def invoke_antigravity(
                     "name": tool_name,
                     "parameters": info.get("parameters") if isinstance(info, dict) else None,
                 }
+                sandbox_denial = _antigravity_sandbox_denial(tool_name, info)
+                if sandbox_denial and sandbox_denial not in denials_observed:
+                    denials_observed.append(sandbox_denial)
         for key in ("step", "step_update", "tool", "result"):
             candidate = ev.get(key)
             if isinstance(candidate, dict):

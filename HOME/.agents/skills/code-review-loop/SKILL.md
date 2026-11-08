@@ -304,7 +304,8 @@ cat "$PREFIX.exit"
 jq -r '.status, .changes' "$PREFIX.guard.json"
 jq -r '.status, .error_class, .cleanup_verified, .official_agent,
        .official_model_id, .model_verified, (.observed_model // "-"),
-       (.permission_denials // [] | length), (.result_file // "-")' "$PREFIX.stdout"
+       (.denials_observed // .permission_denials // [] | length),
+       (.result_file // "-")' "$PREFIX.stdout"
 ~~~~
 
 Pass `--prompt-file` explicitly: `run.py` prefers a cached task prompt over
@@ -320,7 +321,8 @@ A round is usable only when **all** of these hold:
  -  `$PREFIX.guard.json` has `"status": "unchanged"`;
  -  `$PREFIX.stdout` parses as JSON with `"status": "ok"`;
  -  `cleanup_verified` is `true`;
- -  `permission_denials` is empty (when the adapter reports it);
+ -  `denials_observed` is empty (older adapter output names the same list
+    `permission_denials`; accept either, and read the count printed above);
  -  `result_file` exists and its trimmed text is non-empty.
 
 `guard.json` status `mutated` (exit 40) or a guard failure (exit 2) stops the
@@ -337,9 +339,13 @@ unavailable: re-plan it (above) or stop. `timeout`, `transient` or `failed`
 gets one fresh-prefix retry with `--prompt-file` pointing at the current
 prompt; a second failure ends that step.
 
-A non-empty `permission_denials` is **blocked**, never clean: the reviewer was
-refused a tool and may have reviewed whatever it managed to read. Its findings
-are still worth triaging, but a blocked round that says
+A non-empty `denials_observed` (or the same list under its older
+`permission_denials` name) is **blocked**, never clean: the reviewer was
+refused a tool or the sandbox blocked part of a call, so it may have reviewed
+whatever it managed to read. Antigravity's read-only sandbox is the common
+case: `run.py` records `run_command: sandbox blocked the command ...` when the
+runner reports a sandbox error, and that entry survives a successful retry.
+The round's findings are still worth triaging, but a blocked round that says
 `NO ACTIONABLE FINDINGS` is unknown.
 
 Clean sentinel: the trimmed `result_file` is exactly
