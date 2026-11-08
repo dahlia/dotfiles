@@ -300,6 +300,13 @@ a restatement of the title. The reviewer has read both.
  -  Refer to issues and pull requests by number alone (`#123`,
     `owner/repo#123`). Forges link those automatically, and a manual link
     breaks when the number is wrong.
+ -  Inside a list item that number is all you need, at least on GitHub: `#123`
+    renders as the number, the title, and the state, so restating the title
+    there wastes the sentence. Outside a list the reference stays bare, so name
+    the issue when the reader has to know what it is.
+ -  Write a commit hash as a plain full hash, with no backticks and no
+    hand-written link. GitHub links a full hash in the body on its own, a
+    backticked hash suppresses that link, and a short hash is ambiguous.
  -  Link manually only when the target lives on another forge, for example a
     Codeberg issue referenced from a GitHub PR.
  -  When pointing at a single comment inside a discussion, use the comment
