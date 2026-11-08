@@ -45,13 +45,16 @@ with a file-writing tool.
 
 ## Select and invoke
 
-Select a prose-capable model from another vendor. `--max-tier 2` keeps the
-review off the most expensive flagship; copy-editing does not need the
-strongest model in the catalog.
+Select a prose-capable model from another vendor. `--max-cost-index 0.10` caps
+the normalized route cost after billing-mode adjustment; it keeps copy-editing
+on mid-tier models and off flagship routes such as GPT-6 Astra or Claude Fable.
+The selector's own cost term is a soft weight, so without this cap the
+highest-fit flagship keeps winning. Do not substitute `--max-tier 2` for the
+cap: that threshold still admits tier-1 flagships.
 
 ~~~~ bash
 python3 "$CROSS/scripts/select_route.py" \
-  --task prose --max-tier 2 --exclude-vendor "$AUTHOR_VENDOR" \
+  --task prose --max-cost-index 0.10 --exclude-vendor "$AUTHOR_VENDOR" \
   --human > "$review_dir/selection.txt" || exit 1
 ROUTE=$(python3 - "$review_dir/selection.txt" <<'PY'
 import re, sys
@@ -139,7 +142,7 @@ EXCLUDE_ARGS+=(--exclude-route "$FAILED_ROUTE" \
                --exclude-vendor "$FAILED_VENDOR")
 
 if NEW=$(python3 "$CROSS/scripts/select_route.py" \
-           --task prose --max-tier 2 "${EXCLUDE_ARGS[@]}" --human); then
+           --task prose --max-cost-index 0.10 "${EXCLUDE_ARGS[@]}" --human); then
   printf '%s\n' "$NEW" > "$review_dir/selection.txt"
   ROUTE=$(printf '%s\n' "$NEW" | head -1 | awk '{print $1}')
 else

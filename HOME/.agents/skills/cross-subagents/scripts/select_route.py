@@ -925,6 +925,7 @@ PLAN_CONSTRAINT_KEYS = (
     "exclude_route",
     "include_vendor",
     "max_tier",
+    "max_cost_index",
     "quality_floor",
     "min_context",
     "require_modality",
@@ -1225,6 +1226,7 @@ def select_routes(
     exclude_vendors: list[str] | None = None,
     include_vendors: list[str] | None = None,
     max_tier: int | None = None,
+    max_cost_index: float | None = None,
     exclude_route_ids: list[str] | None = None,
     exclude_canonical_keys: list[str] | None = None,
     exclude_buckets: list[str] | None = None,
@@ -1426,6 +1428,23 @@ def select_routes(
             kept.append(candidate)
         candidates = kept
 
+    if max_cost_index is not None:
+        kept = []
+        for candidate in candidates:
+            if candidate["cost_index"] > max_cost_index:
+                filtered_out.append(
+                    {
+                        "route_id": candidate["route_id"],
+                        "reason": (
+                            f"cost_index:{candidate['cost_index']}"
+                            f">max_cost_index:{max_cost_index}"
+                        ),
+                    }
+                )
+                continue
+            kept.append(candidate)
+        candidates = kept
+
     candidates.sort(
         key=lambda c: (
             round(c["score"], 2),
@@ -1448,6 +1467,7 @@ def select_routes(
             "task": task_norm,
             "quality_floor": floor,
             "max_tier": max_tier,
+            "max_cost_index": max_cost_index,
             "selected": None,
             "fallbacks": [],
             "filtered_count": len(filtered_out),
@@ -1505,6 +1525,7 @@ def select_routes(
         "task": task_norm,
         "quality_floor": floor,
         "max_tier": max_tier,
+        "max_cost_index": max_cost_index,
         "rationale": selected["rationale"],
         "selected": selected,
         "fallbacks": fallbacks,
@@ -1517,6 +1538,7 @@ STEP_SPEC_KEYS = frozenset(
         "task",
         "speed",
         "max_tier",
+        "max_cost_index",
         "quality_floor",
         "min_context",
         "min_headroom",
@@ -1578,11 +1600,13 @@ def parse_step_spec(raw: str) -> dict[str, Any]:
                 raise ValueError(f"step spec field '{key}' must be an integer") from exc
             if key == "max_tier" and parsed[key] < 1:
                 raise ValueError("step spec field 'max_tier' must be at least 1")
-        elif key in ("quality_floor", "min_headroom"):
+        elif key in ("quality_floor", "min_headroom", "max_cost_index"):
             try:
                 parsed[key] = float(value)
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"step spec field '{key}' must be a number") from exc
+            if key == "max_cost_index" and not (0.0 <= parsed[key] <= 1.0):
+                raise ValueError("step spec field 'max_cost_index' must be between 0.0 and 1.0")
         elif key in ("allow_micro_quota", "allow_estimated_capabilities", "require_vision"):
             parsed[key] = bool(value)
         else:
@@ -1661,6 +1685,7 @@ def select_step_plan(
             exclude_vendors=exclude_vendors,
             include_vendors=merged.get("include_vendor"),
             max_tier=merged.get("max_tier"),
+            max_cost_index=merged.get("max_cost_index"),
             exclude_route_ids=sorted(excluded_routes),
             exclude_canonical_keys=sorted(used_canonicals),
             exclude_buckets=sorted(used_buckets) if require_distinct_bucket else None,
@@ -1701,6 +1726,7 @@ def select_step_plan(
                     "exclude_agent": exclude_agents,
                     "exclude_route": sorted(excluded_routes),
                     "max_tier": merged.get("max_tier"),
+                    "max_cost_index": merged.get("max_cost_index"),
                     "quality_floor": res.get("quality_floor"),
                     "min_context": merged.get("min_context"),
                     "require_modality": merged.get("require_modality") or [],
@@ -1798,6 +1824,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Keep only models ranked at or above this vendor-internal tier (1 = flagship, 2 = second tier).",
     )
     parser.add_argument(
+        "--max-cost-index",
+        type=float,
+        help="Cap the normalized per-route cost index (0.0-1.0); excludes routes above the cap.",
+    )
+    parser.add_argument(
         "--steps",
         type=int,
         help="Plan N independent steps instead of one route, applying the global constraints to each.",
@@ -1842,6 +1873,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.max_tier is not None and args.max_tier < 1:
         print("select_route: --max-tier must be at least 1", file=sys.stderr)
+        return 2
+
+    if args.max_cost_index is not None and not (0.0 <= args.max_cost_index <= 1.0):
+        print("select_route: --max-cost-index must be between 0.0 and 1.0", file=sys.stderr)
         return 2
 
     if args.clear_pins:
@@ -1895,6 +1930,7 @@ def main(argv: list[str] | None = None) -> int:
             "include_vendor": args.include_vendor,
             "exclude_route": args.exclude_route,
             "max_tier": args.max_tier,
+            "max_cost_index": args.max_cost_index,
             "quality_floor": args.quality_floor,
             "sandbox": args.sandbox,
         }
@@ -1945,6 +1981,7 @@ def main(argv: list[str] | None = None) -> int:
         exclude_vendors=args.exclude_vendor,
         include_vendors=args.include_vendor,
         max_tier=args.max_tier,
+        max_cost_index=args.max_cost_index,
         exclude_route_ids=args.exclude_route,
         quality_floor=args.quality_floor,
         refresh_quota=args.refresh_quota,

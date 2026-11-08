@@ -233,9 +233,10 @@ Five-step route selection
     `context_window` or `input_modalities` matching `--min-context` or
     `--require-modality` (unless `--allow-estimated-capabilities` is passed),
     routes excluded by user pins (`--pin-agent`, `--pin-model`,
-    `--exclude-vendor`), routes outside `--include-vendor`, and routes whose
-    vendor-internal tier rank exceeds `--max-tier`. Never use a stale proactive
-    quota reading (`stale: true`) as a hard filter.
+    `--exclude-vendor`), routes outside `--include-vendor`, routes whose
+    vendor-internal tier rank exceeds `--max-tier`, and routes whose adjusted
+    cost index exceeds `--max-cost-index`. Never use a stale proactive quota
+    reading (`stale: true`) as a hard filter.
 
 2.  Enforce a minimum `task_fit` quality floor per task category (for example,
     `0.75` for `security_audit`, `0.72` for `code_review` and `debugging`,
@@ -293,6 +294,30 @@ Combined with `--include-vendor`, it expresses constraints like "the two best
 models from OpenAI, Anthropic, or Google" without enumerating model IDs.
 
 
+Cost ceiling
+------------
+
+The scoring formula treats cost as a soft signal (`-0.08 * cost_index`), which
+is deliberately small: a model with a meaningfully higher `task_fit` wins even
+when it costs several times more. That is the right default for code review or
+debugging, where the strongest model is worth the quota, but it is the wrong
+default for copy-editing. Raising `--max-tier` does not help, because the cap is
+inclusive: `--max-tier 2` still allows the tier-1 flagship.
+
+`--max-cost-index <float>` adds a hard ceiling instead. It drops every route
+whose adjusted `cost_index` exceeds the value, then selects normally among the
+survivors. The index already reflects billing mode: free routes sit near `0.01`,
+subscription routes are discounted by half because they consume quota rather
+than per-token money, and metered routes use per-MToken pricing when a survey
+provides it (otherwise the family prior). A cap of `0.10` is a useful starting
+point for prose review; loosen it to `0.15` when no eligible reviewer survives.
+
+The ceiling applies to the primary route and its fallbacks alike, and it can be
+set per step with `max_cost_index` in `--step-spec`. When the cap leaves no
+route, the selector returns `no_route_available` rather than silently spending
+more; treat that as a signal to self-review or to relax the cap deliberately.
+
+
 Multi-step planning
 -------------------
 
@@ -307,12 +332,13 @@ already chosen is added to `exclude_route_ids`, and with
 filters. `--step-distinct-bucket` additionally excludes the quota buckets used
 by earlier steps. Per-step constraints come from `--step-spec`, a JSON object
 (inline or `@file`) that may override `task`, `speed`, `max_tier`,
-`quality_floor`, `min_context`, `min_headroom`, `allow_micro_quota`,
-`allow_estimated_capabilities`, `include_vendor`, `exclude_vendor`,
-`exclude_agent`, `exclude_route`, `require_modality`, `require_vision`, and the
-`pin_*` fields. Steps without a spec inherit the global flags. Global
-`--exclude-route`, `--exclude-vendor` and `--exclude-agent` entries are
-additive: a step spec can add exclusions but cannot remove a global one. A
+`max_cost_index`, `quality_floor`, `min_context`, `min_headroom`,
+`allow_micro_quota`, `allow_estimated_capabilities`, `include_vendor`,
+`exclude_vendor`, `exclude_agent`, `exclude_route`, `require_modality`,
+`require_vision`, and the `pin_*` fields. Steps without a spec inherit the
+global flags. Global `--exclude-route`, `--exclude-vendor` and
+`--exclude-agent` entries are additive: a step spec can add exclusions but
+cannot remove a global one. A
 canonical model chosen by one step is excluded from every later step even when
 `--no-step-distinct-vendor` allows the same vendor.
 

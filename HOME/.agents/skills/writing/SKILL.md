@@ -356,11 +356,14 @@ After drafting, get one style review from a different model vendor when
 `cross-subagents` is available. Use the assistant's declared identity to
 identify the author vendor, not the presence of a tool or MCP server. Let
 cross-subagents select a prose-capable model with `--exclude-vendor <author
-vendor>` and `--max-tier 2`; an expensive flagship is not needed for
-copy-editing. Neither a different CLI running the author's model nor a
-same-vendor subagent satisfies the cross-vendor requirement. If the author
-vendor is unknown, choose an available reviewer and disclose that cross-vendor
-independence could not be established.
+vendor>` and `--max-cost-index 0.10`; a flagship such as GPT-6 Astra or Claude
+Fable is not needed for copy-editing. The cost cap keeps the review on mid-tier
+models (Sonnet, Terra, Gemini Flash, or an open-weight vendor) while leaving
+`--max-tier` unset, because `--max-tier 2` still admits tier-1 flagships.
+Neither a different CLI running the author's model nor a same-vendor subagent
+satisfies the cross-vendor requirement. If the author vendor is unknown, choose
+an available reviewer and disclose that cross-vendor independence could not be
+established.
 
 Read [references/style-review.md](references/style-review.md) for the
 selection and tool-free invocation commands, output validation, and fallbacks.

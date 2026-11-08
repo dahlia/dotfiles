@@ -732,6 +732,30 @@ class TestCrossSubagents(unittest.TestCase):
             )
             self.assertEqual(second_tier["selected"]["canonical_key"], "gpt-6.1-sol")
 
+    def test_max_cost_index_filters_flagship_routes(self):
+        catalog, quota_state = self._fake_selection_inputs()
+        with patch.object(select_route, "get_survey", return_value=None):
+            capped = select_routes(
+                task="code_review",
+                max_cost_index=0.10,
+                all_models=catalog,
+                quota_state=quota_state,
+                use_saved_pins=False,
+            )
+        self.assertEqual(capped["status"], "ok")
+        self.assertEqual(capped["max_cost_index"], 0.10)
+        self.assertIn(capped["selected"]["canonical_key"], {"glm-5.3", "deepseek-flash"})
+        remaining = [capped["selected"], *(capped["fallbacks"] or [])]
+        self.assertTrue(all(route["cost_index"] <= 0.10 for route in remaining))
+        self.assertNotIn("gpt-6-astra", [route["canonical_key"] for route in remaining])
+        self.assertNotIn("claude-fable-5-1", [route["canonical_key"] for route in remaining])
+
+    def test_step_spec_rejects_out_of_range_max_cost_index(self):
+        with self.assertRaises(ValueError):
+            parse_step_spec('{"max_cost_index": 1.5}')
+        parsed = parse_step_spec('{"max_cost_index": 0.1}')
+        self.assertEqual(parsed["max_cost_index"], 0.1)
+
     def test_step_plan_distinct_vendors_and_partial_plan(self):
         catalog, quota_state = self._fake_selection_inputs()
         with patch.object(select_route, "get_survey", return_value=None), patch.object(
@@ -837,6 +861,7 @@ class TestCrossSubagents(unittest.TestCase):
                 exclude_agents=None,
                 include_vendors=["openai", "anthropic"],
                 max_tier=2,
+                max_cost_index=0.1,
                 min_context=None,
                 require_modalities=None,
                 require_vision=False,
@@ -849,6 +874,7 @@ class TestCrossSubagents(unittest.TestCase):
         self.assertEqual(explicit["scope"], "include_vendors")
         self.assertEqual(explicit["include_vendors"], ["openai", "anthropic"])
         self.assertEqual(explicit["max_tier"], 2)
+        self.assertEqual(explicit["max_cost_index"], 0.1)
 
         unknown_vendor = {**route, "canonical_key": "", "provider": ""}
         with patch.object(run, "load_selection_plan", return_value={}):

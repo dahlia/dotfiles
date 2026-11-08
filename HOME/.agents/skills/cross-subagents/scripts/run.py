@@ -2856,6 +2856,7 @@ def resolve_pinned_fallback_constraints(
     exclude_agents: list[str] | None,
     include_vendors: list[str] | None,
     max_tier: int | None,
+    max_cost_index: float | None = None,
     min_context: int | None,
     require_modalities: list[str] | None,
     require_vision: bool,
@@ -2901,6 +2902,9 @@ def resolve_pinned_fallback_constraints(
             "exclude_agents": list(dict.fromkeys(planned_exclude_agents + cli_exclude_agents)),
             "include_vendors": cli_includes or _unique_lower(planned.get("include_vendor")),
             "max_tier": max_tier if max_tier is not None else planned.get("max_tier"),
+            "max_cost_index": max_cost_index
+            if max_cost_index is not None
+            else planned.get("max_cost_index"),
             "min_context": min_context if min_context is not None else planned.get("min_context"),
             "require_modalities": list(require_modalities or [])
             or list(planned.get("require_modality") or []),
@@ -2935,6 +2939,7 @@ def resolve_pinned_fallback_constraints(
         "exclude_agents": cli_exclude_agents,
         "include_vendors": allowed_vendors,
         "max_tier": max_tier,
+        "max_cost_index": max_cost_index,
         "min_context": min_context,
         "require_modalities": list(require_modalities or []),
         "require_vision": bool(require_vision),
@@ -2976,6 +2981,7 @@ def execute_task(
     exclude_agents: list[str] | None = None,
     include_vendors: list[str] | None = None,
     max_tier: int | None = None,
+    max_cost_index: float | None = None,
     exclude_route_ids: list[str] | None = None,
     no_fallback: bool = False,
     force_route: bool = False,
@@ -3172,6 +3178,7 @@ def execute_task(
                         exclude_agents=exclude_agents,
                         include_vendors=include_vendors,
                         max_tier=max_tier,
+                        max_cost_index=max_cost_index,
                         min_context=min_context,
                         require_modalities=eff_req_mods,
                         require_vision=require_vision,
@@ -3230,6 +3237,7 @@ def execute_task(
                     exclude_agents=exclude_agents,
                     include_vendors=include_vendors,
                     max_tier=max_tier,
+                    max_cost_index=max_cost_index,
                     exclude_route_ids=exclude_route_ids,
                     run_id=eff_run_id,
                     sandbox_mode=effective_sandbox,
@@ -4292,6 +4300,7 @@ def evaluate_cost_gate(
     route_str: str | None = None,
     force_route: bool = False,
     max_tier: int | None = None,
+    max_cost_index: float | None = None,
     exclude_vendors: list[str] | None = None,
     include_vendors: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -4360,6 +4369,7 @@ def evaluate_cost_gate(
                 task=task_category,
                 run_id=run_id,
                 max_tier=max_tier,
+                max_cost_index=max_cost_index,
                 exclude_vendors=exclude_vendors,
                 include_vendors=include_vendors,
             )
@@ -4638,6 +4648,11 @@ def main() -> int:
         type=int,
         help="Restrict automatic selection to models ranked at or above this vendor tier (1 = flagship).",
     )
+    parser.add_argument(
+        "--max-cost-index",
+        type=float,
+        help="Cap the normalized per-route cost index (0.0-1.0) for automatic selection.",
+    )
     parser.add_argument("--exclude-route", action="append", help="Exclude an explicit route_id (repeatable).")
     parser.add_argument(
         "--no-tools",
@@ -4698,6 +4713,10 @@ def main() -> int:
         print("run: --max-tier must be at least 1", file=sys.stderr)
         return 2
 
+    if args.max_cost_index is not None and not (0.0 <= args.max_cost_index <= 1.0):
+        print("run: --max-cost-index must be between 0.0 and 1.0", file=sys.stderr)
+        return 2
+
     if args.report:
         rep = build_run_report(args.run_id, only_significant=args.only_significant)
         if args.human:
@@ -4715,6 +4734,7 @@ def main() -> int:
                 route_str=args.route,
                 force_route=args.force_route,
                 max_tier=args.max_tier,
+                max_cost_index=args.max_cost_index,
                 exclude_vendors=args.exclude_vendor,
                 include_vendors=args.include_vendor,
             )
@@ -4758,6 +4778,7 @@ def main() -> int:
         exclude_agents=args.exclude_agent,
         include_vendors=args.include_vendor,
         max_tier=args.max_tier,
+        max_cost_index=args.max_cost_index,
         exclude_route_ids=args.exclude_route,
         no_fallback=args.no_fallback,
         force_route=args.force_route,

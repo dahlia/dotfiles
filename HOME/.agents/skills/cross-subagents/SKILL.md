@@ -154,6 +154,14 @@ Useful selection flags:
     tight account does not silently demote a vendor's flagship to its third
     model. Use `--max-tier 2` when you want "top or second tier" rather than a
     specific model.
+ -  `--max-cost-index <float>` (0.0–1.0) caps the normalized per-route cost
+    index after billing-mode adjustment. Use it for budget-sensitive work such
+    as prose copy-editing: `0.10` keeps mid-tier models (for example Sonnet,
+    Terra, Gemini Flash, or open-weight vendors) and excludes flagship-class
+    routes such as GPT-6 Astra or Claude Fable. The selector's cost term is
+    only a soft weight, so without this cap the highest-fit flagship usually
+    wins. The cap can also be set per step with `max_cost_index` in
+    `--step-spec`.
  -  `--exclude-route <route_id>` (repeatable) removes an exact route, which is
     how a step plan keeps later steps on different models.
  -  `--require-vision` (or `--require-modality image`) restricts selection to
