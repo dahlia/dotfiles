@@ -1221,7 +1221,7 @@ def invoke_claude_code(
     stderr_file.write_text(err, encoding="utf-8")
 
     session_id = resume_session_id
-    usage = {"input_tokens": 0, "output_tokens": 0}
+    usage: dict[str, int | None] = {"input_tokens": None, "output_tokens": None}
     result_text = ""
     is_error = False
     subtype: str | None = None
@@ -1231,8 +1231,15 @@ def invoke_claude_code(
 
     warnings: list[str] = []
     cleaned_out = strip_ansi(out).strip()
+    events = list(_find_json_objects(cleaned_out))
+    init_models: list[str] = []
+    for event in events:
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            session_id = event.get("session_id") or session_id
+            if isinstance(event.get("model"), str):
+                init_models.append(event["model"])
     results = [
-        obj for obj in _find_json_objects(cleaned_out)
+        obj for obj in events
         if obj.get("type") == "result"
         or ("type" not in obj and "subtype" in obj)  # Legacy JSON payloads.
     ]
@@ -1242,8 +1249,9 @@ def invoke_claude_code(
         u = terminal.get("usage") or {}
         # usage is per result; modelUsage is cumulative across the session and
         # must not be summed (or used to verify a notification's answering model).
-        usage["input_tokens"] += _int_or_zero(u.get("input_tokens"))
-        usage["output_tokens"] += _int_or_zero(u.get("output_tokens"))
+        for key in ("input_tokens", "output_tokens"):
+            if u.get(key) is not None:
+                usage[key] = (usage[key] or 0) + _int_or_zero(u[key])
         denials_observed.extend(terminal.get("permission_denials") or [])
         origin = terminal.get("origin") or {}
         if origin.get("kind") == "task-notification":
@@ -1259,6 +1267,13 @@ def invoke_claude_code(
         m_usage = payload.get("modelUsage")
         if isinstance(m_usage, dict):
             observed_models = [str(k) for k in m_usage.keys()]
+
+    # Init evidence makes an interrupted session recoverable, but does not prove
+    # which model completed the requested turn. Notification models cannot fill
+    # in missing prompt-response evidence either.
+    terminal_model_evidence = bool(observed_models)
+    if not observed_models:
+        observed_models = init_models
 
     no_persist = not keep_session and not resume_session_id and flags.get("has_no_session_persistence", True)
 
@@ -1289,7 +1304,11 @@ def invoke_claude_code(
                 non_haiku[0] if non_haiku else (observed_models[0] if observed_models else None)
             )
             mismatched = non_haiku
-    if mismatched:
+    model_verified = bool(terminal_model_evidence and observed_primary and _matches_requested(observed_primary))
+    usage_complete = bool(
+        payload is not None and not timed_out and all(v is not None for v in usage.values())
+    )
+    if mismatched and terminal_model_evidence:
         return {
             "status": "failed",
             "exit_code": code or 1,
@@ -1299,6 +1318,8 @@ def invoke_claude_code(
             "requested_model": requested_model,
             "resolved_model": resolved_model,
             "observed_model": observed_primary,
+            "model_verified": model_verified,
+            "usage_complete": usage_complete,
             "observed_models": observed_models,
             "denials_observed": denials_observed,
             "session_cleaned_up": no_persist,
@@ -1317,9 +1338,12 @@ def invoke_claude_code(
             "session_id": session_id,
             "usage": usage,
             "warnings": warnings,
+            "denials_observed": denials_observed,
             "requested_model": requested_model,
             "resolved_model": resolved_model,
             "observed_model": observed_primary,
+            "model_verified": model_verified,
+            "usage_complete": usage_complete,
             "observed_models": observed_models,
             "session_cleaned_up": no_persist,
             "cleanup_verified": cleanup_verified,
@@ -1337,6 +1361,8 @@ def invoke_claude_code(
             "requested_model": requested_model,
             "resolved_model": resolved_model,
             "observed_model": observed_primary,
+            "model_verified": model_verified,
+            "usage_complete": usage_complete,
             "observed_models": observed_models,
             "session_cleaned_up": no_persist,
             "cleanup_verified": cleanup_verified,
@@ -1365,6 +1391,8 @@ def invoke_claude_code(
             "requested_model": requested_model,
             "resolved_model": resolved_model,
             "observed_model": observed_primary,
+            "model_verified": model_verified,
+            "usage_complete": usage_complete,
             "observed_models": observed_models,
             "denials_observed": denials_observed,
             "session_cleaned_up": no_persist,
@@ -1395,6 +1423,8 @@ def invoke_claude_code(
         "requested_model": requested_model,
         "resolved_model": resolved_model,
         "observed_model": observed_primary,
+        "model_verified": model_verified,
+        "usage_complete": usage_complete,
         "observed_models": observed_models,
         "session_cleaned_up": no_persist,
         "cleanup_verified": cleanup_verified,
@@ -3048,7 +3078,9 @@ def resolve_pinned_fallback_constraints(
          the exact planned route, so fallbacks stay inside the original chain.
       2. Explicit `--include-vendor` flags, which are the caller's allow-list.
       3. Otherwise the primary route's own vendor, so a quota failure cannot
-         silently switch vendors.
+         silently switch vendors. Without an explicit tier bound, retain the
+         primary canonical model across providers rather than silently
+         substituting a cheaper or weaker model from that vendor.
 
     Returns None when no safe fallback can be constructed (unknown vendor).
     """
@@ -3105,6 +3137,11 @@ def resolve_pinned_fallback_constraints(
 
     return {
         "scope": scope,
+        # A vendor filter alone says nothing about comparable quality. Family
+        # priors may give flagship and flash variants identical fit scores, so
+        # do not infer a safe downgrade from those estimates.
+        "pin_model": explicit_route["canonical_key"] if max_tier is None else None,
+        "use_saved_pins": False,
         "exclude_vendors": cli_excludes,
         "exclude_agents": cli_exclude_agents,
         "include_vendors": allowed_vendors,
@@ -3373,6 +3410,11 @@ def execute_task(
                         elif fb_scope == "planned_constraints":
                             selection_rationale += (
                                 "; fallbacks inherit the run's persisted selection plan"
+                            )
+                        if fb_policy.get("pin_model"):
+                            selection_rationale += (
+                                "; unplanned fallbacks retain the requested canonical model "
+                                "(pass --max-tier to permit bounded model substitution)"
                             )
                         sel = select_routes(
                             task=task_category,
@@ -3861,7 +3903,13 @@ def execute_task(
                         if res.get("error_class") == "quota":
                             error = res.get("error") or "Rate limit reached"
                             bucket = quota_observation_bucket(route, error)
-                            record_quota_observation(bucket, error)
+                            # The display error is truncated by adapters. Keep
+                            # full provider records for retry deadline parsing.
+                            observation_error = "\n".join([
+                                error,
+                                *(str(warning) for warning in (res.get("warnings") or [])),
+                            ])
+                            record_quota_observation(bucket, observation_error)
                         else:
                             bucket = route["quota_bucket"]
                         exhausted_buckets.add(bucket)
@@ -3963,6 +4011,7 @@ def execute_task(
                         "cleanup_verified": res.get("cleanup_verified", True),
                         "cleanup_note": res.get("cleanup_note") or res.get("cleanup_warning"),
                         "usage": res.get("usage") or {"input_tokens": 0, "output_tokens": 0},
+                        "usage_complete": res.get("usage_complete"),
                         "error_class": res.get("error_class"),
                         "error": res.get("error"),
                         "maintenance_notice": maintenance_notice,
@@ -3988,7 +4037,7 @@ def execute_task(
                         ),
                         "denials_observed": res.get("denials_observed"),
                         "warnings": res.get("warnings") or [],
-                        "model_verified": bool(res.get("observed_model")),
+                        "model_verified": res.get("model_verified", bool(res.get("observed_model"))),
                         "guard": res.get("guard"),
                     }
                     atomic_write_json(task_dir / "meta.json", meta_payload)

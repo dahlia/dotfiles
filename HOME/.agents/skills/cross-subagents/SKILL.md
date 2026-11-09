@@ -236,9 +236,10 @@ fallbacks cannot escape the filters that produced the plan.
 constraints to `<run-dir>/selection-plan.json`; `run.py` reuses them so a
 failed step can fall back only inside the same filtered chain (for example, a
 plan that excluded Anthropic and OpenAI can never fall back to Claude or GPT).
-Without a saved plan, an explicit `--route` restricts its fallback chain to the
-primary route's own vendor unless `--include-vendor` names a wider allow-list;
-pass `--no-fallback` when even that is unacceptable.
+Without a saved plan, an explicit `--route` retains the same canonical model
+across providers by default, within the primary route's vendor. Use
+`--max-tier <N>` to permit bounded model substitution and `--include-vendor`
+to widen the vendor allow-list; pass `--no-fallback` to disable fallback.
 
 ### Step 3: Choose native delegation or CLI execution
 
@@ -312,8 +313,11 @@ route while still allowing `run.py` to fall back if the primary route fails with
 a quota, authentication, or model-availability error. The fallback chain stays
 inside the run's persisted selection plan when one exists; otherwise it is
 limited to the primary route's own vendor unless `--include-vendor` gives a
-wider allow-list. Pass `--no-fallback` when a user gate requires that exact
-model or nothing.
+wider allow-list. Unplanned fallbacks retain the same canonical model across
+providers by default. Pass `--max-tier <N>` to permit substitution within an
+explicit quality bound; a vendor allow-list alone does not permit a model
+downgrade. Pass `--no-fallback` when a user gate requires that exact route
+or nothing.
 
 When the task prompt points at checkouts or files outside `--cwd` (a dependency
 checkout, a sibling repository, a scratchpad snapshot), pass `--add-dir <path>`
@@ -582,6 +586,15 @@ python3 <skill-dir>/scripts/run.py record-native \
   --summary "Generated frontend components natively." \
   --outcome-summary "Produced button and modal components with tests."
 ~~~~
+
+`record-native` records attribution and result text; it does not independently
+verify host completion, the observed model, permissions or protected inputs.
+Retain the host task ID and terminal completion event, and preserve actual
+model evidence separately from the requested ID. For guarded native code
+reviews, use the two-phase `--native-begin`/`--native-finish` recipe under
+“Native host reviewers” in the installed `code-review-loop` skill. Native
+execution has no spawned CLI to clean up; do not invent `cleanup_verified`
+evidence to satisfy a CLI-only check.
 
 When the `cross-subagents` workflow completes, run `run.py report` and present
 the full tree of participating coding agents and official model IDs—along with

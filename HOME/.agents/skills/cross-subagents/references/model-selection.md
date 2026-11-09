@@ -355,8 +355,12 @@ are saved to `<run-dir>/selection-plan.json`. An explicit `run.py --route`
 whose route matches a saved step inherits those constraints when it builds its
 fallback chain, so a quota failure cannot escape the plan's filtered vendor
 set. If no plan was saved, an explicitly pinned route restricts its fallbacks
-to the primary route's own vendor; pass `--include-vendor` to name a wider
-allow-list explicitly, or `--no-fallback` to disable substitution entirely.
+to the primary route's own vendor and canonical model, allowing another
+provider to serve the same model without silently downgrading to a weaker
+variant. Pass `--max-tier <N>` to permit substitution within an explicit tier
+bound, `--include-vendor` to widen the vendor allow-list, or `--no-fallback`
+to disable fallback entirely. Family fit estimates alone do not establish that
+a flagship and a flash variant are interchangeable.
 
 
 Absolute quota headroom vs. deceptive percentage usage

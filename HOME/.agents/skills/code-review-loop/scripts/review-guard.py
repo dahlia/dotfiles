@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -237,11 +238,60 @@ def snapshot(root, allowed, tracked):
     return state, paths
 
 
+def compare(before, after):
+    changes = []
+    for area in sorted(before.keys() | after.keys()):
+        old, new = before.get(area, {}), after.get(area, {})
+        for key in sorted(old.keys() | new.keys()):
+            if old.get(key) != new.get(key):
+                changes.append(area + ':' + key)
+    return changes
+
+
+def native_result(handoff, receipt):
+    """Validate coordinator-supplied host evidence, never invent CLI telemetry."""
+    error = None
+    if receipt.get('handoff_id') != handoff['handoff_id']:
+        error = 'completion receipt does not match this attempt'
+    elif receipt.get('status') != 'completed' or receipt.get('completion_verified') is not True:
+        error = 'host reviewer completion is unverified'
+    elif not receipt.get('host_task_id') or not receipt.get('completion_event'):
+        error = 'host task and terminal completion event are required'
+    elif not isinstance(receipt.get('denials_observed'), list):
+        error = 'host permission denial inspection is unknown'
+    observed = receipt.get('observed_model')
+    verified = receipt.get('model_verified') is True
+    if verified and not observed:
+        error = 'verified model requires observed host model evidence'
+    if observed and observed != handoff['requested_model']:
+        error = 'host model differs from the exact requested model'
+    result_file = receipt.get('result_file')
+    if not result_file or not Path(result_file).is_absolute() or not Path(result_file).is_file():
+        error = error or 'native result file is missing or is not absolute'
+    elif not Path(result_file).read_text(encoding='utf-8').strip():
+        error = error or 'native result is empty'
+    return {'status': 'failed' if error else 'ok', 'error': error,
+            'error_class': 'failed' if error else None,
+            'native_host_execution': True, 'cleanup_verified': None,
+            'completion_verified': receipt.get('completion_verified') is True and not error,
+            'host_task_id': receipt.get('host_task_id'),
+            'completion_event': receipt.get('completion_event'),
+            'official_agent': handoff['official_agent'],
+            'official_model_id': handoff['requested_model'],
+            'observed_model': observed, 'model_verified': verified and bool(observed),
+            'denials_observed': receipt.get('denials_observed'), 'result_file': result_file}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', required=True)
     parser.add_argument('--prefix', required=True)
-    parser.add_argument('--stdin', required=True, help='prompt file')
+    parser.add_argument('--stdin', help='prompt file (required before execution)')
+    native = parser.add_mutually_exclusive_group()
+    native.add_argument('--native-begin', action='store_true', help='snapshot before host delegation')
+    native.add_argument('--native-finish', metavar='RECEIPT', help='verify after host completion')
+    parser.add_argument('--agent', help='official host agent name for native begin')
+    parser.add_argument('--model', help='exact requested native model for native begin')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     root = Path(args.root).resolve()
@@ -252,19 +302,45 @@ def main():
         raise ValueError('artifacts must live outside the repository')
     prefix.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
-    if not command:
+    if not command and not (args.native_begin or args.native_finish):
         raise ValueError('missing reviewer command')
+    if command and (args.native_begin or args.native_finish):
+        raise ValueError('native handoff does not take a reviewer command')
+    if not args.native_finish and not args.stdin:
+        raise ValueError('--stdin is required before execution')
+    if args.native_begin and (not args.agent or not args.model):
+        raise ValueError('native begin requires --agent and --model')
     allowed = json.loads(os.environ.get('REVIEW_OUTPUT_PATHS', '[]'))
     if not isinstance(allowed, list) or any(not isinstance(p, str) or not p or
             Path(p).is_absolute() or any(c in ('', '.', '..', '.git') for c in p.split('/')) for p in allowed):
         raise ValueError('REVIEW_OUTPUT_PATHS must be a JSON array of relative directory paths without .git or traversal')
-    tracked = set(os.fsdecode(p) for p in git(root, 'ls-files', '-z').split(b'\0') if p)
-    before, git_paths = snapshot(root, allowed, tracked)
     def save(suffix, data):
         path = Path(str(prefix) + suffix)
         with path.open('x', encoding='utf-8') as f:
             os.chmod(path, 0o600)
             json.dump(data, f, indent=2, ensure_ascii=True)
+    if args.native_finish:
+        handoff = json.loads(Path(str(prefix) + '.handoff.json').read_text())
+        if handoff['root'] != str(root):
+            raise ValueError('native handoff belongs to a different repository')
+        # The begin snapshot owns exclusions and tracked paths, not a later env.
+        allowed, tracked = handoff['allowed_outputs'], set(handoff['tracked'])
+        before = json.loads(Path(str(prefix) + '.before.json').read_text())
+        after = snapshot(root, allowed, tracked)[0]
+        save('.after.json', after)
+        changes = compare(before, after)
+        save('.guard.json', {'command_exit': None, 'allowed_outputs': allowed,
+                             'changes': changes, 'status': 'mutated' if changes else 'unchanged'})
+        receipt = json.loads(Path(args.native_finish).read_text())
+        result = native_result(handoff, receipt)
+        save('.stdout', result)
+        save('.receipt.json', receipt)
+        code = 40 if changes else (0 if result['status'] == 'ok' else 1)
+        Path(str(prefix) + '.exit').write_text(str(code) + '\n')
+        print(json.dumps(result))
+        return code
+    tracked = set(os.fsdecode(p) for p in git(root, 'ls-files', '-z').split(b'\0') if p)
+    before, git_paths = snapshot(root, allowed, tracked)
     save('.before.json', before)
     # A private archive contains all protected files, including ignored files.
     archive_path = Path(str(prefix) + '.backup.tar')
@@ -284,6 +360,15 @@ def main():
     # Detect a concurrent edit during backup instead of launching on mixed inputs.
     if before != snapshot(root, allowed, tracked)[0]:
         raise ValueError('repository changed during backup; preserve artifacts and retry after edits stop')
+    if args.native_begin:
+        prompt = Path(args.stdin).resolve()
+        handoff = {'root': str(root), 'allowed_outputs': allowed, 'tracked': sorted(tracked),
+                   'handoff_id': secrets.token_hex(16), 'prompt_file': str(prompt),
+                   'prompt_sha256': digest(prompt), 'official_agent': args.agent,
+                   'requested_model': args.model}
+        save('.handoff.json', handoff)
+        print(json.dumps({'status': 'ready', **handoff}))
+        return 0
     for suffix in ('.stdout', '.stderr', '.exit'):
         if Path(str(prefix) + suffix).exists():
             raise ValueError('prefix already used; choose a fresh attempt prefix')
@@ -297,14 +382,7 @@ def main():
     # it become an allowed build output during the after-snapshot.
     after = snapshot(root, allowed, tracked)[0]
     save('.after.json', after)
-    changes = []
-    # Areas can appear or disappear when a nested repository is created or
-    # removed during the review.
-    for area in sorted(before.keys() | after.keys()):
-        old, new = before.get(area, {}), after.get(area, {})
-        for key in sorted(old.keys() | new.keys()):
-            if old.get(key) != new.get(key):
-                changes.append(area + ':' + key)
+    changes = compare(before, after)
     save('.guard.json', {'command_exit': code, 'allowed_outputs': allowed, 'changes': changes,
                          'status': 'mutated' if changes else 'unchanged'})
     if changes:

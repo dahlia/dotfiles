@@ -236,8 +236,8 @@ reviewer: start its rounds from round 1, not by resuming the failed session.
 Step 3: Run the steps
 ---------------------
 
-Each round is one `cross-subagents` invocation wrapped in this skill's
-protected-input guard. The guard backs up the repository before the reviewer
+Each round uses the selected native host reviewer or a `cross-subagents` CLI
+invocation, protected by this skill's input guard. The guard backs up the repository before the reviewer
 starts and compares it afterwards; `run.py` supplies route selection, CLI
 session handling, model-substitution detection, and the result contract.
 
@@ -313,14 +313,88 @@ stdin when a task id is reused, so a fresh-prefix retry would otherwise ignore
 the revised prompt. The guard archives and feeds the same file. A guard prefix
 must be fresh: every retry gets `-a2`, `-a3`, and so on. Never reuse a prefix.
 
+### Native host reviewers
+
+When `cross-subagents` selects an exact model available through the host's
+native delegation tools, follow its native preference and repository policy.
+Use the two-phase guard below to span host tool calls without a CLI or FIFO
+bridge. The coordinator must remain idle with respect to protected inputs
+until the host reviewer has finished.
+
+Before spawning the reviewer, prepare the prompt and a fresh `PREFIX`, then
+save the guard's readiness output outside the repository:
+
+~~~~ bash
+python3 "$GUARD" --root "$REPO_ROOT" --prefix "$PREFIX" \
+  --stdin "$PROMPT" --native-begin --agent Codex --model "$MODEL" \
+  > "$PREFIX.ready.json"
+~~~~
+
+Set `MODEL` to the exact selected model ID. A successful begin creates the
+backup, before-snapshot and *handoff.json*. It does not complete a round.
+Only then use the host's native spawn tool, giving the reviewer the same
+prompt, repository, read-only restrictions and allowed output paths. Retain
+the returned host task ID. Wait for that task's terminal completion event;
+a spawn acknowledgement, partial response, timeout or interrupted turn is
+insufficient. Complete or stop all of that reviewer's delegated work before
+finishing the guard. If completion is uncertain, preserve artifacts and report
+the round unknown.
+
+Save the final answer in an absolute result path outside the repository. Write
+*receipt.json* from the host evidence, using this attempt's `handoff_id` from
+*handoff.json*:
+
+~~~~ json
+{
+  "handoff_id": "<this attempt's handoff_id>",
+  "host_task_id": "<ID returned by the native spawn tool>",
+  "status": "completed",
+  "completion_verified": true,
+  "completion_event": "<reference to the host terminal completion event>",
+  "observed_model": null,
+  "model_verified": false,
+  "denials_observed": [],
+  "result_file": "/absolute/path/to/final-review.md"
+}
+~~~~
+
+`completion_verified` attests to the host event; the script cannot query the
+host itself. Inspect the host transcript for permission denials before setting
+`denials_observed` to an empty array. Set `observed_model` and `model_verified`
+only from explicit host model evidence. Without that evidence, keep `null` and
+`false`, and report the selected model as requested. An observed model that
+differs from the requested ID invalidates the attempt.
+
+~~~~ bash
+python3 "$GUARD" --root "$REPO_ROOT" --prefix "$PREFIX" \
+  --native-finish "$WORK/receipt.json"
+~~~~
+
+Finish uses the original exclusions and tracked paths, compares protected
+inputs and writes *guard.json*, *.stdout*, *.exit* and the retained receipt.
+The same prefix can finish only once. Native completion metadata has
+`native_host_execution: true`, `completion_verified: true` and
+`cleanup_verified: null`: no child CLI was launched. Classify the round using
+the native rule below. After classification, `run.py record-native` with the
+real `--result-file` may register it in the call tree. That command alone is
+an attribution record, not guard, model or completion verification.
+
+For a native re-review, begin a fresh guard attempt before sending the follow-up
+to the same host reviewer. Wait for that follow-up's terminal event and save its
+answer and receipt before finishing. Do not use an earlier completion event or
+answer to close a later round.
+
 ### Classify the round
 
 A round is usable only when **all** of these hold:
 
- -  `$PREFIX.exit` is the reviewer command's exit code, not 40 or 2;
+ -  `$PREFIX.exit` is the CLI reviewer command's exit code, not 40 or 2;
+    for native execution it is the successful finish code `0`;
  -  `$PREFIX.guard.json` has `"status": "unchanged"`;
  -  `$PREFIX.stdout` parses as JSON with `"status": "ok"`;
- -  `cleanup_verified` is `true`;
+ -  For CLI execution, `cleanup_verified` is `true`. For native execution,
+    `native_host_execution` and `completion_verified` are `true`, with a retained
+    matching receipt identifying the completed host task and terminal event;
  -  `denials_observed` is empty (older adapter output names the same list
     `permission_denials`; accept either, and read the count printed above);
  -  `result_file` exists and its trimmed text is non-empty.
@@ -329,9 +403,10 @@ A round is usable only when **all** of these hold:
 whole loop. Preserve `$WORK`, show the changed paths, and never run
 `reset --hard`, `clean`, or automatic archive extraction over the user's work.
 
-`cleanup_verified: false` also stops the loop. A surviving child could write
-after the guard comparison, so the round did not review a stable tree. Treat a
-`null` value as unknown, never as clean.
+For CLI execution, `cleanup_verified: false` also stops the loop. A surviving
+child could write after the guard comparison, so the round did not review a stable tree. Treat a
+`null` CLI value as unknown, never as clean. Native rounds use host completion
+evidence instead; missing completion evidence is unknown.
 
 Classify failures by `error_class` before applying the generic retry rule.
 `quota`, `auth` or `model_unavailable` (and `status: quota`) means the step is

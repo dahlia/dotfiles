@@ -14,6 +14,7 @@ import argparse
 import copy
 from datetime import datetime, timedelta, timezone
 import json
+import math
 from pathlib import Path
 import re
 import sys
@@ -572,12 +573,35 @@ def quota_observation_bucket(route: dict[str, Any], error_text: str) -> str:
     return route["quota_bucket"]
 
 
+def _structured_retry_after_seconds(error_text: str) -> int | None:
+    """Read provider retry delays from the JSON error records retained by adapters."""
+    delays: list[int] = []
+    for line in error_text.splitlines():
+        try:
+            record = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        while isinstance(record, dict):
+            milliseconds = record.get("retryAfterMs")
+            if (
+                isinstance(milliseconds, (int, float))
+                and not isinstance(milliseconds, bool)
+                and math.isfinite(milliseconds)
+                and milliseconds >= 0
+            ):
+                delays.append(max(1, math.ceil(milliseconds / 1000)))
+            record = record.get("error")
+    return max(delays) if delays else None
+
+
 def record_quota_observation(bucket_id: str, error_text: str, reset_seconds: int | None = None) -> dict[str, Any]:
     """Record an observed rate-limit / 429 event under an exclusive file lock."""
     obs_file = get_observations_file()
     now_ts = int(time.time())
 
     provider_resets_at: int | None = None
+    if reset_seconds is None:
+        reset_seconds = _structured_retry_after_seconds(error_text)
     if reset_seconds is not None:
         backoff_seconds = max(1, int(reset_seconds))
         provider_resets_at = now_ts + backoff_seconds

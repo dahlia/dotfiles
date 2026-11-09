@@ -43,6 +43,102 @@ class GuardTests(unittest.TestCase):
             env={**os.environ, 'REVIEW_OUTPUT_PATHS': json.dumps(allowed or [])})
         return result.returncode
 
+    def begin_native(self):
+        self.prefix = self.base / 'native-attempt'
+        result = subprocess.run([sys.executable, str(SCRIPTS / 'review-guard.py'),
+            '--root', str(self.root), '--prefix', str(self.prefix), '--stdin', str(self.prompt),
+            '--native-begin', '--agent', 'Codex', '--model', 'test-model'], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        handoff = json.loads(result.stdout)
+        self.result_file = self.base / 'native-result.md'
+        self.result_file.write_text('NO ACTIONABLE FINDINGS')
+        return {'handoff_id': handoff['handoff_id'], 'status': 'completed',
+                'completion_verified': True, 'host_task_id': 'host-agent-1',
+                'completion_event': 'host final-answer event 1', 'model_verified': False,
+                'observed_model': None, 'denials_observed': [],
+                'result_file': str(self.result_file)}
+
+    def finish_native(self, receipt):
+        receipt_path = self.base / 'receipt.json'
+        receipt_path.write_text(json.dumps(receipt))
+        return subprocess.run([sys.executable, str(SCRIPTS / 'review-guard.py'),
+            '--root', str(self.root), '--prefix', str(self.prefix),
+            '--native-finish', str(receipt_path)], capture_output=True)
+
+    def test_native_handoff_has_real_completion_and_no_cli_cleanup(self):
+        receipt = self.begin_native()
+        self.assertFalse(Path(str(self.prefix) + '.guard.json').exists())
+        self.assertTrue(Path(str(self.prefix) + '.backup.tar').is_file())
+        result = self.finish_native(receipt)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        meta = json.loads(Path(str(self.prefix) + '.stdout').read_text())
+        self.assertTrue(meta['completion_verified'])
+        self.assertIsNone(meta['cleanup_verified'])
+        self.assertFalse(meta['model_verified'])
+        self.assertEqual(meta['host_task_id'], 'host-agent-1')
+        self.assertEqual(json.loads(Path(str(self.prefix) + '.guard.json').read_text())['status'], 'unchanged')
+        self.assertEqual(self.finish_native(receipt).returncode, 2)
+
+    def test_native_handoff_detects_writes_between_host_turns(self):
+        receipt = self.begin_native()
+        (self.root / 'source').write_bytes(b'reviewer write')
+        self.assertEqual(self.finish_native(receipt).returncode, 40)
+        self.assertIn('tree:source', self.changes())
+
+    def test_native_handoff_rejects_stale_completion_receipt(self):
+        receipt = self.begin_native()
+        receipt['handoff_id'] = 'another-attempt'
+        self.assertEqual(self.finish_native(receipt).returncode, 1)
+
+    def test_native_handoff_rejects_unfinished_host(self):
+        receipt = self.begin_native()
+        receipt['completion_verified'] = False
+        self.assertEqual(self.finish_native(receipt).returncode, 1)
+
+    def test_native_handoff_requires_terminal_event(self):
+        receipt = self.begin_native()
+        del receipt['completion_event']
+        self.assertEqual(self.finish_native(receipt).returncode, 1)
+
+    def test_native_handoff_requires_permission_inspection(self):
+        receipt = self.begin_native()
+        del receipt['denials_observed']
+        self.assertEqual(self.finish_native(receipt).returncode, 1)
+
+    def test_native_handoff_cannot_verify_absent_model(self):
+        receipt = self.begin_native()
+        receipt['model_verified'] = True
+        self.assertEqual(self.finish_native(receipt).returncode, 1)
+
+    def test_native_handoff_keeps_begin_exclusions(self):
+        receipt = self.begin_native()
+        (self.root / 'cache').mkdir()
+        (self.root / 'cache' / 'output').write_text('not originally excluded')
+        receipt_path = self.base / 'receipt.json'
+        receipt_path.write_text(json.dumps(receipt))
+        result = subprocess.run([sys.executable, str(SCRIPTS / 'review-guard.py'),
+            '--root', str(self.root), '--prefix', str(self.prefix),
+            '--native-finish', str(receipt_path)], capture_output=True,
+            env={**os.environ, 'REVIEW_OUTPUT_PATHS': '["cache"]'})
+        self.assertEqual(result.returncode, 40)
+        self.assertIn('tree:cache/output', self.changes())
+
+    def test_native_handoff_rejects_empty_review(self):
+        receipt = self.begin_native()
+        self.result_file.write_text('   ')
+        self.assertEqual(self.finish_native(receipt).returncode, 1)
+
+    def test_native_handoff_rejects_model_substitution(self):
+        receipt = self.begin_native()
+        receipt.update(observed_model='different-model', model_verified=True)
+        self.assertEqual(self.finish_native(receipt).returncode, 1)
+
+    def test_native_handoff_keeps_permission_denials_for_classification(self):
+        receipt = self.begin_native()
+        receipt['denials_observed'] = ['read denied']
+        self.assertEqual(self.finish_native(receipt).returncode, 0)
+        self.assertEqual(json.loads(Path(str(self.prefix) + '.stdout').read_text())['denials_observed'], ['read denied'])
+
     def test_binary_ignored_untracked_symlink_and_mode_backup(self):
         self.assertEqual(self.run_guard("from pathlib import Path; Path('source').write_bytes(b'changed'); Path('ignored').unlink(); Path('untracked').chmod(0o700); Path('link').unlink(); Path('link').symlink_to('ignored')"), 40)
         with tarfile.open(str(self.prefix) + '.backup.tar') as archive:
