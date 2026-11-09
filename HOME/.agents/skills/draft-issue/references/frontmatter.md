@@ -86,10 +86,10 @@ fact that it is an issue reference, and a link
 repository is renamed. `owner/repo#123` works when the issue is in another
 repository.
 
-Relational keys are not free text. GitHub models them as blocking, blocked by,
-and parent or sub-issue relationships, and other forges may support only a
-subset. When the relationship does not fit one of these, mention it in a
-sentence in the body instead of inventing a key.
+Relational keys are not free text. GitHub models them as relates-to, blocking,
+blocked-by, and parent or sub-issue relationships, and other forges may
+support only a subset. When the relationship does not fit one of these,
+mention it in a sentence in the body instead of inventing a key.
 
 
 Relations between drafts
@@ -105,11 +105,12 @@ blocked-by:
   - "draft:escape-tabs"
 ~~~~
 
-Post blockers and parents before the drafts that reference them, then replace
-each `draft:` reference with the real number as it becomes known. An unresolved
-reference in a draft that is not posted yet is normal; one left in a posted
-issue no longer applies and no longer links. A leading number in a filename
-means “this draft revises issue #N”, so do not number drafts just to order them.
+Post blockers and parents first when practical, then replace each `draft:`
+reference with the real number as it becomes known. If a target is not posted
+yet, defer that relationship until both issues exist. An unresolved reference
+in a draft that is not posted yet is normal; one left in a posted issue no
+longer applies and no longer links. A leading number in a filename means “this
+draft revises issue #N”, so do not number drafts just to order them.
 
 
 Posting the draft
@@ -127,25 +128,98 @@ gh issue create --repo OWNER/REPO \
   --parent 30 --blocked-by 42 --blocking 44
 ~~~~
 
-Each flag maps to one key:
+For GitHub CLI 2.97.0, the mapping is:
 
-| Frontmatter key | Flag                                |
-| --------------- | ----------------------------------- |
-| `title`         | `--title`                           |
-| `type`          | `--type`                            |
-| `labels`        | `--label` (repeatable)              |
-| `milestone`     | `--milestone`                       |
-| `parent`        | `--parent`                          |
-| `blocked-by`    | `--blocked-by`                      |
-| `blocks`        | `--blocking`                        |
-| `relates-to`    | none; add in the body or the web UI |
+| Frontmatter key | CLI flag or follow-up operation          |
+| --------------- | ---------------------------------------- |
+| `title`         | `--title`                                |
+| `type`          | `--type`                                 |
+| `labels`        | `--label` (repeatable)                   |
+| `milestone`     | `--milestone`                            |
+| `parent`        | `--parent`, or `addSubIssue`             |
+| `sub-issues`    | `addSubIssue` after creation             |
+| `blocked-by`    | `--blocked-by`, or `addBlockedBy`        |
+| `blocks`        | `--blocking`, or reversed `addBlockedBy` |
+| `relates-to`    | `addRelatesTo` after creation            |
 
-Strip the frontmatter before passing the file to `--body-file`; the API would
-otherwise render it as text. The same goes for SKILL.md's example command.
-`--type`, `--parent`, `--blocked-by`, and `--blocking` need a recent `gh` and a
-repository that supports them.
+Check the installed `gh issue create --help` rather than assuming these flags
+exist in every release. When a relationship has no CLI flag, use the GitHub
+GraphQL procedure below after creating the issue. API availability also
+depends on the target GitHub host; another forge needs its own API.
+
+
+Posting GitHub relationships
+----------------------------
+
+Use this procedure only when the repository is hosted on GitHub and the user
+has asked to publish or update the issue. Drafting alone does not authorize
+creation or relationship mutations.
+
+Save the URL returned by creation, resolve all `draft:` references to posted
+issue numbers, and fetch each endpoint's GraphQL node ID. These mutations take
+node IDs, not issue numbers or REST numeric IDs:
+
+~~~~ bash
+# Use the URL returned by gh issue create for the new issue.
+issue_id=$(gh issue view "$issue_url" --json id --jq .id)
+related_id=$(gh issue view 39 --repo OWNER/REPO --json id --jq .id)
+
+gh api graphql \
+  -f query='mutation($issue: ID!, $related: ID!) {
+    addRelatesTo(input: {issueId: $issue, relatedIssueId: $related}) {
+      issue { id }
+      relatedIssue { id }
+    }
+  }' \
+  -f issue="$issue_id" -f related="$related_id"
+~~~~
+
+For `owner/repo#N`, resolve the ID in that repository rather than the draft's
+repository. For GitHub Enterprise, use that host consistently for lookups and
+`gh api graphql --hostname HOST`; both endpoints must be on the same host.
+
+Apply each requested relationship with these inputs, where `new` is the posted
+draft's node ID and `target` is the referenced issue's node ID:
+
+| Frontmatter key | Mutation       | Input                                   |
+| --------------- | -------------- | --------------------------------------- |
+| `relates-to`    | `addRelatesTo` | `issueId: new, relatedIssueId: target`  |
+| `blocked-by`    | `addBlockedBy` | `issueId: new, blockingIssueId: target` |
+| `blocks`        | `addBlockedBy` | `issueId: target, blockingIssueId: new` |
+| `parent`        | `addSubIssue`  | `issueId: target, subIssueId: new`      |
+| `sub-issues`    | `addSubIssue`  | `issueId: new, subIssueId: target`      |
+
+For example, to make the posted draft blocked by #42:
+
+~~~~ bash
+blocker_id=$(gh issue view 42 --repo OWNER/REPO --json id --jq .id)
+gh api graphql \
+  -f query='mutation($issue: ID!, $blocker: ID!) {
+    addBlockedBy(input: {issueId: $issue, blockingIssueId: $blocker}) {
+      issue { id }
+      blockingIssue { id }
+    }
+  }' \
+  -f issue="$issue_id" -f blocker="$blocker_id"
+~~~~
+
+Skip relationships already set by creation flags. Check GraphQL errors and
+read back the relevant `Issue` fields (`relatesTo`, `blockedBy`, `blocking`,
+`parent`, or `subIssues`), paginating connections as needed to verify the
+requested targets. A body reference to #39 is not a native `relates-to` edge.
+If a mutation fails, keep the created issue's URL and report which
+relationships remain pending; do not rerun issue creation. Leave an existing
+parent in place unless the user requested replacing it.
+
+See GitHub's [issue GraphQL reference] for `addRelatesTo`, `addBlockedBy`,
+`addSubIssue`, and their input types, and the [GitHub CLI 2.97.0 release
+notes] for the CLI flags.
 
 After formatting, read the frontmatter back and confirm every field kept its
 value and type. Hongdown leaves the block alone, but a later hand edit or a
 sloppy merge can break it, and an unquoted title with a colon silently turns the
 block into a different document.
+
+
+[issue GraphQL reference]: https://docs.github.com/en/graphql/reference/issues
+[GitHub CLI 2.97.0 release notes]: https://github.com/cli/cli/releases/tag/v2.97.0

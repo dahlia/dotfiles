@@ -295,9 +295,9 @@ Fill in the frontmatter
 -----------------------
 
 Everything that is not the body goes in YAML frontmatter at the top of the
-draft: title, issue type, labels, milestone, and relationships to other issues.
-*references/frontmatter.md* has the schema, the example, and how each field
-maps to `gh issue create`.
+draft: title, issue type, labels, milestone, and relationships to other
+issues. *references/frontmatter.md* has the schema, the example, and how each
+field maps to `gh issue create` and GitHub GraphQL mutations.
 
 Choose labels and types from what the repository actually offers. An invented
 label does not apply, and a type from another organization does not exist on
@@ -435,12 +435,16 @@ gh issue create --repo OWNER/REPO \
 has the one-liner that strips it. Pass the draft as-is and the API shows the
 YAML as the first thing in the issue.
 
-`--type`, `--parent`, `--blocked-by`, and `--blocking` exist only on GitHub and
-only where the repository supports them. A `relates-to` relation has no flag;
-mention it in the body or add it from the web UI. Flag sets change between `gh`
-releases, so `gh issue create --help` on the machine settles what this one
-accepts. A draft that revises an existing issue is posted with
-`gh issue edit N --body-file body.md` instead.
+`--type`, `--parent`, `--blocked-by`, and `--blocking` require support from
+the target GitHub host. Check `gh issue create --help` on the machine before
+using them. GitHub CLI 2.97.0 provides these flags, but has no `relates-to`
+flag. For GitHub repositories, apply `relates-to` and any relationships
+unsupported by the installed CLI after creation through `gh api graphql`,
+following [Posting GitHub
+relationships](references/frontmatter.md#posting-github-relationships). A body
+mention does not create a native relationship. A draft that revises an
+existing issue is posted with `gh issue edit N --body-file body.md` instead;
+apply its requested relationships separately as well.
 
 
 Reference
