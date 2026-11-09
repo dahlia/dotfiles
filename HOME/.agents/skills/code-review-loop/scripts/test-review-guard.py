@@ -131,6 +131,27 @@ class GuardTests(unittest.TestCase):
     def test_unrelated_ref_creation_is_allowed(self):
         self.assertEqual(self.run_guard("import subprocess; subprocess.run(['git','branch','unexpected'],check=True)"), 0)
 
+    def test_other_worktree_branch_rename_config_is_allowed(self):
+        other = self.base / 'other'
+        self.git('worktree', 'add', '-b', 'other', str(other))
+        self.git('config', 'branch.other.remote', 'origin')
+        code = (
+            "import subprocess; "
+            f"subprocess.run(['git','-C',{str(other)!r},'branch','-m','renamed'],check=True)"
+        )
+        self.assertEqual(self.run_guard(code), 0)
+
+    def test_current_branch_config_change_is_detected(self):
+        branch = self.git('symbolic-ref', '--short', 'HEAD').decode().strip()
+        code = (
+            "import subprocess; "
+            f"subprocess.run(['git','config',{'branch.' + branch + '.remote'!r},'changed'],check=True)"
+        )
+        self.assertEqual(self.run_guard(code), 40)
+
+    def test_nonbranch_config_change_is_detected(self):
+        self.assertEqual(self.run_guard("import subprocess; subprocess.run(['git','config','core.filemode','false'],check=True)"), 40)
+
     def test_current_branch_object_change_is_detected(self):
         self.git('commit', '--allow-empty', '-qm', 'second')
         self.assertEqual(self.run_guard("import subprocess; subprocess.run(['git','update-ref','HEAD','HEAD~1'],check=True)"), 40)

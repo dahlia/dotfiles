@@ -52,6 +52,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -287,6 +288,43 @@ def _resolve_ref(gitdir: Path, ref: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _semantic_index(root: Path) -> tuple[str | None, str | None]:
+    """Hash staged entries and persistent flags, excluding Git's stat cache."""
+    outputs = []
+    for args in (("--stage", "-v", "-z"), ("--debug", "-z")):
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(root), "ls-files", *args],
+                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+                capture_output=True, timeout=GIT_IGNORED_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return None, f"{type(exc).__name__}: {exc}"
+        if proc.returncode:
+            return None, proc.stderr.decode("utf-8", "replace")[:200]
+        outputs.append(proc.stdout)
+    # Each debug entry has a NUL-terminated path followed by five metadata
+    # lines. Split paths first: filenames themselves may contain newlines or
+    # text resembling the debug flags field.
+    remaining = outputs[1]
+    flags = []
+    while remaining:
+        _path, separator, metadata = remaining.partition(b"\0")
+        lines = metadata.split(b"\n", 5)
+        if not separator or len(lines) != 6:
+            return None, "unrecognized git ls-files --debug record"
+        match = re.fullmatch(rb"  size: [0-9]+\tflags: ([0-9a-f]+)", lines[4])
+        if match is None:
+            return None, "unrecognized git ls-files --debug flags"
+        # assume-valid, skip-worktree and intent-to-add; transient flags such
+        # as CE_UPDATE_IN_BASE must not turn an inspection into a mutation.
+        flags.append(int(match.group(1), 16) & 0xE0000000)
+        remaining = lines[5]
+    digest = hashlib.sha256(outputs[0])
+    digest.update(json.dumps(flags).encode("ascii"))
+    return digest.hexdigest(), None
+
+
 def git_state(root: Path) -> dict[str, Any]:
     """Record the parts of Git state a reviewer must not mutate."""
     gitdir, gitdir_error = _resolve_gitdir(root)
@@ -335,7 +373,7 @@ def git_state(root: Path) -> dict[str, Any]:
                 "error": f"cannot resolve Git ref: {ref_error}",
             }
     index_path = gitdir / "index"
-    index_digest, index_error = _sha256_file(index_path) if index_path.is_file() else (None, None)
+    index_digest, index_error = _semantic_index(root) if index_path.is_file() else (None, None)
     if index_error:
         return {
             "is_repo": True,

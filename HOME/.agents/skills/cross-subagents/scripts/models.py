@@ -51,6 +51,18 @@ SURVEY_BENCHMARK_TTL_SECONDS = 30 * 86400  # 30 days
 
 VALID_CONFIDENCE_LEVELS = ("high", "medium", "low", "insufficient")
 
+# Provider rejection observed in review-otel-1344/step3-r1b (2026-11-05).
+# The CLI catalog can include models the authenticated provider cannot serve.
+# Keep this scoped to the exact route; other providers may serve the same model.
+KNOWN_UNAVAILABLE_ROUTES = {
+    "opencode/github-copilot/gemini-4-argon": "provider returned model_not_supported",
+}
+
+
+def route_unavailability_reason(route: dict[str, Any]) -> str | None:
+    """Apply known provider rejections to fresh and previously cached routes."""
+    return KNOWN_UNAVAILABLE_ROUTES.get(route.get("route_id", ""))
+
 
 def collect_codex_models(
     binary: str,
@@ -431,6 +443,10 @@ def collect_opencode_models(
         if credentials_unverified:
             route["hidden"] = True
             route["hidden_reason"] = "unverified-provider-credentials"
+        unavailable = route_unavailability_reason(route)
+        if unavailable:
+            route["available"] = False
+            route["unavailable_reason"] = unavailable
         routes.append(route)
 
     # The metered `opencode` (Zen) catalog mirrors many `opencode-go` subscription

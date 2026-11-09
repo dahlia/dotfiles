@@ -49,7 +49,7 @@ from common import (
     read_json_file,
     validate_safe_identifier,
 )
-from models import collect_all_models, get_survey, lookup_model_release_date, resolve_official_model_id
+from models import collect_all_models, get_survey, lookup_model_release_date, resolve_official_model_id, route_unavailability_reason
 from probe import get_agent_recipe
 from quota import collect_quota
 
@@ -1116,6 +1116,10 @@ def check_route_eligibility(
     q_eval = evaluate_route_quota(route, buckets, agent_stale)
     traits = evaluate_route_traits(route, task_norm)
     vendor = infer_model_vendor(route)
+
+    unavailable = route_unavailability_reason(route)
+    if unavailable:
+        return False, f"model_unavailable:{unavailable}", q_eval, traits
 
     # Reject bare unversioned family prefixes across all execution and selection paths
     if (

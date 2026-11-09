@@ -38,6 +38,38 @@ class TestGuardRefs(unittest.TestCase):
         report = guard.verify(self.root, before)
         self.assertEqual(report['status'], expected, report)
 
+    def test_index_stat_refresh_is_clean(self):
+        before = guard.snapshot(self.root)
+        self.assertEqual(before['status'], 'ok', before)
+        index = self.root / '.git' / 'index'
+        raw_before = index.read_bytes()
+        file = self.root / 'file'
+        st = file.stat()
+        os.utime(file, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+        self.git('update-index', '--refresh')
+        self.assertNotEqual(raw_before, index.read_bytes())
+        self.assertEqual(guard.verify(self.root, before)['status'], 'clean')
+
+    def test_staging_is_detected_with_unchanged_worktree(self):
+        (self.root / 'file').write_text('dirty\n')
+        self.check(lambda: self.git('add', 'file'), 'mutated')
+
+    def test_persistent_index_flags_are_detected(self):
+        for flag in ('--assume-unchanged', '--skip-worktree'):
+            with self.subTest(flag=flag):
+                self.check(lambda: self.git('update-index', flag, 'file'), 'mutated')
+                self.git('update-index', flag.replace('--', '--no-', 1), 'file')
+
+    def test_intent_to_add_is_detected(self):
+        (self.root / 'new').write_text('new\n')
+        self.check(lambda: self.git('add', '-N', 'new'), 'mutated')
+
+    def test_debug_like_filename_is_supported(self):
+        name = 'odd\n  size: 1\tflags: 20000000'
+        (self.root / name).write_text('content\n')
+        self.git('add', '--', name)
+        self.check(lambda: self.git('status', '--short'), 'clean')
+
     def test_unrelated_worktree_commit_and_pack(self):
         other = Path(self.temp.name) / 'other'
         self.git('worktree', 'add', '-b', 'other', str(other))

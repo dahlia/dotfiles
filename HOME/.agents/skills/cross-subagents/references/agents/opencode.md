@@ -67,6 +67,13 @@ selection does not attempt a metered route that can fail with
 Model discovery
 ---------------
 
+The CLI catalog can include a model rejected by its upstream provider.
+`models.py` marks the observed unsupported route
+`opencode/github-copilot/gemini-4-argon` as unavailable, and selection rejects
+it even from an older cache. This applies only to that provider/model pair.
+Use `--force-route` for an intentional availability retest; remove the recorded
+exception after a successful provider response confirms support.
+
 List all models with:
 
 ~~~~ bash
@@ -206,6 +213,16 @@ rules are appended after any broad `external_directory: deny` (the `review-shell
 agent previously denied every external path, which made `/tmp/...` snapshots
 unreadable). Reads inside an allowed directory follow the workspace defaults;
 the explicit `edit`/`write`/`patch` denials and `.env` read denials still apply.
+
+With `--allow-shell`, the adapter also allows reads from the project's shell
+output directory at `$XDG_DATA_HOME/opencode/shell/<project-id>/` (default data
+root: `~/.local/share`). The project ID comes from the common Git directory's
+`opencode` marker, falling back to the first root commit; non-Git projects use
+`global`. This permits reading long command output without granting access to
+the rest of OpenCode's data or relaxing write denials.
+For resumed calls, a bounded session export verifies the original session's
+project ID and allows its output directory too, without granting its source
+directory. Failed or malformed session metadata adds no read access.
 
 Resumed sessions can retain their original tool project when `--cwd` changes.
 For OpenCode resumes, `run.py` also grants the effective `--cwd` as an external

@@ -32,6 +32,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -124,14 +125,20 @@ def main() -> int:
         command, label = found
 
     try:
-        proc = subprocess.run(command, input=body, text=True, capture_output=True)
+        # Clipboard owners may daemonize and retain stdout/stderr. Pipes make
+        # communicate() wait for that daemon indefinitely after the parent exits.
+        # A temporary file preserves bounded failure diagnostics without EOF waits.
+        with tempfile.TemporaryFile(mode="w+b") as diagnostics:
+            proc = subprocess.run(command, input=body, text=True,
+                                  stdout=diagnostics, stderr=diagnostics)
+            diagnostics.seek(0)
+            detail = diagnostics.read(4096).decode("utf-8", "replace").strip()
     except OSError as exc:
         print(f"error: could not run {label}: {exc}", file=sys.stderr)
         sys.stdout.write(body)
         return 2
 
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout).strip()
         print(f"error: {label} exited with {proc.returncode}"
               + (f": {detail}" if detail else ""), file=sys.stderr)
         sys.stdout.write(body)

@@ -436,8 +436,19 @@ python3 <skill-dir>/scripts/run.py \
   --run-id <run-id> \
   --task-id <followup-task-id> \
   --resume-task <initial-task-id> \
+  --context-file <external-context.md> \
+  --add-dir <other-external-read-directory> \
+  --allow-shell --isolate \
   --prompt-file <followup-prompt.md>
 ~~~~
+
+Repeat the initial call's `--context-file` and `--add-dir` arguments when the
+follow-up needs those external reads. Also repeat its `--allow-shell`,
+`--no-tools`, `--isolate`, and `--guard` options when applicable; these grants
+and execution policies are not restored by `--resume-task`. Omit the example's
+optional flags and paths when they were not needed for the initial call.
+The route, effort, sandbox mode, and cwd are inherited unless overridden by a
+supported option.
 
 Resume the stored conversation when supported. Context retention, compaction,
 and token accounting depend on the CLI and model. Summarize and start a fresh
@@ -482,9 +493,11 @@ python3 <skill-dir>/scripts/run.py --run-id <run-id> --task-id <task-id> \
 
 The guard is opt-in and costs one tree walk plus hashing per attempt. It
 records file contents, modes, symlink targets (including directory symlinks),
-HEAD and its resolved current branch, the index, and the contents of in-progress
+HEAD and its resolved current branch, semantic staged index entries and
+persistent index flags, and the contents of in-progress
 merge/rebase markers. Unrelated shared refs and loose/packed ref storage changes
-do not invalidate the review. Git-ignored untracked paths (`dist/`,
+do not invalidate the review. Index stat-cache refreshes also leave the verdict
+unchanged. Git-ignored untracked paths (`dist/`,
 `.svelte-kit/`, compiled test bundles) are skipped by default, because a read-only
 reviewer that runs a focused build regenerates them and they are derived artifacts, not protected
 inputs; tracked files stay protected even when an ignore pattern matches them.

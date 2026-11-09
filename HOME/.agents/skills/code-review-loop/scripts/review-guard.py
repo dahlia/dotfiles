@@ -178,6 +178,29 @@ def metadata(root, marker=True):
                     for item in re.findall(rb'flags: ([0-9a-f]+)', debug)
                 ]
                 result[name] = ['index-semantic', stage, flags]
+            elif name == 'config':
+                # Branch creation/renaming in another linked worktree updates
+                # the shared config too. Only this checkout's branch config
+                # affects its review inputs; retain all non-branch settings.
+                current_branches = {
+                    target[len('refs/heads/'):]
+                    for _source, target in chain if target.startswith('refs/heads/')
+                }
+                entries = subprocess.check_output(
+                    ['git', 'config', '--file', str(path), '--null', '--list'],
+                    env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'},
+                ).split(b'\0')
+                relevant = []
+                for entry in entries:
+                    if not entry:
+                        continue
+                    key = os.fsdecode(entry.partition(b'\n')[0])
+                    if key.startswith('branch.'):
+                        branch = key[len('branch.'):].rsplit('.', 1)[0]
+                        if branch not in current_branches:
+                            continue
+                    relevant.append(entry.hex())
+                result[name] = ['config-semantic', stat.S_IMODE(path.stat().st_mode), relevant]
             else:
                 result[name] = record(path)
             if path.is_dir() and not path.is_symlink():

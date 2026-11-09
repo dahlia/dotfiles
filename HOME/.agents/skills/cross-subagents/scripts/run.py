@@ -1418,6 +1418,56 @@ def _opencode_external_directory_rules(workspace_dirs: list[str] | None) -> list
     return rules
 
 
+
+def _opencode_shell_output_dirs(cwd: str | None, env: dict[str, str]) -> list[str]:
+    """Grant only this project's persisted shell output, never all OpenCode data.
+
+    OpenCode v2 keys shell spools by the Git project ID stored in the common
+    Git directory's ``opencode`` file (initially the first root commit). Non-Git
+    projects use ``global``. Use the child's XDG data root, not the host's.
+    """
+    project_dir = str(Path(cwd or os.getcwd()).resolve())
+    project_id = "global"
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"], cwd=project_dir,
+            capture_output=True, text=True, timeout=5,
+            env={**env, "GIT_OPTIONAL_LOCKS": "0"},
+        )
+        if proc.returncode == 0:
+            git_dir = Path(proc.stdout.strip())
+            if not git_dir.is_absolute():
+                git_dir = Path(project_dir) / git_dir
+            marker = git_dir / "opencode"
+            project_id = marker.read_text().strip() if marker.is_file() else ""
+            if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", project_id):
+                roots = subprocess.run(
+                    ["git", "rev-list", "--max-parents=0", "HEAD"], cwd=project_dir,
+                    capture_output=True, text=True, timeout=5,
+                    env={**env, "GIT_OPTIONAL_LOCKS": "0"},
+                )
+                ids = sorted(line for line in roots.stdout.splitlines()
+                             if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", line))
+                if roots.returncode != 0 or not ids:
+                    return []
+                project_id = ids[0]
+    except (OSError, subprocess.SubprocessError):
+        return []
+    output_dir = _opencode_shell_output_dir(project_id, env)
+    return [output_dir] if output_dir else []
+
+
+def _opencode_shell_output_dir(project_id: Any, env: dict[str, str]) -> str | None:
+    """Accept only a project ID, never a path supplied by session metadata."""
+    if not isinstance(project_id, str) or not re.fullmatch(
+        r"global|[0-9a-f]{40}|[0-9a-f]{64}", project_id
+    ):
+        return None
+    home = Path(env.get("HOME") or str(Path.home()))
+    data = Path(env.get("XDG_DATA_HOME") or home / ".local" / "share")
+    return str(data / "opencode" / "shell" / project_id)
+
+
 def opencode_read_only_config(
     existing_cfg: dict[str, Any],
     *,
@@ -1571,6 +1621,7 @@ def invoke_opencode(
     workspace_dirs: list[str] | None = None,
 ) -> dict[str, Any]:
     policy = policy or {}
+    preflight_cleanup_verified = True
     result_file = attempt_dir / "result.md"
     if result_file.exists():
         result_file.unlink()
@@ -1657,6 +1708,35 @@ def invoke_opencode(
                 file=sys.stderr,
             )
 
+        # Long shell output is persisted outside the checkout. Allow its
+        # project-specific spool as a read target; write/edit/patch stay denied.
+        read_roots = list(workspace_dirs or [])
+        if policy.get("allow_shell") and not policy.get("no_tools"):
+            read_roots.extend(_opencode_shell_output_dirs(cwd, env_for_proc))
+            if resume_session_id and has_session_cmd:
+                # A resumed session retains its original tool project even if
+                # --cwd now selects another repository. Resolve just that
+                # project's spool, without granting its source directory.
+                export_cmd = [binary, "session", "export"]
+                if has_standalone:
+                    export_cmd.append("--standalone")
+                export_cmd.append(resume_session_id)
+                try:
+                    exp_code, exp_out, _, exp_timeout, exp_cleanup = run_process_with_timeout(
+                        export_cmd, "", cwd, 20, env=env_for_proc
+                    )
+                    preflight_cleanup_verified = exp_cleanup
+                    if exp_code == 0 and not exp_timeout and exp_cleanup:
+                        exported = json.loads(exp_out)
+                        data_root = exported.get("data") if isinstance(exported.get("data"), dict) else exported
+                        info = data_root.get("info") or {}
+                        if isinstance(info, dict) and info.get("id") == resume_session_id:
+                            output_dir = _opencode_shell_output_dir(info.get("projectID"), env_for_proc)
+                            if output_dir:
+                                read_roots.append(output_dir)
+                except (OSError, ValueError, TypeError, AttributeError):
+                    # Unknown session metadata never broadens read access.
+                    pass
         configured, verified_ro = opencode_read_only_config(
             existing_cfg,
             major_ver=major_ver,
@@ -1664,7 +1744,7 @@ def invoke_opencode(
             allow_shell=bool(policy.get("allow_shell")),
             allow_network=allow_network,
             isolate=bool(policy.get("isolate")),
-            workspace_dirs=workspace_dirs,
+            workspace_dirs=read_roots,
         )
 
         if not verified_ro:
@@ -1706,6 +1786,7 @@ def invoke_opencode(
     code, out, err, timed_out, cleanup_verified = run_process_with_timeout(
         cmd, prompt_text, cwd, timeout_sec, env=env_for_proc
     )
+    cleanup_verified = cleanup_verified and preflight_cleanup_verified
     events_file.write_text(out, encoding="utf-8")
     stderr_file.write_text(err, encoding="utf-8")
 
@@ -1723,6 +1804,8 @@ def invoke_opencode(
     usage = {"input_tokens": 0, "output_tokens": 0}
     observed_model: str | None = None
     last_finish_reason = ""
+    usage_step_ids: set[str] = set()
+    saw_stream_usage = False
 
     for line in out.splitlines():
         line = line.strip()
@@ -1751,6 +1834,31 @@ def invoke_opencode(
                 stream_step_text.append(part["text"])
         elif ev_type in ("step_finish", "step-finish", "finish", "message.completed"):
             part = ev.get("part") or ev
+            # Step usage is incremental and remains authoritative on timeout,
+            # when exporting a still-running session cannot verify completion.
+            # Deduplicate replayed step IDs; events without IDs remain distinct.
+            step_id = str(part.get("id") or part.get("partID") or "")
+            if not step_id or step_id not in usage_step_ids:
+                if step_id:
+                    usage_step_ids.add(step_id)
+                tokens = part.get("tokens")
+                if isinstance(tokens, dict):
+                    saw_stream_usage = True
+                    for source, target in (("input", "input_tokens"), ("output", "output_tokens"),
+                                           ("reasoning", "reasoning_tokens")):
+                        value = tokens.get(source)
+                        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+                            usage[target] = usage.get(target, 0) + int(value)
+                    cache = tokens.get("cache")
+                    if isinstance(cache, dict):
+                        for source in ("read", "write"):
+                            value = cache.get(source)
+                            if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+                                key = f"cache_{source}_tokens"
+                                usage[key] = usage.get(key, 0) + int(value)
+                cost = part.get("cost")
+                if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
+                    usage["cost"] = usage.get("cost", 0) + cost
             last_finish_reason = str(part.get("reason") or part.get("finish") or "").lower()
             if last_finish_reason in OPENCODE_SUCCESS_FINISH:
                 stream_final_text = "".join(stream_step_text)
@@ -1795,8 +1903,12 @@ def invoke_opencode(
                     data_root = exp_json.get("data") if isinstance(exp_json.get("data"), dict) else exp_json
                     info = data_root.get("info") or {}
                     tokens = info.get("tokens") or {}
-                    usage["input_tokens"] = int(tokens.get("input", 0))
-                    usage["output_tokens"] = int(tokens.get("output", 0))
+                    # The session total can include earlier resumed turns.
+                    # Prefer this invocation's completed steps; export is the
+                    # compatibility fallback when the stream omitted usage.
+                    if not saw_stream_usage:
+                        usage["input_tokens"] = int(tokens.get("input", 0))
+                        usage["output_tokens"] = int(tokens.get("output", 0))
 
                     msgs = data_root.get("messages") or []
                     # Require at least one user message in the exported session and inspect only the current turn's assistant messages
@@ -4248,7 +4360,7 @@ def build_run_report(run_id: str, only_significant: bool = False) -> dict[str, A
                 "official_agent": node["official_agent"],
                 "official_model_id": node["official_model_id"],
                 "significant": False,
-                "assisted_by": f"Assisted-by: {node['official_agent']} ({node['official_model_id']})",
+                "assisted_by": f"Assisted-by: {node['official_agent']}:{node['official_model_id']}",
                 "tasks": [],
             },
         )
