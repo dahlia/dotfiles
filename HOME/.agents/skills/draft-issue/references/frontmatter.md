@@ -13,6 +13,9 @@ type: Bug
 labels:
   - bug
 milestone: 0.5.0
+issue-fields:
+  Priority: High
+  "Target date": "2026-12-01"
 relates-to:
   - "#39"
 blocked-by:
@@ -39,11 +42,22 @@ Keys
     prefix the selected template defines, which the draft keeps.
 
 `type`
-:   The issue type, for organizations that define them on GitHub (`Bug`,
-    `Feature`, `Task`, and whatever else the organization configured). Read the
-    real list with `collect_context.py` or the GraphQL query in
-    *references/forges.md*. Repositories outside an organization have no issue
-    types, so omit the key.
+:   An issue type available on the target GitHub repository (`Bug`, `Feature`,
+    `Task`, or a custom type). Both organization and personal accounts can
+    define types. Read the real list with `collect_context.py` or the GraphQL
+    query in *references/forges.md*. Omit the key when no type applies; do not
+    omit it merely because the repository belongs to a personal account.
+
+`issue-fields`
+:   A mapping from exact custom issue field names to values, using the target
+    repository's available fields. `collect_context.py` lists field IDs, data
+    types, visibility, and select options. Use exact option names, numeric
+    values for number fields, text for text fields, and quoted `YYYY-MM-DD`
+    strings for dates. Include only values supported by the request or tracker
+    evidence. These fields belong to the organization or personal account and
+    store values on issues; they are separate from issue-form answers in the
+    body and custom fields scoped to a single project. See [Managing issue
+    fields](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/managing-issue-fields).
 
 `labels`
 :   Labels that already exist in the repository, by exact name. Reuse the ones
@@ -135,6 +149,7 @@ For GitHub CLI 2.97.0, the mapping is:
 | `title`         | `--title`                                |
 | `type`          | `--type`                                 |
 | `labels`        | `--label` (repeatable)                   |
+| `issue-fields`  | Set issue field values after creation via a supported API or UI |
 | `milestone`     | `--milestone`                            |
 | `parent`        | `--parent`, or `addSubIssue`             |
 | `sub-issues`    | `addSubIssue` after creation             |
@@ -146,6 +161,19 @@ Check the installed `gh issue create --help` rather than assuming these flags
 exist in every release. When a relationship has no CLI flag, use the GitHub
 GraphQL procedure below after creating the issue. API availability also
 depends on the target GitHub host; another forge needs its own API.
+
+
+Posting custom issue fields
+---------------------------
+
+When publication or an update is authorized, check the installed CLI, connected
+GitHub tools, or current API schema for issue-field support. Resolve field and
+option IDs from the target repository; do not use project-field mutations for
+issue fields or assume organization-only endpoints work for personal accounts.
+If the available tools cannot set a field, keep its value in the draft and
+report the pending operation. After applying values, read them back from the
+issue and verify them, including when updating an existing issue. Do not
+create or reconfigure account-level fields as part of posting a draft.
 
 
 Posting GitHub relationships

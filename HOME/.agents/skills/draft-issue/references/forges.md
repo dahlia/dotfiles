@@ -23,7 +23,7 @@ gh api repos/OWNER/REPO/contents/.github/ISSUE_TEMPLATE --jq '.[].name'
 gh api -H "Accept: application/vnd.github.raw" \
   "repos/OWNER/REPO/contents/.github/ISSUE_TEMPLATE/01_bug.yml"
 
-# Issue types, only for repositories owned by an organization
+# Issue types for the target repository, whether its owner is an org or a user
 gh api graphql -f query='
   query($owner: String!, $name: String!) {
     repository(owner: $owner, name: $name) {
@@ -35,6 +35,14 @@ gh api graphql -f query='
 gh label list --repo OWNER/REPO --limit 200
 gh api "repos/OWNER/REPO/milestones?state=open&per_page=100" --jq '.[].title'
 ~~~~
+
+Issue types and custom issue fields can be defined by organization or personal
+account owners. Check the target repository's `issueTypes` and `issueFields`
+rather than using ownership as a capability check. `collect_context.py` also
+collects custom field definitions and select options. Failed queries or fields
+hidden from the current viewer do not establish that none are configured.
+See [Managing issue fields](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/managing-issue-fields)
+for field types, visibility, and the distinction from project fields.
 
 
 GitLab

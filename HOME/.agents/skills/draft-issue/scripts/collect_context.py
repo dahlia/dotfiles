@@ -2,7 +2,7 @@
 """Collect what you need to know before drafting an issue.
 
 Prints the target repository's issue templates, labels, issue types,
-milestones, and a sample of recent issues. The sample is also the evidence for
+custom issue fields, milestones, and a sample of recent issues. The sample is also the evidence for
 choosing the language of the draft: the script reports the script mix, but the
 decision stays with the reader.
 
@@ -202,16 +202,56 @@ def github_section(owner_repo: str, recent: int, local_root: str | None) -> dict
         "-F", f"owner={owner_repo.split('/')[0]}",
         "-F", f"name={owner_repo.split('/')[-1]}",
     ])
-    names = []
-    if isinstance(types, dict):
-        nodes = (((types.get("data") or {}).get("repository") or {}).get("issueTypes") or {}).get("nodes")
-        names = [n.get("name") for n in nodes or [] if n.get("name")]
-    if names:
-        print(", ".join(names) + "\n")
+    repository = ((types.get("data") or {}).get("repository") or {}) if isinstance(types, dict) else {}
+    connection = repository.get("issueTypes")
+    if err or (isinstance(types, dict) and types.get("errors")) or not isinstance(connection, dict):
+        message = err or "incomplete GraphQL response"
+        print(f"_Unavailable: {message}_\n")
+        result["issue_types"] = None
+        result["issue_types_error"] = message
     else:
-        print("_None (not an organization repository, or none configured)._"
-              + (f" (API said: {err})" if err else "") + "\n")
-    result["issue_types"] = names
+        names = [node["name"] for node in connection.get("nodes") or []
+                 if node and node.get("name")]
+        result["issue_types"] = names
+        print((", ".join(names) if names else
+               "_No issue types available to the current viewer._") + "\n")
+
+    print("## Custom issue fields\n")
+    fragments = " ".join(
+        f"... on IssueField{kind} {{ id name dataType description visibility"
+        + (" options { id name }" if kind in ("SingleSelect", "MultiSelect") else "")
+        + " }"
+        for kind in ("Date", "Number", "Text", "SingleSelect", "MultiSelect")
+    )
+    fields, ferr = gh_json([
+        "api", "graphql", "-f",
+        "query=query($owner: String!, $name: String!) {"
+        " repository(owner: $owner, name: $name) { viewerCanSeeIssueFields"
+        " issueFields(first: 100) { nodes { __typename " + fragments
+        + " } pageInfo { hasNextPage } } } }",
+        "-F", f"owner={owner_repo.split('/')[0]}",
+        "-F", f"name={owner_repo.split('/')[-1]}",
+    ])
+    repository = ((fields.get("data") or {}).get("repository") or {}) if isinstance(fields, dict) else {}
+    connection = repository.get("issueFields")
+    if ferr or (isinstance(fields, dict) and fields.get("errors")) or not isinstance(connection, dict):
+        message = ferr or "incomplete GraphQL response"
+        print(f"_Unavailable: {message}_\n")
+        result["issue_fields"] = None
+        result["issue_fields_error"] = message
+    else:
+        definitions = [node for node in connection.get("nodes") or [] if node]
+        result["issue_fields"] = definitions
+        result["viewer_can_see_issue_fields"] = repository.get("viewerCanSeeIssueFields")
+        if definitions:
+            print("~~~~ json\n" + json.dumps(definitions, ensure_ascii=False, indent=2)
+                  + "\n~~~~\n")
+        else:
+            print("_No issue fields visible to the current viewer; this does not "
+                  "rule out restricted fields._\n")
+        if (connection.get("pageInfo") or {}).get("hasNextPage"):
+            result["issue_fields_truncated"] = True
+            print("_More fields exist; paginate issueFields before choosing values._\n")
 
     print("## Labels\n")
     labels, err = gh_json(["label", "list", "--repo", owner_repo, "--limit", "200",

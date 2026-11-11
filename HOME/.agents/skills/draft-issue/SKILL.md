@@ -3,7 +3,7 @@ name: draft-issue
 description: >
   Draft an issue for a project's own tracker: pick the language the tracker
   actually uses, follow its issue template when one exists, keep the heading
-  scale the template established, fill in labels, issue type, milestone, and
+  scale the template established, fill in labels, issue type, custom issue fields, milestone, and
   relationships between issues, then format the draft with hongdown. Use this
   skill whenever the user asks to write, draft, file, open, or rewrite an issue
   or bug report, mentions an issue template, or says things like "이슈 작성해 줘",
@@ -95,7 +95,7 @@ Read the tracker before writing a word
 
 Read the repository's own material instead of assuming GitHub defaults.
 `scripts/collect_context.py` gathers most of it in one pass: templates, labels,
-issue types, milestones, and recent issues with their text, which is also the
+issue types, custom issue fields, milestones, and recent issues with their text, which is also the
 evidence for the language decision. Paths below are relative to this skill's
 directory.
 
@@ -295,14 +295,21 @@ Fill in the frontmatter
 -----------------------
 
 Everything that is not the body goes in YAML frontmatter at the top of the
-draft: title, issue type, labels, milestone, and relationships to other
-issues. *references/frontmatter.md* has the schema, the example, and how each
+draft: title, issue type, custom issue fields, labels, milestone, and
+relationships to other issues. *references/frontmatter.md* has the schema, the example, and how each
 field maps to `gh issue create` and GitHub GraphQL mutations.
 
 Choose labels and types from what the repository actually offers. An invented
-label does not apply, and a type from another organization does not exist on
-this one. Milestones are optional: set one when the conversation or the
-project's roadmap points at a release, and leave it out when nothing does.
+label does not apply, and a type from another owner may not exist for
+this repository. GitHub supports issue types and custom issue fields for both
+organization-owned and personally owned repositories. Query the target
+repository rather than inferring availability from its owner type. An API or
+permission failure means availability is unknown, not that no fields exist.
+Record applicable field values in `issue-fields` frontmatter using the actual
+field names and allowed options; do not invent priority, effort, or dates.
+Issue fields are distinct from issue-form body fields and project-only fields.
+Milestones are optional: set one when the conversation or the project's roadmap
+points at a release, and leave it out when nothing does.
 
 When several issues are drafted together, check each pair for a relationship
 that actually exists. Two drafts from the same session are not related just
@@ -411,7 +418,8 @@ Before handing the draft over:
     instead of drafting around it?
  -  Do the headings follow the template's levels, or, with no template, stay at
     `##` and below, with no headings at all on a short issue?
- -  Are the labels, type, and milestone real for this repository?
+ -  Are the labels, type, custom issue fields and their values, and milestone
+    real for this repository?
  -  Is the language the same as the tracker's, throughout, including the title?
 
 
