@@ -35,7 +35,7 @@ Read [the form preferences](references/form-preferences.tsv) and
 or converting text. These are curated decisions, not a complete dictionary
 and not global search-and-replace tables.
 
- -  For Chinese, Japanese, or Vietnamese words and proper names, also read
+ -  For proper names or Chinese, Japanese, or Vietnamese loans, also read
     [names and foreign readings](references/names-and-readings.md).
  -  For ruby, custom readings, or Hangul-only output, read
     [rendering and tools](references/rendering-and-tools.md).
@@ -103,6 +103,26 @@ Taiwanese dictionary's standard form for an approved personal preference.
 Names and foreign words
 -----------------------
 
+Classify a proper name before choosing its script. Keep Latin-script personal
+names in their attested Latin spelling, including diacritics. Choose Korean
+particles from the name's Korean loanword spelling for its source language,
+not its final written letter. Do not assume every Latin-script name is English.
+This does not override an evidenced Han-name choice such as 黃仁勳(Jensen
+Huang).
+
+Apply the Latin-script default to companies in the private sector and their
+products too. Check the official Korean/Korea website: use a preferred official
+Hangul brand form when there is one, and retain Latin branding when that is the
+preferred form. Do not infer a brand's Korean spelling from its English name or
+logo alone.
+
+For countries, places, and organizations outside that company category, use
+established Korean names; otherwise transcribe opaque name elements and
+translate elements whose meaning is transparent in the source language.
+Apply Hanja to the resulting Korean Sino-Korean parts. Use 유럽 聯合 rather
+than EU, and the established abbreviation 蘇聯 rather than 소聯. See the
+supporting reference for the category rules and the author's other examples.
+
 Write Chinese, Japanese, and Vietnamese loanwords in their attested Han
 characters, including chữ Nôm where appropriate. Research unknown spellings
 on the web. Provide the intended local-language name in Hangul according to
@@ -111,7 +131,7 @@ converter reading mapping. 越南 can stand alone when its intended reading is
 already supplied by the destination; otherwise annotate 베트남.
 
 Choose actual names with regard to origin, nationality, usage history, and
-recognition among Korean readers. Prefer 黃仁勳(Jensen Huang) in the user's
+recognition among Korean readers. Prefer 黃仁勳(Jensen Huang) in Hong Minhee's
 specified example. Distinguish a person's own Han-character name from a
 Chinese translation or phonetic transcription assigned by others.
 
@@ -197,9 +217,11 @@ comparison catches omissions; the separate meaning check catches homophones.
  -  Check lexical exceptions before character preferences. A Hangul round trip
     cannot detect a wrong homophone. Check that no native word acquired a kun
     reading and no abbreviation was expanded inside its shortened form.
- -  Verify name evidence, current names, approved Japanese variants, foreign
-    Hangul spellings, and intended readings. Choose particles by those readings,
-    for example 東京를 when read 도쿄 and 東京을 when read 동경.
+ -  Verify each name's category, evidence, current spelling, approved Japanese
+    variants, and intended reading. Check official Korean branding for companies
+    and products. Choose particles by the appropriate language's Korean reading:
+    Albert Camus는 (알베르 카뮈) illustrates the rule for Latin-script names.
+    For Han names, use 東京를 when read 도쿄 and 東京을 when read 동경.
  -  Check numerical expressions, punctuation, and literal machine text. Compare
     an edited source for vocabulary, numbers, negation, conditions, and meaning.
  -  With a configured renderer, verify tricky readings in its actual output,
