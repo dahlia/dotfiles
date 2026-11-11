@@ -50,7 +50,7 @@ Select words before selecting characters
 
 Write every Sino-Korean word or morpheme in Hanja, including short everyday
 expressions: 卽, 所謂, 於此彼, 亦是, 勿論, 關하다, and 對하다. In hybrid words,
-convert only the Sino-Korean part: 全혀, 애初, 두番째. Keep native Korean,
+convert only the Sino-Korean part: 全혀, 애初, 두 番째. Keep native Korean,
 particles, and endings in Hangul. Select foreign-word spellings under the
 common-noun and proper-name rules below.
 
@@ -182,11 +182,18 @@ unresolved date boundary.
 Numbers and punctuation
 -----------------------
 
-Use Arabic numerals for quantities in horizontal writing and Han numerals in
-vertical writing. Keep numeric elements inside lexical words in Hanja in either
-direction: 一般, 一石二鳥. Native 두 in 두番째 stays native. Keep Arabic digits
-in version numbers, code, URLs, and product names in either direction. Ask
-about unresolved numeral styles or a shared horizontal/vertical source when
+Keep native Korean number words in Hangul in either writing direction:
+하나/한, 둘/두, 셋/세, 넷/네, 다섯, 여섯, and so on. Preserve them before
+counters and in hybrid expressions: 한 사람, 두 個, 세 番, 다섯 마리,
+여섯 時間, 두 番째. Do not replace native 두 with 2 or 二. Keep the space
+in 두 番째.
+
+When a quantity is written with numerals rather than native Korean words,
+use Arabic numerals in horizontal writing and Han numerals in vertical writing.
+Keep numeric elements inside lexical words in Hanja in either direction:
+一般, 一石二鳥. Keep Arabic digits in version numbers, code, URLs, and
+product names in either direction. Ask about unresolved numeral styles or
+a shared horizontal/vertical source when
 the choice affects the task; do not impose a default source layout.
 
 Unless the user requests another convention:
@@ -264,8 +271,10 @@ comparison catches omissions; the separate meaning check catches homophones.
     and products. Choose particles by the appropriate language's Korean reading:
     Albert Camus는 (알베르 카뮈) illustrates the rule for Latin-script names.
     For Han names, use 東京를 when read 도쿄 and 東京을 when read 동경.
- -  Check numerical expressions, punctuation, and literal machine text. Compare
-    an edited source for vocabulary, numbers, negation, conditions, and meaning.
+ -  Check that native Korean number words remain in Hangul and retain correct
+    spacing, including 두 番째. Check other numerical expressions, punctuation,
+    and literal machine text. Compare an edited source for vocabulary, numbers,
+    negation, conditions, and meaning.
  -  With a configured renderer, verify tricky readings in its actual output,
     including Hangul-only output. 茶禮 may need 차례 and 다례 in different
     places; a single document-wide mapping may not express both. Preserve
