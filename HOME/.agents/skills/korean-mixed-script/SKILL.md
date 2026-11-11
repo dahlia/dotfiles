@@ -37,6 +37,8 @@ and not global search-and-replace tables.
 
  -  For proper names or Chinese, Japanese, or Vietnamese loans, also read
     [names and foreign readings](references/names-and-readings.md).
+ -  For foreign common nouns or specialist terminology, read
+    [foreign terms](references/foreign-terms.md).
  -  For ruby, custom readings, or Hangul-only output, read
     [rendering and tools](references/rendering-and-tools.md).
  -  For uncertain character forms, read
@@ -49,7 +51,8 @@ Select words before selecting characters
 Write every Sino-Korean word or morpheme in Hanja, including short everyday
 expressions: 卽, 所謂, 於此彼, 亦是, 勿論, 關하다, and 對하다. In hybrid words,
 convert only the Sino-Korean part: 全혀, 애初, 두番째. Keep native Korean,
-particles, endings, and non-Sinitic loans in their appropriate original script.
+particles, and endings in Hangul. Select foreign-word spellings under the
+common-noun and proper-name rules below.
 
 Do not replace a native word with a synonymous Hanja word or use Japanese-style
 kun readings/semantic readings for Korean: 사람 does not become 人, and 귀
@@ -69,6 +72,31 @@ loan must be reconstructed. Research uncertain cases and ask the user to decide.
 Saisiot belongs to Hangul spelling. Use 數字 for 숫자, 回數 for 횟수, and 茶물
 for 찻물, without inserting ㅅ after a Hanja character. Preserve the correct
 Hangul spelling in readings and Hangul-only output, for example 찻물.
+
+
+Foreign common nouns and technical terms
+----------------------------------------
+
+Use Hangul for foreign common nouns, except loans covered by the specific
+Chinese/Japanese/Vietnamese Han-spelling rule. Prefer a reasonably established
+Korean translation for the intended sense, including a specialist term, even
+when a transcription is also common. Write its Sino-Korean parts in Hanja.
+When no established translation exists
+in that field or the relevant project's Korean community, transcribe the term
+into Hangul under Korean loanword spelling rules. Do not leave an ordinary
+English noun in Latin script merely because the subject is technical.
+
+Use 反復子 for the programming concept iterator, 패킷 for a network packet,
+and 휠 for wheel in Python packaging. Do not invent translations such as 보쌈
+for packet or literally translate a project's term without evidence of usage.
+First-mention glosses such as 反復子(iterator) and 휠(wheel) are allowed and
+often help, especially for unfamiliar community-specific terms.
+
+Keep actual inline code unchanged, using backticks in Markdown or `<code>`
+in HTML. Do not newly mark an ordinary noun as code to avoid translating or
+transcribing it. These term choices do not authorize changing native Korean
+vocabulary or the vocabulary of a Korean quotation. Research unsettled terms
+and ask when the evidence leaves a material ambiguity.
 
 
 Resolve forms by lexical context
@@ -115,6 +143,14 @@ products too. Check the official Korean/Korea website: use a preferred official
 Hangul brand form when there is one, and retain Latin branding when that is the
 preferred form. Do not infer a brand's Korean spelling from its English name or
 logo alone.
+
+Technology and software-project names such as Python, Rust, React, Git, and
+Linux follow the brand-name policy too. A derived organization's name may
+retain that project name: Linux 財團 and GNU 프로젝트. Use 自由 소프트웨어
+財團 for Free Software Foundation and 自由 소프트웨어 運動 for the free
+software movement. See the supporting reference for these
+choices and ask about unresolved cases; technical common nouns remain subject
+to the foreign-term rules.
 
 For countries, places, and organizations outside that company category, use
 established Korean names; otherwise transcribe opaque name elements and
@@ -208,10 +244,16 @@ Check before delivery
 
 Review the complete result, not just the characters that look unfamiliar.
 For a conversion, compare the source's word sequence with the output's intended
-Hangul readings, allowing only the requested spelling, spacing, and punctuation
-corrections. Resolve missing or duplicated morphemes before delivery. This
+Hangul readings, accounting for authorized foreign-term translations or
+transcriptions and the requested spelling, spacing, and punctuation corrections.
+Resolve missing or duplicated morphemes before delivery. This
 comparison catches omissions; the separate meaning check catches homophones.
 
+ -  Inspect Latin-script spans throughout the whole document, including later
+    sections. Distinguish approved names, code, literal notation, preserved
+    originals, and first-mention glosses from untranslated common nouns.
+    Apply the chosen Korean terminology consistently; the form checker below
+    does not detect English nouns left in prose.
  -  Check remaining Hangul for overlooked Sino-Korean morphemes, and every
     uncertain Hanja compound for the intended meaning and actual usage.
  -  Check lexical exceptions before character preferences. A Hangul round trip

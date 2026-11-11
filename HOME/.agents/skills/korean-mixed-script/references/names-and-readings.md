@@ -114,13 +114,46 @@ the brand from a local subsidiary's legal name when they differ.
 [Apple Korea site]: https://www.apple.com/kr/
 
 
+Technologies, projects, and derived organization names
+------------------------------------------------------
+
+Apply the company/product brand policy to names that identify a technology,
+software project, library, framework, or toolchain. The author's examples
+retain Python, Rust, React, Git, and Linux in Latin script. For other names,
+apply the official Korean brand policy. Community usage of a generic term
+alone does not override a project's official name. Do not treat every
+English-looking word in a project's documentation as a proper name. Preserve
+actual code identifiers separately: Git names the project, while a literal
+`git` command is code. Ordinary terminology such as wheel in Python packaging
+follows [the foreign-term rules](foreign-terms.md).
+
+An organization named after a technology or project may retain that selected
+proper-name component while the rest follows established Korean wording.
+The author's specified forms are Linux 財團 for Linux Foundation and GNU
+프로젝트 for GNU Project. This does not preserve an entire English name merely
+because one component is a project name.
+
+Use 自由 소프트웨어 財團 for Free Software Foundation. Here free software
+corresponds to the established Korean expression 자유 소프트웨어, as in
+자유 소프트웨어 운동, rather than 프리 소프트웨어. Apply Hanja to its
+Sino-Korean parts: 自由 소프트웨어 運動. Capitalization or an organization's
+use of a phrase as its name does not by itself make every word a Latin brand.
+Do not replace 자유 with 무료; the concepts differ.
+
+These examples settle those names, not every organization with a technical
+connection. Research established Korean wording and the status of each name
+component. Ask the user when the evidence cannot settle whether a component
+is a retained project/brand name or a phrase to translate or transcribe.
+
+
 Countries, places, and other organizations
 ------------------------------------------
 
-The Latin-script default above does not apply to country names, place names,
-or organizations other than companies in the private sector. A university
-remains in this category even if it is privately operated; political parties
-and international organizations also belong here.
+The Latin-script default above does not apply wholesale to country names,
+place names, or organizations other than companies in the private sector.
+The project-name components described above are a specific exception. A
+university remains in this category even if it is privately operated; political
+parties and international organizations also belong here.
 
 Use an established Korean name, including a conventional Han name, before
 constructing a new transcription or translation. Otherwise distinguish the
