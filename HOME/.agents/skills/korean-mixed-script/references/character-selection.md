@@ -71,10 +71,10 @@ References
  -  [Kangxi transcription for 恒]
  -  [NIKL explanation of title marks]
 
-The author's Markdown posts under *~/Projects/dahlia/writings/* are useful
-examples if available. The path is optional, not a dependency. Its presence,
-including older spellings, foreign-language titles, quotations, and possible
-drafts, does not outweigh an explicit decision recorded in this skill.
+The author's Markdown posts in [dahlia/writings] are useful
+examples if available. The repository is optional, not a dependency. Its
+contents, including older spellings, foreign-language titles, quotations, and
+possible drafts, do not outweigh an explicit decision recorded in this skill.
 
 [Standard Korean Language Dictionary]: https://stdict.korean.go.kr/
 [Open Korean Dictionary]: https://opendict.korean.go.kr/
@@ -84,3 +84,4 @@ drafts, does not outweigh an explicit decision recorded in this skill.
 [CUHK 卽 entry]: https://humanum.arts.cuhk.edu.hk/Lexis/lexi-mf/search.php?word=卽
 [Kangxi transcription for 恒]: https://zdic.net/hans/恒
 [NIKL explanation of title marks]: https://www.korean.go.kr/front/onlineQna/onlineQnaView.do?mn_id=216&pageIndex=1&qna_seq=328219&searchCondition=&searchKeyword=
+[dahlia/writings]: https://github.com/dahlia/writings
