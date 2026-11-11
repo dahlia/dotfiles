@@ -419,7 +419,11 @@ def collect_opencode_models(
         )
         if provider_slug == "opencode":
             auth_plan = "free" if is_free_tagged else ("api_key" if "key" in auth_method else "unknown")
-        elif provider_slug in ("opencode-go", "github-copilot") or "oauth" in auth_method:
+        # Kimi Code membership uses an API key, but the coding endpoint is
+        # subscription billed: https://www.kimi.com/en/help/kimi-code/faq
+        elif provider_slug in (
+            "opencode-go", "github-copilot", "kimi-code-plan-global", "kimi-for-coding"
+        ) or "oauth" in auth_method:
             auth_plan = "subscription"
         elif any(k in auth_method for k in ("key", "api", "token")):
             auth_plan = "api_key"

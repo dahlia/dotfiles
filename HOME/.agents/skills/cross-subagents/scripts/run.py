@@ -3090,7 +3090,7 @@ def resolve_pinned_fallback_constraints(
     cli_excludes = _unique_lower(exclude_vendors)
     cli_exclude_agents = _unique_lower(exclude_agents)
 
-    if planned:
+    if planned is not None:
         planned_excludes = _unique_lower(planned.get("exclude_vendor"))
         planned_exclude_agents = _unique_lower(planned.get("exclude_agent"))
         planned_excludes_routes = [
@@ -3098,8 +3098,11 @@ def resolve_pinned_fallback_constraints(
             for r in (planned.get("exclude_route") or [])
             if str(r).strip()
         ]
-        return {
+        policy = {
             "scope": "planned_constraints",
+            "pin_agent": planned.get("pin_agent"),
+            "pin_provider": planned.get("pin_provider"),
+            "use_saved_pins": False,
             "exclude_vendors": list(dict.fromkeys(planned_excludes + cli_excludes)),
             "exclude_agents": list(dict.fromkeys(planned_exclude_agents + cli_exclude_agents)),
             "include_vendors": cli_includes or _unique_lower(planned.get("include_vendor")),
@@ -3124,6 +3127,14 @@ def resolve_pinned_fallback_constraints(
                 dict.fromkeys(planned_excludes_routes + list(exclude_route_ids or []))
             ),
         }
+        # Persisted model pins remain hard constraints, even with a tier bound.
+        # Older plans omitted pin fields altogether. Apply the same conservative
+        # model-preservation rule as unplanned explicit routes to those too.
+        if planned.get("pin_model"):
+            policy["pin_model"] = planned["pin_model"]
+        elif policy["max_tier"] is None:
+            policy["pin_model"] = explicit_route["canonical_key"]
+        return policy
 
     vendor = infer_model_vendor(explicit_route)
     if cli_includes:
@@ -3413,8 +3424,7 @@ def execute_task(
                             )
                         if fb_policy.get("pin_model"):
                             selection_rationale += (
-                                "; unplanned fallbacks retain the requested canonical model "
-                                "(pass --max-tier to permit bounded model substitution)"
+                                "; fallbacks retain the requested model constraint"
                             )
                         sel = select_routes(
                             task=task_category,

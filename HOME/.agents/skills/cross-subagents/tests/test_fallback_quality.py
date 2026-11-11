@@ -1,5 +1,6 @@
 """Explicit routes must not silently downgrade when quota runs out."""
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -47,6 +48,46 @@ class FallbackQualityTests(unittest.TestCase):
             policy = self.policy(route, max_tier=2)
         self.assertIsNone(policy["pin_model"])
         self.assertEqual(policy["max_tier"], 2)
+
+    def test_legacy_saved_plan_cannot_replace_haiku_with_sonnet(self):
+        haiku = common.normalize_model_route("opencode", "anthropic", "claude-haiku-5-5")
+        same_model = common.normalize_model_route("claude-code", "anthropic", "claude-haiku-5-5")
+        sonnet = common.normalize_model_route("antigravity", "anthropic", "claude-sonnet-5-5-high")
+        plan = {"steps": [{"route_id": haiku["route_id"], "constraints": {
+            "max_tier": None, "max_cost_index": 0.1, "quality_floor": 0.65,
+            "exclude_vendor": ["openai"], "speed": "fast",
+        }}]}
+        with patch.object(run, "load_selection_plan", return_value=plan), patch.object(
+            select_route, "get_survey", return_value=None
+        ):
+            policy = self.policy(haiku)
+            policy.pop("scope")
+            self.assertFalse(policy["use_saved_pins"])
+            for alternatives, expected in (([sonnet], None), ([sonnet, same_model], same_model["route_id"])):
+                catalog = {r["agent"]: {"usable": True, "routes": [r]} for r in alternatives}
+                selection = select_route.select_routes("prose", all_models=catalog,
+                    quota_state={"buckets": {}, "agents": {}}, **policy)
+                self.assertEqual((selection.get("selected") or {}).get("route_id"), expected)
+
+    def test_step_pins_survive_plan_save_load_and_fallback(self):
+        haiku = common.normalize_model_route("opencode", "anthropic", "claude-haiku-5-5")
+        haiku["quota"] = {"applicable_buckets": haiku["applicable_buckets"]}
+        pins = {"pin_agent": "opencode", "pin_provider": "anthropic",
+                "pin_model": "claude-haiku-5-5"}
+        with tempfile.TemporaryDirectory() as td, patch.object(
+            select_route, "get_cache_dir", return_value=Path(td)
+        ), patch.object(select_route, "collect_all_models", return_value={}), patch.object(
+            select_route, "collect_quota", return_value={}
+        ), patch.object(select_route, "select_routes", return_value={
+            "status": "ok", "selected": haiku, "rationale": "pinned", "fallbacks": []
+        }):
+            select_route.select_step_plan([pins], run_id="quality-test")
+            saved = select_route.load_selection_plan("quality-test")
+            for key, value in pins.items():
+                self.assertEqual(saved["steps"][0]["constraints"].get(key), value)
+            policy = self.policy(haiku, max_tier=2)
+            for key, value in pins.items():
+                self.assertEqual(policy.get(key), value)
 
     def test_saved_plan_retains_its_quality_constraints(self):
         route = common.normalize_model_route("opencode", "opencode-go", "glm-5.3")

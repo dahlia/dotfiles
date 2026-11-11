@@ -34,7 +34,7 @@ from typing import Any, Callable, Iterator
 SCHEMA_VERSION = 2
 # Bump whenever `normalize_official_model_id`, `normalize_model_route`, or family/vendor inference changes,
 # so cached `models/<agent>.json` route records are rebuilt instead of carrying stale derived fields.
-ROUTE_NORMALIZER_VERSION = 3
+ROUTE_NORMALIZER_VERSION = 4
 SKILL_NAME = "cross-subagents"
 
 AGENT_BINARIES: dict[str, list[str]] = {
@@ -96,6 +96,10 @@ WINDOWS_RESERVED_NAMES = {
 
 # Verified cross-provider aliases where a provider prefixes or alters a vendor release version
 VERIFIED_CANONICAL_ALIASES: dict[str, str] = {
+    # Coding endpoint aliases; official API IDs are documented at:
+    # https://www.kimi.ai/blog/kimi-k3-1-pro
+    "k3.1-pro": "kimi-k3.1-pro",
+    "k3.1-pro-highspeed": "kimi-k3.1-pro-highspeed",
     "deepseek-v4.1-flash": "deepseek-flash",
     "deepseek-v4-1-flash": "deepseek-flash",
     "deepseek-v4.1-reasoner": "deepseek-reasoner",

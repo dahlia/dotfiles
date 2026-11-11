@@ -920,6 +920,9 @@ def save_session_pins(pins: dict[str, Any], run_id: str | None = None) -> None:
 
 SELECTION_PLAN_FILENAME = "selection-plan.json"
 PLAN_CONSTRAINT_KEYS = (
+    "pin_agent",
+    "pin_provider",
+    "pin_model",
     "exclude_vendor",
     "exclude_agent",
     "exclude_route",
@@ -1724,6 +1727,9 @@ def select_step_plan(
                 "step": index,
                 "task": task_norm,
                 "constraints": {
+                    "pin_agent": merged.get("pin_agent"),
+                    "pin_provider": merged.get("pin_provider"),
+                    "pin_model": merged.get("pin_model"),
                     "speed": speed,
                     "include_vendor": merged.get("include_vendor") or [],
                     "exclude_vendor": exclude_vendors,
