@@ -362,6 +362,14 @@ bound, `--include-vendor` to widen the vendor allow-list, or `--no-fallback`
 to disable fallback entirely. Family fit estimates alone do not establish that
 a flagship and a flash variant are interchangeable.
 
+When quota prevents this chain from continuing, follow
+[quota hand-over](quota-handover.md). The coordinator must preserve the assigned
+work, reselect under its original requirements, or ask with a disclosed
+30-minute default when those requirements need to change. This recovery may
+start a new task; `run.py` does not conduct the user conversation or arm the
+host timer. Record the new task link with `run.py record-handover` so the final
+report retains the transition.
+
 
 Absolute quota headroom vs. deceptive percentage usage
 ------------------------------------------------------

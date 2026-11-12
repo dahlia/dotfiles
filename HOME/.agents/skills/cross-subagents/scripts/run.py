@@ -3356,6 +3356,12 @@ def execute_task(
                         sandbox_mode=effective_sandbox,
                     )
                     if not ok:
+                        if q_eval.get("exhausted") or "quota" in reason:
+                            raise ValueError(
+                                f"quota_exhausted: Explicit route '{explicit_route['route_id']}' "
+                                f"is ineligible ({reason}). Refresh quota and select another eligible "
+                                "route under the original constraints, or follow the quota hand-over procedure."
+                            )
                         raise ValueError(
                             f"Explicit route '{explicit_route['route_id']}' failed eligibility check ({reason}). "
                             "Pass --force-route to bypass."
@@ -3644,10 +3650,41 @@ def execute_task(
                             if pattern not in guard_patterns:
                                 guard_patterns.append(pattern)
 
+            invocation_prompt = combined_prompt
+            handover_contexts: list[str] = []
             for route_idx, route in enumerate(route_chain):
                 route_buckets = set(route_quota_buckets(route))
                 if exhausted_buckets and (route_buckets & exhausted_buckets):
                     continue
+
+                if attempts_history and attempts_history[-1].get("error_class") == "quota":
+                    previous = attempts_history[-1]
+                    context_path = task_dir / f"quota-handover-{previous['attempt']}.md"
+                    context = _quota_handover_context(
+                        previous, effective_cwd, effective_sandbox, execution_policy,
+                        {
+                            "selection_rationale": selection_rationale,
+                            "include_vendors": include_vendors,
+                            "exclude_vendors": exclude_vendors,
+                            "exclude_agents": exclude_agents,
+                            "max_tier": max_tier,
+                            "max_cost_index": max_cost_index,
+                            "min_context": min_context,
+                            "require_modalities": eff_req_mods,
+                            "require_vision": require_vision,
+                            "selection_plan": load_selection_plan(eff_run_id),
+                        },
+                    )
+                    atomic_write_text(context_path, context)
+                    handover_contexts.append(context)
+                    invocation_prompt = combined_prompt + "\n\n" + "\n\n".join(handover_contexts)
+                    prompt_sha256 = hashlib.sha256(invocation_prompt.encode("utf-8")).hexdigest()
+                    record_handover(
+                        eff_run_id, eff_task_id, eff_task_id,
+                        previous["route_id"], route["route_id"],
+                        "Quota exhausted; continuing through the eligible fallback chain.",
+                        "automatic", str(context_path),
+                    )
 
                 agent = route["agent"]
                 agent_info = (probe_data.get("agents") or {}).get(agent) or {}
@@ -3754,7 +3791,7 @@ def execute_task(
                             res = invoke_codex(
                                 binary,
                                 route,
-                                combined_prompt,
+                                invocation_prompt,
                                 attempt_dir,
                                 effort,
                                 keep_session,
@@ -3772,7 +3809,7 @@ def execute_task(
                             res = invoke_claude_code(
                                 binary,
                                 route,
-                                combined_prompt,
+                                invocation_prompt,
                                 attempt_dir,
                                 effort,
                                 keep_session,
@@ -3791,7 +3828,7 @@ def execute_task(
                             res = invoke_opencode(
                                 binary,
                                 route,
-                                combined_prompt,
+                                invocation_prompt,
                                 attempt_dir,
                                 effort,
                                 keep_session,
@@ -3810,7 +3847,7 @@ def execute_task(
                             res = invoke_antigravity(
                                 binary,
                                 route,
-                                combined_prompt,
+                                invocation_prompt,
                                 attempt_dir,
                                 effort,
                                 keep_session,
@@ -4323,6 +4360,8 @@ def record_native_task(
             "timestamp": now_iso(),
             "run_id": run_id,
             "task_id": eff_task_id,
+            "route_id": meta["route_id"],
+            "status": meta["status"],
             "parent_task_id": eff_parent_task,
             "official_agent": off_agent,
             "official_model_id": off_model,
@@ -4343,6 +4382,115 @@ def _infer_parent_task_from_instance(parent_instance: str | None, known_tasks: s
         if parent_instance == expected_inst:
             return tid
     return None
+
+
+def _quota_handover_context(
+    previous: dict[str, Any], cwd: str, sandbox: str,
+    policy: dict[str, Any], constraints: dict[str, Any],
+) -> str:
+    """Carry failed-attempt evidence, without treating partial output as completed work."""
+    evidence = {
+        key: previous.get(key) for key in (
+            "route_id", "attempt", "status", "error_class", "error", "attempt_dir",
+            "attempt_result_file", "observed_model", "guard", "cleanup_verified",
+        )
+    }
+    excerpt = "(No partial answer was saved.)"
+    partial = previous.get("attempt_result_file")
+    if partial:
+        try:
+            with Path(partial).open(encoding="utf-8") as stream:
+                excerpt = stream.read(24001)
+            if len(excerpt) > 24000:
+                excerpt = excerpt[:24000] + "\n[Truncated; inspect the evidence path if needed.]"
+        except OSError as exc:
+            excerpt = f"Partial answer could not be read: {exc}"
+    return (
+        "Quota hand-over context\n=======================\n"
+        "The previous route exhausted its quota. Continue the original task above with "
+        "its original scope, permissions, write set and acceptance criteria. Inspect the "
+        "current working tree before changing files: the failed attempt may have already "
+        "edited them. Determine completed and remaining work from files and evidence; "
+        "verify partial claims before relying on them. Do not repeat completed edits blindly.\n\n"
+        + json.dumps({"cwd": cwd, "sandbox_mode": sandbox, "tool_policy": policy,
+                      "selection_constraints": constraints, "failed_attempt": evidence},
+                     indent=2, ensure_ascii=False)
+        + "\n\nUnverified partial answer from the failed attempt:\n" + excerpt
+    )
+
+
+def record_handover(
+    run_id: str,
+    from_task: str,
+    to_task: str,
+    from_route: str,
+    to_route: str,
+    reason: str,
+    decision: str,
+    context_file: str | None = None,
+) -> dict[str, Any]:
+    """Persist a coordinator decision without pretending the replacement completed."""
+    run_dir = get_run_dir(run_id)
+    from_task = validate_safe_identifier(from_task, "from_task")
+    to_task = validate_safe_identifier(to_task, "to_task")
+    if decision not in ("automatic", "user", "timeout"):
+        raise ValueError("decision must be automatic, user, or timeout")
+    if not reason.strip():
+        raise ValueError("A hand-over reason is required")
+    for value in (from_route, to_route):
+        parts = value.split("/", 2)
+        if len(parts) != 3 or not all(part.strip() for part in parts):
+            raise ValueError("Routes must be agent/provider/model identifiers")
+        canonical_agent_name(parts[0])
+    if context_file:
+        path = Path(context_file).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Hand-over context file not found: {path}")
+        context_file = str(path)
+    event = {
+        "schema_version": SCHEMA_VERSION,
+        "event": "task_handover",
+        "timestamp": now_iso(),
+        "run_id": run_id,
+        "from_task": from_task,
+        "to_task": to_task,
+        "from_route": from_route,
+        "to_route": to_route,
+        "reason": reason.strip(),
+        "decision": decision,
+        "context_file": context_file,
+    }
+    append_manifest_event(run_dir, event)
+    return event
+
+
+def _handover_audit(run_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read the append-only audit, preserving failures hidden by final meta.json."""
+    handovers: list[dict[str, Any]] = []
+    quota_failures: list[dict[str, Any]] = []
+    completed_attempts: dict[tuple[str, str], dict[str, Any]] = {}
+    manifest = run_dir / "manifest.jsonl"
+    if manifest.is_file():
+        with file_lock(manifest):
+            with manifest.open(encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        event = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    if event.get("event") == "task_handover":
+                        handovers.append(event)
+                    elif event.get("event") in ("task_finished", "native_task_recorded"):
+                        completed_attempts[(event.get("task_id"), event.get("route_id"))] = event
+                        if event.get("error_class") == "quota":
+                            quota_failures.append(event)
+    for handover in handovers:
+        replacement = completed_attempts.get((handover.get("to_task"), handover.get("to_route")))
+        handover["replacement_status"] = replacement.get("status") if replacement else "pending"
+        handover["replacement_outcome"] = replacement.get("outcome_summary") if replacement else ""
+    return handovers, quota_failures
 
 
 def build_run_report(run_id: str, only_significant: bool = False) -> dict[str, Any]:
@@ -4436,6 +4584,7 @@ def build_run_report(run_id: str, only_significant: bool = False) -> dict[str, A
             }
         )
 
+    handovers, quota_failures = _handover_audit(run_dir)
     participants = list(pair_map.values())
     all_trailers = [p["assisted_by"] for p in participants]
     sig_trailers = [p["assisted_by"] for p in participants if p["significant"]]
@@ -4448,6 +4597,8 @@ def build_run_report(run_id: str, only_significant: bool = False) -> dict[str, A
         "task_count": len(tasks_by_id),
         "tree": roots,
         "participants": participants,
+        "handovers": handovers,
+        "quota_failures": quota_failures,
         "assisted_by_trailers": sig_trailers if only_significant else all_trailers,
         "significant_assisted_by_trailers": sig_trailers,
     }
@@ -4484,6 +4635,30 @@ def format_human_run_report(report: dict[str, Any]) -> str:
         sig_label = "significant" if p.get("significant") else "filtered/no-op"
         t_ids = ", ".join(t["task_id"] for t in (p.get("tasks") or []))
         lines.append(f"  - {p['official_agent']} ({p['official_model_id']}) [{sig_label}] — tasks: {t_ids}")
+
+    if report.get("quota_failures"):
+        lines.append("")
+        lines.append("Quota-exhausted Attempts:")
+        for failure in report["quota_failures"]:
+            lines.append(
+                f"  - [{failure.get('task_id')}] {failure.get('route_id')} "
+                f"(attempt {failure.get('attempt', 0)})"
+            )
+    if report.get("handovers"):
+        lines.append("")
+        lines.append("Hand-overs:")
+        for handover in report["handovers"]:
+            lines.append(
+                f"  - [{handover['from_task']} -> {handover['to_task']}] "
+                f"{handover['from_route']} -> {handover['to_route']} "
+                f"({handover['decision']}): {handover['reason']}"
+            )
+            lines.append(
+                f"    replacement: {handover.get('replacement_status', 'pending')}"
+                + (f" — {handover['replacement_outcome']}" if handover.get("replacement_outcome") else "")
+            )
+            if handover.get("context_file"):
+                lines.append(f"    context: {handover['context_file']}")
 
     sig_trailers = report.get("significant_assisted_by_trailers") or []
     if sig_trailers:
@@ -4661,7 +4836,7 @@ def evaluate_cost_gate(
 
 def main() -> int:
     enforce_utf8()
-    if len(sys.argv) > 1 and sys.argv[1] in ("report", "mark", "record-native"):
+    if len(sys.argv) > 1 and sys.argv[1] in ("report", "mark", "record-native", "record-handover"):
         mode = sys.argv[1]
         sub_parser = argparse.ArgumentParser(prog=f"run.py {mode}")
         sub_parser.add_argument(
@@ -4683,6 +4858,22 @@ def main() -> int:
                 print(format_human_run_report(rep))
             else:
                 print(json.dumps(rep, indent=2, ensure_ascii=False))
+            return 0
+        elif mode == "record-handover":
+            sub_parser.add_argument("--from-task", required=True)
+            sub_parser.add_argument("--to-task", required=True)
+            sub_parser.add_argument("--from-route", required=True)
+            sub_parser.add_argument("--to-route", required=True)
+            sub_parser.add_argument("--reason", required=True)
+            sub_parser.add_argument("--decision", choices=("automatic", "user", "timeout"), required=True)
+            sub_parser.add_argument("--context-file")
+            s_args = sub_parser.parse_args(sys.argv[2:])
+            event = record_handover(
+                s_args.run_id, s_args.from_task, s_args.to_task,
+                s_args.from_route, s_args.to_route, s_args.reason,
+                s_args.decision, s_args.context_file,
+            )
+            print(json.dumps(event, indent=2, ensure_ascii=False))
             return 0
         elif mode == "record-native":
             sub_parser.add_argument("--task-id", required=True, help="Task identifier to record.")

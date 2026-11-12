@@ -17,6 +17,7 @@ import json
 import math
 from pathlib import Path
 import re
+import shutil
 import sys
 import time
 from typing import Any
@@ -557,6 +558,88 @@ def query_claude_quota(binary: str, plan_type: str | None = None) -> dict[str, A
     }
 
 
+def _antigravity_window_scope(title: str) -> str | None:
+    """Map CodexBar window labels to shared groups or a canonical model scope."""
+    label = re.sub(r"\s+(?:weekly|\d+(?:-hour|h))$", "", title.strip(), flags=re.I)
+    if label.lower() in ("gemini", "gemini models"):
+        return "antigravity:group:gemini"
+    if label.lower() in ("claude/gpt", "claude and gpt"):
+        return "antigravity:group:third-party"
+    model = normalize_official_model_id(label)[0]
+    if model.startswith(("gemini-", "claude-", "gpt-")) and re.search(r"\d", model):
+        return f"antigravity:model:{model}"
+    return None
+
+
+def parse_antigravity_quota(records: Any) -> dict[str, Any]:
+    """Normalize CodexBar's Antigravity summary without assuming one shared pool."""
+    matches = [r for r in records if isinstance(r, dict) and r.get("provider") == "antigravity"] if isinstance(records, list) else []
+    if len(matches) != 1 or matches[0].get("error"):
+        raise RuntimeError("Antigravity quota query did not return one unambiguous account.")
+    record = matches[0]
+    usage = record.get("usage")
+    if not isinstance(usage, dict):
+        raise RuntimeError("Antigravity quota response has no structured usage data.")
+    source_age = parse_iso_age_seconds(usage.get("updatedAt"))
+    if source_age is None or source_age >= QUOTA_TTL_SECONDS or source_age < -60:
+        raise RuntimeError("Antigravity quota source timestamp is missing or stale.")
+    labels = record.get("rateWindowLabels")
+    labels = labels if isinstance(labels, dict) else {}
+    windows = [
+        {"title": labels.get(key, ""), "window": usage[key], "id": key}
+        for key in ("primary", "secondary", "tertiary")
+        if isinstance(usage.get(key), dict)
+    ]
+    extra = usage.get("extraRateWindows")
+    if isinstance(extra, list):
+        windows.extend(w for w in extra if isinstance(w, dict))
+    buckets: dict[str, dict[str, Any]] = {}
+    for item in windows:
+        scope = _antigravity_window_scope(str(item.get("title") or ""))
+        window = item.get("window")
+        if not scope or not isinstance(window, dict) or item.get("usageKnown") is False:
+            continue
+        raw_used = window.get("usedPercent")
+        used = float(raw_used) if isinstance(raw_used, (int, float)) and not isinstance(raw_used, bool) and math.isfinite(raw_used) else None
+        reset = window.get("resetsAt")
+        try:
+            reset_epoch = int(datetime.fromisoformat(reset.replace("Z", "+00:00")).timestamp()) if isinstance(reset, str) else None
+        except ValueError:
+            reset_epoch = None
+        # A passed reset cannot certify current availability or exhaustion.
+        if reset_epoch is not None and reset_epoch <= time.time():
+            used = None
+        metrics = compute_window_metrics(used, window.get("windowMinutes"), reset_epoch)
+        normalized = {
+            "bucket_id": scope, "agent": "antigravity", "used_percent": used,
+            "resets_at_epoch": reset_epoch, "source_updated_at": usage["updatedAt"],
+            **metrics,
+        }
+        bucket = buckets.setdefault(scope, {**normalized, "windows": {}})
+        bucket["windows"][str(item.get("id") or item.get("title"))] = normalized
+        # Never let an ample group or another window overwrite an exhausted window.
+        if (metrics["exhausted"], metrics["scarcity"], reset_epoch or 0) >= (bucket["exhausted"], bucket["scarcity"], bucket.get("resets_at_epoch") or 0):
+            bucket.update(normalized)
+    if not buckets:
+        raise RuntimeError("Antigravity quota response contained no recognized usage windows.")
+    return {
+        "agent": "antigravity", "method": "codexbar:antigravity",
+        "source_updated_at": usage["updatedAt"],
+        "plan": estimate_plan_capacity("subscription"),
+        "reset_credits": {"available_count": None, "credits": []}, "buckets": buckets,
+    }
+
+
+def query_antigravity_quota() -> dict[str, Any]:
+    binary = shutil.which("codexbar")
+    if not binary:
+        raise RuntimeError("codexbar is unavailable; Antigravity quota is unknown.")
+    proc = run_cmd([binary, "usage", "--provider", "antigravity", "--json"], timeout=30)
+    if proc.returncode != 0:
+        raise RuntimeError("Antigravity quota query failed; retaining previous readings as stale.")
+    return parse_antigravity_quota(json.loads(proc.stdout))
+
+
 def get_observations_file() -> Path:
     d = get_cache_dir() / "quota"
     d.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -660,6 +743,10 @@ def _apply_observation_to_bucket(bucket: dict[str, Any], obs: dict[str, Any], no
     if not isinstance(backoff_until, int) or backoff_until <= now_ts:
         return _strip_expired_overlay_fields(bucket)
     provider_resets = obs.get("provider_resets_at_epoch")
+    baseline_reset = bucket.get("resets_at_epoch")
+    if bucket.get("exhausted") and isinstance(baseline_reset, (int, float)) and baseline_reset > now_ts:
+        # A synthetic retry cooldown must not erase a known account reset.
+        provider_resets = max(provider_resets or 0, baseline_reset)
     updated = dict(bucket)
     updated["status"] = "observed_limited"
     updated["exhausted"] = True
@@ -779,6 +866,12 @@ def build_observed_quota(agent: str, agent_info: dict[str, Any]) -> dict[str, An
 def _agent_quota_is_fresh(agent: str, entry: dict[str, Any] | None) -> bool:
     if not isinstance(entry, dict) or entry.get("stale"):
         return False
+    if agent == "antigravity":
+        if entry.get("method") != "codexbar:antigravity":
+            return False
+        source_age = parse_iso_age_seconds(entry.get("source_updated_at"))
+        if source_age is None or source_age >= QUOTA_TTL_SECONDS or source_age < -60:
+            return False
     age = parse_iso_age_seconds(entry.get("collected_at"))
     if age is None or age >= QUOTA_TTL_SECONDS:
         return False
@@ -838,6 +931,8 @@ def collect_quota(agents: list[str] | None = None, refresh: bool = False) -> dic
                 q_res = query_codex_quota(binary)
             elif agent == "claude-code":
                 q_res = query_claude_quota(binary, plan_type=a_info.get("plan_type"))
+            elif agent == "antigravity":
+                q_res = query_antigravity_quota()
             else:
                 q_res = build_observed_quota(agent, a_info)
             fp = compute_agent_config_fingerprint(agent, binary, ver)

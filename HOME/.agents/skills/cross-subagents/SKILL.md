@@ -126,7 +126,8 @@ subagent so the main session context stays clean.
 ### Step 2: Check account quota and select a route
 
 Refresh quota readings (15-minute TTL) and select the primary route and
-fallback chain:
+fallback chain. Antigravity quota is read from CodexBar, including group and
+model windows; model discovery alone does not establish available quota:
 
 ~~~~ bash
 python3 <skill-dir>/scripts/quota.py status --human
@@ -317,7 +318,11 @@ wider allow-list. Unplanned fallbacks retain the same canonical model across
 providers by default. Pass `--max-tier <N>` to permit substitution within an
 explicit quality bound; a vendor allow-list alone does not permit a model
 downgrade. Pass `--no-fallback` when a user gate requires that exact route
-or nothing.
+or nothing. If quota blocks the task before dispatch or during execution,
+follow [quota hand-over](references/quota-handover.md): preserve progress,
+reselect a route with the required traits, or ask a question with a 30-minute
+deadline and a named default replacement. A failed attempt does not cancel the
+assigned work.
 
 When the task prompt points at checkouts or files outside `--cwd` (a dependency
 checkout, a sibling repository, a scratchpad snapshot), pass `--add-dir <path>`
@@ -606,6 +611,13 @@ python3 <skill-dir>/scripts/run.py report --run-id <run-id> --human
 # Filter to significant contributions only (e.g. for Assisted-by trailers):
 python3 <skill-dir>/scripts/run.py report --run-id <run-id> --only-significant
 ~~~~
+
+Always include quota hand-overs in the final report, including automatic
+fallbacks and user-selected or timeout defaults: original and replacement
+routes, reason, decision, any changed requirements, and completion outcome.
+`run.py report` includes these even with `--only-significant`. For replacements
+launched as separate tasks or native subagents, use `record-handover` as
+described in the [quota hand-over reference](references/quota-handover.md).
 
 Then check for defect reports recorded during this run and include them in the
 same final message, as described in

@@ -28,6 +28,7 @@ from datetime import date
 from pathlib import Path
 import re
 import sys
+import time
 from typing import Any
 
 from common import (
@@ -1035,6 +1036,12 @@ def evaluate_route_quota(
             continue
         is_obs_limited = b.get("status") == "observed_limited"
         b_stale = False if is_obs_limited else agent_stale
+        # A refresh failure does not replenish a confirmed Antigravity limit
+        # whose provider reset is still in the future.
+        reset = b.get("resets_at_epoch")
+        if (route["agent"] == "antigravity" and b.get("exhausted")
+                and isinstance(reset, (int, float)) and reset > time.time()):
+            b_stale = False
 
         if b.get("exhausted") and not b_stale:
             exhausted_buckets.append(b_id)

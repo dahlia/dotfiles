@@ -47,12 +47,26 @@ Notice two properties of Antigravity's model catalog:
     `openai`) from `canonical_key` so cross-vendor diversity filters and
     canonical survey lookups match routes from Claude Code, Codex, and OpenCode.
 
+Quota collection uses `codexbar usage --provider antigravity --json`, including
+`primary`, `secondary`, `tertiary`, and `extraRateWindows`. Recognized window
+labels map to `antigravity:group:gemini`, `antigravity:group:third-party`
+(Claude/GPT), or `antigravity:model:<normalized-model-id>`. Short and weekly
+windows both apply. An ample group window cannot override an exhausted model
+window, and effort variants share the model bucket. Eligibility recomputes the
+applicable scopes for older cached routes too.
+
 Shared quota errors use `antigravity:default`. An explicit individual quota
-error uses `antigravity:model:<normalized-model-id>` instead, so an Opus limit
-does not block Gemini. Effort variants share the model bucket. Eligibility
-checks include both scopes, including for routes cached before model buckets
-were introduced. Legacy individual errors attributed to the shared bucket are
-ignored because they do not identify the affected model.
+error uses the model bucket instead, so an Opus limit does not block Gemini.
+Legacy individual errors attributed to the shared bucket are ignored because
+they do not identify the affected model. These scopes belong to Antigravity;
+they do not exhaust independent OpenCode provider accounts.
+
+CodexBar must be installed and able to read the connected Antigravity account.
+Missing, stale, or ambiguous account readings remain unknown. Refresh errors
+retain previous readings as stale; a confirmed exhaustion with a future
+provider reset still blocks selection until that reset. Do not describe unknown
+quota as available. Read [quota hand-over](../quota-handover.md) when no eligible
+route remains or a task reaches its limit during execution.
 
 
 Subagent invocation and stdin delivery

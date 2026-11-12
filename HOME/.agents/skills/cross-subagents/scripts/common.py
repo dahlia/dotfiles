@@ -951,7 +951,8 @@ def infer_applicable_quota_buckets(
         return [f"opencode:{provider}"]
     if agent == "antigravity":
         model_key = normalize_official_model_id(model_id or canonical_key)[0]
-        return [f"antigravity:model:{model_key}", "antigravity:default"]
+        group = "gemini" if model_key.startswith("gemini-") else "third-party"
+        return [f"antigravity:model:{model_key}", f"antigravity:group:{group}", "antigravity:default"]
     return [f"{agent}:{provider}"]
 
 
