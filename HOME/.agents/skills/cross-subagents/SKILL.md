@@ -134,6 +134,18 @@ python3 <skill-dir>/scripts/quota.py status --human
 python3 <skill-dir>/scripts/select_route.py --task <category> --human
 ~~~~
 
+Quota collection covers the agents in candidate routes after pins and route
+exclusions are applied. When a
+coordinator owns account-capacity queries, pass `--quota-agent <agent>` or
+`--exclude-quota-agent <agent>` (both repeatable) to `select_route.py` and `run.py`
+to restrict which agents may be queried. These flags control quota reads,
+independently of route eligibility. Use `--quota-cache-only` to prevent live
+quota queries, or `--quota-state <path>` to supply a coordinator's quota JSON
+object without collecting quota. Cached quota may be stale, and unavailable
+quota remains unknown; eligibility checks still apply. An explicit `run.py
+--route` queries only that route's agent during preflight; fallback planning
+uses the same quota controls.
+
 Supported `--task` categories: `code_review`, `security_audit`, `architecture`,
 `debugging`, `ui_debugging`, `frontend`, `code_generation`, `refactoring`,
 `testing`, `prose`, `documentation`, `survey`, and `general`.
@@ -594,6 +606,9 @@ python3 <skill-dir>/scripts/run.py record-native \
 
 `record-native` records attribution and result text; it does not independently
 verify host completion, the observed model, permissions or protected inputs.
+Native Codex records use `codex/openai/<model>`, matching discovered routes.
+Reports treat older native `codex/codex/<model>` receipts as equivalent to
+`codex/openai/<model>` for handover completion.
 Retain the host task ID and terminal completion event, and preserve actual
 model evidence separately from the requested ID. For guarded native code
 reviews, use the two-phase `--native-begin`/`--native-finish` recipe under

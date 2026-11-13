@@ -881,12 +881,18 @@ def _agent_quota_is_fresh(agent: str, entry: dict[str, Any] | None) -> bool:
     return True
 
 
-def collect_quota(agents: list[str] | None = None, refresh: bool = False) -> dict[str, Any]:
-    """Collect quota status across agents with per-agent 15-minute TTL and non-persisted observation overlay."""
+def collect_quota(
+    agents: list[str] | None = None, refresh: bool = False, *, cache_only: bool = False,
+) -> dict[str, Any]:
+    """Collect quota with a per-agent TTL and non-persisted observation overlay.
+
+    None queries all agents; an empty list queries none. cache_only never
+    probes or refreshes providers and marks expired snapshots stale.
+    """
     quota_dir = get_cache_dir() / "quota"
     quota_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     cache_path = quota_dir / "status.json"
-    target_agents = [canonical_agent_name(a) for a in agents] if agents else list(AGENT_BINARIES.keys())
+    target_agents = list(dict.fromkeys(canonical_agent_name(a) for a in agents)) if agents is not None else list(AGENT_BINARIES.keys())
 
     existing = read_json_file(cache_path)
     existing_agents = (
@@ -896,6 +902,21 @@ def collect_quota(agents: list[str] | None = None, refresh: bool = False) -> dic
         and isinstance(existing.get("agents"), dict)
         else {}
     )
+
+    if cache_only or not target_agents:
+        # Cache-only is a read, including when no cache exists. Never probe a
+        # provider or advance collected_at just because a worker read it.
+        cached = copy.deepcopy(existing) if existing_agents else {
+            "schema_version": SCHEMA_VERSION, "agents": {}, "buckets": {},
+        }
+        for agent, entry in (cached.get("agents") or {}).items():
+            if isinstance(entry, dict):
+                entry["stale"] = not _agent_quota_is_fresh(agent, entry)
+        cached["stale"] = not bool(existing_agents) or any(
+            entry.get("stale", True) for entry in cached["agents"].values()
+            if isinstance(entry, dict)
+        )
+        return overlay_observations(cached)
 
     agents_to_query: list[str] = []
     for agent in target_agents:
@@ -1362,9 +1383,9 @@ def main() -> int:
     sub = parser.add_subparsers(dest="subcommand")
 
     p_st = sub.add_parser("status", help="Query quota status across agents.")
-    p_st.add_argument("--agent", action="append", help="Query only specified agent(s).")
-    p_st.add_argument("--refresh", action="store_true", help="Force fresh query.")
-    p_st.add_argument("--human", action="store_true", help="Print human-readable summary.")
+    p_st.add_argument("--agent", action="append", default=argparse.SUPPRESS, help="Query only specified agent(s).")
+    p_st.add_argument("--refresh", action="store_true", default=argparse.SUPPRESS, help="Force fresh query.")
+    p_st.add_argument("--human", action="store_true", default=argparse.SUPPRESS, help="Print human-readable summary.")
 
     p_obs = sub.add_parser("record-observation", help="Record an observed 429 or rate-limit error for a bucket.")
     p_obs.add_argument("--bucket", required=True, help="Bucket ID (e.g. opencode:deepseek, antigravity:default).")
@@ -1383,7 +1404,7 @@ def main() -> int:
     p_con.add_argument("--user-approved", action="store_true", help="User explicitly approved immediate redemption.")
     p_con.add_argument("--force-unexhausted", action="store_true", help="Allow consuming even if quota is not marked exhausted.")
 
-    parser.add_argument("--agent", action="append", help="Query only specified agent(s).")
+    parser.add_argument("--agent", action="append", dest="global_agents", help="Query only specified agent(s).")
     parser.add_argument("--refresh", action="store_true", help="Force fresh query.")
     parser.add_argument("--human", action="store_true", help="Print human-readable summary.")
 
@@ -1391,7 +1412,8 @@ def main() -> int:
     cmd = args.subcommand or "status"
 
     if cmd == "status":
-        res = collect_quota(agents=args.agent, refresh=args.refresh)
+        agents = [*(args.global_agents or []), *(getattr(args, "agent", None) or [])]
+        res = collect_quota(agents=agents or None, refresh=args.refresh)
         if args.human:
             print(format_human_quota(res))
         else:

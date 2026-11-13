@@ -105,7 +105,8 @@ class HandoverTests(unittest.TestCase):
             native = run.record_native_task("native", "new", "codex", "gpt-6.1-sol",
                 significant=False, outcome_summary="Inspected remaining files; no actionable findings.",
                 result_text="No findings.")
-            self.assertEqual(native["route_id"], "codex/codex/gpt-6.1-sol")
+            self.assertEqual(native["route_id"], "codex/openai/gpt-6.1-sol")
+            self.assertEqual(native["provider"], "openai")
             for filtered in (False, True):
                 report = run.build_run_report("native", only_significant=filtered)
                 handover = report["handovers"][0]
@@ -115,8 +116,29 @@ class HandoverTests(unittest.TestCase):
                 self.assertIn("replacement: ok", rendered)
                 self.assertIn(native["outcome_summary"], rendered)
             run.record_handover("native", "old", "new", "antigravity/google/gemini-4-argon",
-                "codex/openai/gpt-6.1-sol", "wrong provider must not match the native route", "automatic")
-            self.assertEqual(run.build_run_report("native")["handovers"][-1]["replacement_status"], "pending")
+                "codex/openai/gpt-6.1-sol", "canonical provider matches native route", "automatic")
+            self.assertEqual(run.build_run_report("native")["handovers"][-1]["replacement_status"], "ok")
+            for task, route in (("new", "codex/other/gpt-6.1-sol"),
+                                ("new", "codex/openai/gpt-6-astra"),
+                                ("different", "codex/openai/gpt-6.1-sol")):
+                run.record_handover("native", "old", task, "antigravity/google/gemini-4-argon",
+                    route, "distinct route or task must remain pending", "automatic")
+                self.assertEqual(run.build_run_report("native")["handovers"][-1]["replacement_status"], "pending")
+
+    def test_legacy_native_codex_receipt_matches_canonical_handover(self):
+        with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {
+            "CROSS_SUBAGENTS_CACHE_DIR": str(Path(td) / "cache")
+        }):
+            run.record_handover("legacy", "old", "new", "antigravity/google/gemini-4-argon",
+                "codex/openai/gpt-6-astra", "quota exhausted", "automatic")
+            event = {"event": "native_task_recorded", "task_id": "new",
+                     "route_id": "codex/codex/gpt-6-astra", "status": "ok",
+                     "outcome_summary": "Completed native review."}
+            run.append_manifest_event(run.get_run_dir("legacy"), event)
+            self.assertEqual(run.build_run_report("legacy")["handovers"][0]["replacement_status"], "ok")
+            event.update(event="task_finished", status="failed", route_id="codex/other/gpt-6-astra")
+            run.append_manifest_event(run.get_run_dir("legacy"), event)
+            self.assertEqual(run.build_run_report("legacy")["handovers"][0]["replacement_status"], "ok")
 
     def test_manual_handover_rejects_invalid_identifiers_or_missing_context(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {

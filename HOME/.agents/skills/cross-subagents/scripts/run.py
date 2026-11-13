@@ -3220,6 +3220,10 @@ def execute_task(
     task_summary: str | None = None,
     outcome_summary: str | None = None,
     significant: bool | None = None,
+    quota_agents: list[str] | None = None,
+    exclude_quota_agents: list[str] | None = None,
+    quota_cache_only: bool = False,
+    quota_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     eff_run_id = validate_safe_identifier(
         run_id or os.environ.get("CROSS_SUBAGENTS_RUN_ID") or f"run-{int(time.time())}",
@@ -3326,6 +3330,22 @@ def execute_task(
 
             if route_str and route_str.lower() != "auto":
                 explicit_route = resolve_explicit_route(route_str, force_route=force_route)
+                # Collection ownership saved by the coordinator applies to
+                # preflight as well as fallback planning. A caller may narrow it.
+                plan = load_selection_plan(eff_run_id)
+                planned_quota = planned_constraints_for_route(plan, explicit_route["route_id"]) if plan else None
+                if planned_quota is not None:
+                    saved_allowed = planned_quota.get("quota_agents")
+                    if saved_allowed is not None:
+                        allowed = {canonical_agent_name(a) for a in saved_allowed}
+                        if quota_agents is not None:
+                            allowed &= {canonical_agent_name(a) for a in quota_agents}
+                        quota_agents = sorted(allowed)
+                    exclude_quota_agents = sorted({canonical_agent_name(a) for a in
+                        [*(exclude_quota_agents or []), *(planned_quota.get("exclude_quota_agents") or [])]})
+                    quota_cache_only = quota_cache_only or bool(planned_quota.get("quota_cache_only"))
+                    if quota_state is None:
+                        quota_state = planned_quota.get("quota_state")
                 if not force_route:
                     pins = load_session_pins(run_id=eff_run_id)
                     eff_pin_agent = pins.get("pin_agent")
@@ -3334,12 +3354,17 @@ def execute_task(
                     excl_agents_set = {canonical_agent_name(a) for a in (exclude_agents or [])}
                     excl_vendors_set = {v.strip().lower() for v in (exclude_vendors or [])}
                     req_mods_set = set(eff_req_mods)
-                    quota_state = collect_quota(refresh=False)
+                    explicit_quota_state = quota_state
+                    if explicit_quota_state is None:
+                        allowed = {canonical_agent_name(a) for a in quota_agents} if quota_agents is not None else {explicit_route["agent"]}
+                        denied = {canonical_agent_name(a) for a in (exclude_quota_agents or [])}
+                        targets = sorted(({explicit_route["agent"]} & allowed) - denied)
+                        explicit_quota_state = collect_quota(agents=targets, refresh=False, cache_only=quota_cache_only)
 
                     ok, reason, q_eval, traits = check_route_eligibility(
                         route=explicit_route,
                         task_norm=task_norm,
-                        quota_state=quota_state,
+                        quota_state=explicit_quota_state,
                         min_context=min_context,
                         require_modalities=req_mods_set,
                         allow_estimated_capabilities=allow_estimated_capabilities,
@@ -3436,6 +3461,10 @@ def execute_task(
                             task=task_category,
                             run_id=eff_run_id,
                             sandbox_mode=effective_sandbox,
+                            quota_agents=quota_agents,
+                            exclude_quota_agents=exclude_quota_agents,
+                            quota_cache_only=quota_cache_only,
+                            quota_state=quota_state,
                             **fb_policy,
                         )
                         exp_buckets = set(
@@ -3469,6 +3498,10 @@ def execute_task(
                     exclude_route_ids=exclude_route_ids,
                     run_id=eff_run_id,
                     sandbox_mode=effective_sandbox,
+                    quota_agents=quota_agents,
+                    exclude_quota_agents=exclude_quota_agents,
+                    quota_cache_only=quota_cache_only,
+                    quota_state=quota_state,
                 )
                 if sel["status"] != "ok" or not sel.get("selected"):
                     raise RuntimeError(f"No eligible route found for task '{task_category}'.")
@@ -4249,6 +4282,7 @@ def record_native_task(
 
     canon_agent = canonical_agent_name(agent)
     off_agent = official_agent_name(canon_agent)
+    native_provider = "openai" if canon_agent == "codex" else canon_agent
     off_model, eff_effort, _ = normalize_official_model_id(model)
 
     if not off_model or not re.match(r"^[a-z0-9][a-z0-9.-]*$", off_model):
@@ -4299,10 +4333,10 @@ def record_native_task(
             "parent_instance": None,
             "parent_task_id": eff_parent_task,
             "attempt": 1,
-            "route_id": f"{canon_agent}/{canon_agent}/{off_model}",
+            "route_id": f"{canon_agent}/{native_provider}/{off_model}",
             "agent": canon_agent,
             "official_agent": off_agent,
-            "provider": canon_agent,
+            "provider": native_provider,
             "model": off_model,
             "requested_model": model,
             "resolved_model": off_model,
@@ -4484,6 +4518,13 @@ def _handover_audit(run_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str,
                         handovers.append(event)
                     elif event.get("event") in ("task_finished", "native_task_recorded"):
                         completed_attempts[(event.get("task_id"), event.get("route_id"))] = event
+                        # Older native Codex receipts used the agent as provider.
+                        # Alias only native events; CLI providers remain exact.
+                        if event.get("event") == "native_task_recorded":
+                            parts = str(event.get("route_id") or "").split("/", 2)
+                            if len(parts) == 3 and parts[0] == "codex" and parts[1] in ("codex", "openai"):
+                                for provider in ("codex", "openai"):
+                                    completed_attempts[(event.get("task_id"), f"codex/{provider}/{parts[2]}")] = event
                         if event.get("error_class") == "quota":
                             quota_failures.append(event)
     for handover in handovers:
@@ -4707,6 +4748,10 @@ def evaluate_cost_gate(
     max_cost_index: float | None = None,
     exclude_vendors: list[str] | None = None,
     include_vendors: list[str] | None = None,
+    quota_agents: list[str] | None = None,
+    exclude_quota_agents: list[str] | None = None,
+    quota_cache_only: bool = False,
+    quota_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Check whether a planned fan-out exceeds the cost/call confirmation gate.
 
@@ -4776,6 +4821,10 @@ def evaluate_cost_gate(
                 max_cost_index=max_cost_index,
                 exclude_vendors=exclude_vendors,
                 include_vendors=include_vendors,
+                quota_agents=quota_agents,
+                exclude_quota_agents=exclude_quota_agents,
+                quota_cache_only=quota_cache_only,
+                quota_state=quota_state,
             )
             top = sel.get("selected") or {}
             fallbacks = sel.get("fallbacks") or []
@@ -5055,6 +5104,10 @@ def main() -> int:
         type=float,
         help="Minimum required effective quota headroom (default: 0.15 for heavy tasks).",
     )
+    parser.add_argument("--quota-agent", action="append", help="Allow quota reads only for these agents (repeatable).")
+    parser.add_argument("--exclude-quota-agent", action="append", help="Never query quota for these agents (repeatable).")
+    parser.add_argument("--quota-cache-only", action="store_true", help="Read cached quota without provider queries.")
+    parser.add_argument("--quota-state", help="Coordinator-supplied quota JSON file; skips quota collection.")
     parser.add_argument("--force-route", action="store_true", help="Bypass eligibility checks on an explicit --route.")
     parser.add_argument("--exclude-vendor", action="append", help="Exclude model vendor(s) during selection.")
     parser.add_argument("--exclude-agent", action="append", help="Exclude agent(s) during selection.")
@@ -5145,6 +5198,18 @@ def main() -> int:
             print(json.dumps(rep, indent=2, ensure_ascii=False))
         return 0
 
+    supplied_quota_state = None
+    if args.quota_state:
+        try:
+            supplied_quota_state = json.loads(Path(args.quota_state).expanduser().read_text(encoding="utf-8"))
+            if (not isinstance(supplied_quota_state, dict)
+                    or not isinstance(supplied_quota_state.get("agents"), dict)
+                    or not isinstance(supplied_quota_state.get("buckets"), dict)):
+                raise ValueError("expected a normalized quota object with agents and buckets")
+        except (OSError, ValueError) as exc:
+            print(f"run: invalid --quota-state: {exc}", file=sys.stderr)
+            return 2
+
     if args.cost_gate is not None:
         try:
             gate = evaluate_cost_gate(
@@ -5157,6 +5222,10 @@ def main() -> int:
                 max_cost_index=args.max_cost_index,
                 exclude_vendors=args.exclude_vendor,
                 include_vendors=args.include_vendor,
+                quota_agents=args.quota_agent,
+                exclude_quota_agents=args.exclude_quota_agent,
+                quota_cache_only=args.quota_cache_only,
+                quota_state=supplied_quota_state,
             )
         except ValueError as exc:
             print(
@@ -5219,6 +5288,10 @@ def main() -> int:
         task_summary=args.summary,
         outcome_summary=args.outcome_summary,
         significant=sig_flag,
+        quota_agents=args.quota_agent,
+        exclude_quota_agents=args.exclude_quota_agent,
+        quota_cache_only=args.quota_cache_only,
+        quota_state=supplied_quota_state,
     )
     print(json.dumps(res, indent=2, ensure_ascii=False))
     return 0 if res.get("status") in ("ok", "dry_run") else 1

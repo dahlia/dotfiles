@@ -939,6 +939,10 @@ PLAN_CONSTRAINT_KEYS = (
     "min_headroom",
     "speed",
     "sandbox",
+    "quota_agents",
+    "exclude_quota_agents",
+    "quota_cache_only",
+    "quota_state",
 )
 
 
@@ -1224,6 +1228,59 @@ def check_route_eligibility(
     return True, None, q_eval, traits
 
 
+
+def quota_agents_for_routes(
+    all_models: dict[str, Any], *, pin_agent: str | None = None,
+    pin_provider: str | None = None, pin_model: str | None = None,
+    exclude_agents: list[str] | set[str] | None = None,
+    exclude_vendors: list[str] | set[str] | None = None,
+    include_vendors: list[str] | set[str] | None = None,
+    exclude_route_ids: list[str] | set[str] | None = None,
+    quota_agents: list[str] | None = None,
+    exclude_quota_agents: list[str] | None = None,
+) -> list[str]:
+    """Find relevant quota owners without reading any account metadata.
+
+    Collection ownership is independent of route eligibility. An allow/deny
+    list only controls reads; it cannot re-enable an excluded route.
+    """
+    pin_agent = canonical_agent_name(pin_agent) if pin_agent else None
+    pin_provider = (pin_provider or "").strip().lower()
+    pin_model = (pin_model or "").strip().lower()
+    excluded = {canonical_agent_name(a) for a in (exclude_agents or [])}
+    excluded_routes = {r.lower() for r in (exclude_route_ids or [])}
+    excluded_vendors = {v.lower() for v in (exclude_vendors or [])}
+    included_vendors = {v.lower() for v in (include_vendors or [])}
+    allowed = {canonical_agent_name(a) for a in quota_agents} if quota_agents is not None else None
+    denied = {canonical_agent_name(a) for a in (exclude_quota_agents or [])}
+    relevant: set[str] = set()
+    for agent, data in all_models.items():
+        if not data.get("usable") or agent in excluded or agent in denied:
+            continue
+        if pin_agent and agent != pin_agent:
+            continue
+        if allowed is not None and agent not in allowed:
+            continue
+        for route in data.get("routes") or []:
+            if pin_provider and route["provider"].lower() != pin_provider:
+                continue
+            if route["route_id"].lower() in excluded_routes:
+                continue
+            vendor = infer_model_vendor(route)
+            if vendor in excluded_vendors or (included_vendors and vendor not in included_vendors):
+                continue
+            if pin_model and pin_model not in {
+                str(route.get(key) or "").lower()
+                for key in ("model_id", "canonical_key", "alias", "route_id", "official_model_id")
+            }:
+                continue
+            if route.get("hidden") and not pin_model:
+                continue
+            relevant.add(agent)
+            break
+    return sorted(relevant)
+
+
 def select_routes(
     task: str = "general",
     min_context: int | None = None,
@@ -1251,6 +1308,9 @@ def select_routes(
     all_models: dict[str, Any] | None = None,
     quota_state: dict[str, Any] | None = None,
     sandbox_mode: str | None = None,
+    quota_agents: list[str] | None = None,
+    exclude_quota_agents: list[str] | None = None,
+    quota_cache_only: bool = False,
 ) -> dict[str, Any]:
     """Run the 5-step route selection algorithm and return top route + fallback chain."""
     task_norm = task.strip().lower().replace("-", "_")
@@ -1276,7 +1336,15 @@ def select_routes(
         req_mods.add("image")
 
     all_models = all_models if all_models is not None else collect_all_models(refresh=False)
-    quota_state = quota_state if quota_state is not None else collect_quota(refresh=refresh_quota)
+    if quota_state is None:
+        owners = quota_agents_for_routes(
+            all_models, pin_agent=eff_pin_agent, pin_provider=eff_pin_provider,
+            pin_model=eff_pin_model, exclude_agents=excl_agents,
+            exclude_vendors=excl_vendors, include_vendors=incl_vendors,
+            exclude_route_ids=excl_routes, quota_agents=quota_agents,
+            exclude_quota_agents=exclude_quota_agents,
+        )
+        quota_state = collect_quota(agents=owners, refresh=refresh_quota, cache_only=quota_cache_only)
     tier_ranks = compute_vendor_tier_ranks(all_models, task_norm) if max_tier else {}
 
     candidates: list[dict[str, Any]] = []
@@ -1635,6 +1703,10 @@ def select_step_plan(
     require_distinct_bucket: bool = False,
     refresh_quota: bool = False,
     run_id: str | None = None,
+    quota_state: dict[str, Any] | None = None,
+    quota_agents: list[str] | None = None,
+    exclude_quota_agents: list[str] | None = None,
+    quota_cache_only: bool = False,
 ) -> dict[str, Any]:
     """Plan N independent review/generation steps.
 
@@ -1644,8 +1716,22 @@ def select_step_plan(
     later steps provide an independent check rather than a repeat.
     """
     base = dict(defaults or {})
+    supplied_quota_state = quota_state
     all_models = collect_all_models(refresh=False)
-    quota_state = collect_quota(refresh=refresh_quota)
+    if quota_state is None:
+        owners: set[str] = set()
+        for spec in specs:
+            merged = {**base, **spec}
+            owners.update(quota_agents_for_routes(
+                all_models, pin_agent=merged.get("pin_agent"),
+                pin_provider=merged.get("pin_provider"), pin_model=merged.get("pin_model"),
+                exclude_agents=[*(base.get("exclude_agent") or []), *(spec.get("exclude_agent") or [])],
+                exclude_vendors=[*(base.get("exclude_vendor") or []), *(spec.get("exclude_vendor") or [])],
+                include_vendors=merged.get("include_vendor"),
+                exclude_route_ids=[*(base.get("exclude_route") or []), *(spec.get("exclude_route") or [])],
+                quota_agents=quota_agents, exclude_quota_agents=exclude_quota_agents,
+            ))
+        quota_state = collect_quota(agents=sorted(owners), refresh=refresh_quota, cache_only=quota_cache_only)
     used_routes: set[str] = set()
     used_canonicals: set[str] = set()
     used_vendors: set[str] = set()
@@ -1754,6 +1840,10 @@ def select_step_plan(
                     "allow_micro_quota": bool(merged.get("allow_micro_quota")),
                     "min_headroom": merged.get("min_headroom"),
                     "sandbox": merged.get("sandbox"),
+                    "quota_agents": quota_agents,
+                    "exclude_quota_agents": exclude_quota_agents,
+                    "quota_cache_only": quota_cache_only,
+                    "quota_state": supplied_quota_state,
                 },
                 "selected": selected,
                 "fallbacks": res.get("fallbacks") or [],
@@ -1883,10 +1973,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--save-pin", action="store_true", help="Persist --pin-* flags as session/run pins.")
     parser.add_argument("--clear-pins", action="store_true", help="Clear persisted session/run pins.")
     parser.add_argument("--refresh-quota", action="store_true", help="Force fresh quota query before selecting.")
+    parser.add_argument("--quota-agent", action="append", help="Allow quota reads only for these agents (repeatable).")
+    parser.add_argument("--exclude-quota-agent", action="append", help="Never query quota for these agents (repeatable).")
+    parser.add_argument("--quota-cache-only", action="store_true", help="Use cached quota without provider queries; expired entries stay stale.")
+    parser.add_argument("--quota-state", help="Read normalized quota JSON supplied by the coordinator instead of collecting quota.")
     parser.add_argument("--dry-run", action="store_true", help="Show selection rationale and fallback chain without executing.")
     parser.add_argument("--human", action="store_true", help="Print concise human-readable summary.")
 
     args = parser.parse_args(argv)
+
+    quota_state = None
+    if args.quota_state:
+        try:
+            quota_state = json.loads(Path(args.quota_state).expanduser().read_text(encoding="utf-8"))
+            if not isinstance(quota_state, dict) or not isinstance(quota_state.get("agents"), dict) or not isinstance(quota_state.get("buckets"), dict):
+                raise ValueError("expected a normalized quota object with agents and buckets")
+        except (OSError, ValueError) as exc:
+            parser.error(f"cannot load --quota-state: {exc}")
+    if args.refresh_quota and (args.quota_cache_only or args.quota_state):
+        parser.error("--refresh-quota cannot be combined with --quota-cache-only or --quota-state")
 
     if args.max_tier is not None and args.max_tier < 1:
         print("select_route: --max-tier must be at least 1", file=sys.stderr)
@@ -1957,6 +2062,10 @@ def main(argv: list[str] | None = None) -> int:
             require_distinct_vendor=args.step_distinct_vendor,
             require_distinct_bucket=args.step_distinct_bucket,
             refresh_quota=args.refresh_quota,
+            quota_state=quota_state,
+            quota_agents=args.quota_agent,
+            exclude_quota_agents=args.exclude_quota_agent,
+            quota_cache_only=args.quota_cache_only,
             run_id=args.run_id,
         )
         if args.human:
@@ -2002,6 +2111,10 @@ def main(argv: list[str] | None = None) -> int:
         exclude_route_ids=args.exclude_route,
         quality_floor=args.quality_floor,
         refresh_quota=args.refresh_quota,
+        quota_state=quota_state,
+        quota_agents=args.quota_agent,
+        exclude_quota_agents=args.exclude_quota_agent,
+        quota_cache_only=args.quota_cache_only,
         run_id=args.run_id,
         sandbox_mode=args.sandbox,
     )
