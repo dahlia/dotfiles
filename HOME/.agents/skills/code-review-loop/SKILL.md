@@ -64,7 +64,13 @@ prompt or a `review.json` written to the working tree shows up as an untracked
 file, which dirties a clean post-commit review and can get swept into the commit
 by a `git add -A` in pre-commit mode. Remove `$WORK` only after a successful
 loop with no failed, blocked or mutated attempts. Otherwise preserve it and
-report its path; it contains private backups and diagnostic logs.
+report its path for diagnostic logs and any recovery data still needed.
+The guard automatically removes each completed, unchanged attempt's backup
+archive and before/after snapshots once CLI child cleanup or native host
+completion is verified. This also applies to failed or blocked reviews: their
+logs remain, but unchanged inputs need no recovery copy. Mutated inputs, guard
+failures and uncertain completion retain recovery data. Never install an
+unconditional exit trap that deletes `$WORK`.
 
 Keep the contract to four short sections:
 
@@ -595,11 +601,27 @@ Report execution modes, allowed output paths, retries and any validation that
 could not run. If any attempt failed, was blocked, mutated protected inputs or
 lacked verification, preserve `$WORK` and report its path, even when a later
 retry succeeded. Keep guard reports and stderr so failures can be diagnosed
-without rerunning models. The backup archives can contain private files; do not
+without rerunning models. Only attempts needing recovery retain their large
+backup archives and snapshots; completed, unchanged attempts release them
+automatically. Remaining backup archives can contain private files; do not
 upload them or paste their contents into reports.
 
 Remove `$WORK` only when every attempt was usable and no recovery is pending,
 after all rounds and authorized commits are finished.
+
+For older retained directories, preview redundant recovery data with:
+
+~~~~ bash
+for report in "$WORK"/*.guard.json; do
+  python3 "<this skill's directory>/scripts/review_artifacts.py" "${report%.guard.json}"
+done
+~~~~
+
+Add `--apply` to the helper invocation after inspecting the preview. The
+helper deletes only backup archives and before/after snapshots whose guard
+reports unchanged inputs and whose execution completion is verified. It keeps
+logs and results, and leaves incomplete or mutated attempts alone. Never delete
+all `review-loop.*` directories based only on age.
 
 The deferred list matters most. It is the evidence that the loop tightened the
 change set instead of expanding it.

@@ -79,6 +79,76 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(json.loads(Path(str(self.prefix) + '.guard.json').read_text())['status'], 'unchanged')
         self.assertEqual(self.finish_native(receipt).returncode, 2)
 
+    def assert_recovery_data(self, retained):
+        for suffix in ('.backup.tar', '.before.json', '.after.json'):
+            self.assertEqual(Path(str(self.prefix) + suffix).exists(), retained, suffix)
+        for suffix in ('.stdout', '.exit', '.guard.json'):
+            self.assertTrue(Path(str(self.prefix) + suffix).is_file(), suffix)
+
+    def test_completed_native_attempt_releases_recovery_data(self):
+        receipt = self.begin_native()
+        self.assertEqual(self.finish_native(receipt).returncode, 0)
+        self.assert_recovery_data(False)
+        self.assertTrue(self.result_file.is_file())
+        self.assertTrue(Path(str(self.prefix) + '.receipt.json').is_file())
+
+    def test_unverified_native_attempt_retains_recovery_data(self):
+        receipt = self.begin_native()
+        receipt['completion_verified'] = False
+        self.assertEqual(self.finish_native(receipt).returncode, 1)
+        self.assert_recovery_data(True)
+
+    def test_finished_cli_attempt_releases_data_even_after_quota_failure(self):
+        for status, code in [('ok', 0), ('quota', 1), ('timeout', 124)]:
+            with self.subTest(status=status):
+                self.base = self.base / status
+                self.base.mkdir()
+                metadata = {'status': status, 'cleanup_verified': True}
+                command = f'print({json.dumps(metadata)!r}); raise SystemExit({code})'
+                self.assertEqual(self.run_guard(command), code)
+                self.assert_recovery_data(False)
+                self.assertTrue(Path(str(self.prefix) + '.stderr').is_file())
+
+    def test_cli_cleanup_unknown_or_incomplete_retains_recovery_data(self):
+        for cleanup in [None, False, 'true', 1]:
+            with self.subTest(cleanup=cleanup):
+                self.base = self.base / str(cleanup)
+                self.base.mkdir()
+                metadata = {'status': 'ok', 'cleanup_verified': cleanup}
+                self.assertEqual(self.run_guard(f'print({json.dumps(metadata)!r})'), 0)
+                self.assert_recovery_data(True)
+
+    def test_mutated_cli_attempt_retains_data_despite_verified_cleanup(self):
+        code = ("from pathlib import Path; Path('source').write_text('changed'); "
+                f'print({json.dumps({"status": "ok", "cleanup_verified": True})!r})')
+        self.assertEqual(self.run_guard(code), 40)
+        self.assert_recovery_data(True)
+
+    def test_non_json_cli_output_retains_recovery_data(self):
+        self.assertEqual(self.run_guard("print('ordinary output')"), 0)
+        self.assert_recovery_data(True)
+
+    def test_legacy_cleanup_previews_then_deletes_only_redundant_files(self):
+        self.assertEqual(self.run_guard('pass'), 0)
+        Path(str(self.prefix) + '.stdout').write_text(
+            json.dumps({'status': 'failed', 'cleanup_verified': True}))
+        command = [sys.executable, str(SCRIPTS / 'review_artifacts.py'), str(self.prefix)]
+        preview = subprocess.run(command, capture_output=True, text=True, check=True)
+        self.assertIn(str(self.prefix) + '.backup.tar', preview.stdout)
+        self.assert_recovery_data(True)
+        subprocess.run(command + ['--apply'], capture_output=True, check=True)
+        self.assert_recovery_data(False)
+        subprocess.run(command + ['--apply'], capture_output=True, check=True)
+
+    def test_legacy_cleanup_rejects_missing_terminal_marker(self):
+        self.assertEqual(self.run_guard('pass'), 0)
+        Path(str(self.prefix) + '.stdout').write_text(
+            json.dumps({'status': 'ok', 'cleanup_verified': True}))
+        Path(str(self.prefix) + '.exit').unlink()
+        subprocess.run([sys.executable, str(SCRIPTS / 'review_artifacts.py'),
+                        str(self.prefix), '--apply'], capture_output=True, check=True)
+        self.assertTrue(Path(str(self.prefix) + '.backup.tar').is_file())
+
     def test_native_handoff_detects_writes_between_host_turns(self):
         receipt = self.begin_native()
         (self.root / 'source').write_bytes(b'reviewer write')

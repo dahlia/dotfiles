@@ -16,6 +16,8 @@ import subprocess
 import sys
 import tarfile
 
+from review_artifacts import release_artifacts
+
 # Persistent index flags worth detecting: assume-valid, skip-worktree and
 # intent-to-add. Transient flags such as CE_UPDATE_IN_BASE (0x04000000) are
 # set by ordinary stat refreshes and are masked out.
@@ -337,6 +339,7 @@ def main():
         save('.receipt.json', receipt)
         code = 40 if changes else (0 if result['status'] == 'ok' else 1)
         Path(str(prefix) + '.exit').write_text(str(code) + '\n')
+        release_artifacts(prefix)
         print(json.dumps(result))
         return code
     tracked = set(os.fsdecode(p) for p in git(root, 'ls-files', '-z').split(b'\0') if p)
@@ -388,6 +391,7 @@ def main():
     if changes:
         print('REVIEWER MUTATED THE REPOSITORY: ' + str(prefix) + '.guard.json', file=sys.stderr)
         return 40
+    release_artifacts(prefix)
     return code if code >= 0 else 128 - code
 
 
