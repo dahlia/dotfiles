@@ -352,8 +352,9 @@ a piece of context), not a validation of what was already said.
 
 ## Review process
 
-After drafting, get one style review from a different model vendor when
-`cross-subagents` is available. Use the assistant's declared identity to
+After drafting, complete one validated style review from a different model
+vendor when `cross-subagents` is available. A failed attempt leaves this review
+pending; it does not make the review optional. Use the assistant's declared identity to
 identify the author vendor, not the presence of a tool or MCP server. Let
 cross-subagents select a prose-capable model with `--exclude-vendor <author
 vendor>` and `--max-cost-index 0.10`; a flagship such as GPT-6 Astra or Claude
@@ -392,15 +393,27 @@ meaning preservation and overcorrection as well as style, and to apply the
 same criteria to any proposed rewrite.
 
 Verify the response before using it, then apply only suggestions that improve
-the piece. One review is usually enough; use at most one further review after
-substantial revisions. Do not turn a short writing task into an endless loop.
+the piece. One successful review is usually enough; use at most one further
+successful review after substantial revisions. These limits concern editorial
+rounds, not recovery attempts. Failed launches and invalid responses do not
+count as reviews.
 
-On authentication, model availability, or exhausted quota errors, try the next
-eligible vendor. Retry a transient failure once before moving on. If all
-eligible reviewers are unavailable, self-review and finish ordinary writing;
-briefly disclose this outside the drafted prose. If the user requires an external
-review as a gate, report the unmet gate instead. Do not ask the user to install
-software or bridge host access merely to finish ordinary writing.
+On timeout, authentication, model availability, quota exhaustion or insufficient
+quota headroom, or an invalid result, keep retrying with other eligible
+agent/provider/model/auth-plan/quota-pool combinations until a review validates.
+Follow the recovery procedure in `references/style-review.md`: exclude only
+the failed route or the shared resource actually affected, not an entire agent
+or vendor merely because one route failed. Preserve cross-vendor independence,
+the cost cap, and the tool policy on every replacement.
+
+Do not skip the review, silently substitute self-review, or finish with only
+an "external review unavailable" disclaimer. If fresh discovery confirms that
+every eligible combination is blocked, retain the draft and pending review,
+report the concrete blockers and known reset times, and ask whether to wait,
+restore access, or explicitly waive the review. Do not spin on known failures,
+promise an unsupported automatic resumption, or broaden spending or permissions
+without approval. Resume selection when availability changes; only the user's
+explicit waiver permits completion without this review.
 
 ---
 

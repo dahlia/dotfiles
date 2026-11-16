@@ -124,45 +124,96 @@ rather than verified. If the user requires an exact model as a gate, that gate
 is unmet.
 
 Apply only suggestions that improve the piece, and verify every one against
-the draft. Treat the response as advice, not ground truth. One review is
-usually enough; use at most one further review after substantial revisions.
-Do not turn a short writing task into an endless loop.
+the draft. Treat the response as advice, not ground truth. One validated review
+is usually enough; use at most one further successful review after substantial
+revisions. Recovery attempts do not count toward these editorial-round limits.
 
 ## Fallback and completion
 
-Maintain cumulative exclusions for the whole review. Start with the author
-vendor, then append every failed route, agent and vendor. Never remove one: a
-later failure could otherwise make an earlier failed route eligible again.
+The coordinator owns recovery. `--no-fallback` disables only `run.py`'s implicit
+fallback, not the coordinator's obligation to select and launch replacements.
+Repeat selection, invocation, and validation until one eligible review
+succeeds. There is no fixed total attempt limit while untried eligible
+combinations remain; a retry is not another editorial round.
+
+Keep an attempt ledger in `$review_dir`: route, agent/provider/model,
+auth plan/quota buckets, failure class, affected resource, and outcome. Read the
+receipt and partial output before classifying a failure; an outer tool timeout,
+missing receipt, empty reply, or failed validation is an incomplete attempt,
+never a clean review.
+
+Maintain cumulative exclusions for unchanged failures, scoped to the evidence:
+
+ -  Timeout, transient failure, empty/truncated reply: retry once in a fresh
+    task, then exclude that route and try another combination.
+ -  `model_unavailable`: exclude the affected route/model on that provider;
+    another model or another provider/agent serving the same model may work.
+ -  `auth`: exclude routes sharing the broken credentials/auth plan. Do not
+    discard other authenticated providers or accounts on the same CLI.
+ -  `quota` or insufficient headroom: exclude the exhausted/insufficient bucket
+    and all routes that depend on it, not unrelated pools on the same agent or
+    vendor. Follow `cross-subagents/references/quota-handover.md` for quota
+    observations and refreshes, respecting coordinator-owned quota scope.
+ -  Other invalid results: do not apply them as a completed review. Record the
+    validation failure, try another eligible route, and retain any required
+    cleanup/retained-session disclosures.
+
+Only exclude an entire agent or vendor when evidence establishes that every
+route under it shares the blocker. Keep the author's vendor excluded throughout.
+An exhausted pool is not usable via a different model name or effort setting.
+When selectors lack a resource-level exclusion flag, expand the affected
+resource into its route IDs and pass repeated `--exclude-route` options.
 
 ~~~~ bash
 EXCLUDE_ARGS=(--exclude-vendor "$AUTHOR_VENDOR")   # omit if the vendor is unknown
-# after a failure:
-EXCLUDE_ARGS+=(--exclude-route "$FAILED_ROUTE" \
-               --exclude-agent "$FAILED_AGENT" \
-               --exclude-vendor "$FAILED_VENDOR")
+# After classifying a route-specific failure (and any one transient retry):
+EXCLUDE_ARGS+=(--exclude-route "$FAILED_ROUTE")
+# For shared auth/quota failures, also append each route sharing that resource.
+# Do NOT append --exclude-agent or --exclude-vendor without scope evidence.
 
 if NEW=$(python3 "$CROSS/scripts/select_route.py" \
            --task prose --max-cost-index 0.10 "${EXCLUDE_ARGS[@]}" --human); then
   printf '%s\n' "$NEW" > "$review_dir/selection.txt"
   ROUTE=$(printf '%s\n' "$NEW" | head -1 | awk '{print $1}')
 else
-  echo "no eligible reviewer remains" >&2
+  echo "review pending: refresh discovery and scoped quota before declaring exhaustion" >&2
 fi
 ~~~~
 
-Do not fall back to the author's vendor and claim independence. Retry a
-`transient` error, HTTP 429 with a retry hint, timeout, or empty reply once in
-a fresh run. If `error_class` is `quota`, `auth` or `model_unavailable`, switch
-instead of retrying. Stop when the selection returns no route rather than
-cycling between the same failures.
+After each selection, run the selected route with the same prompt and execution
+constraints, using a unique task ID such as `prose-review-001`,
+`prose-review-002`, etc., under `$RUN_ID`. Save each receipt separately
+(`meta-001.json`, etc.) so failures are not overwritten. Preserve the draft and
+prompt across recovery attempts. Validate every replacement exactly as the
+first attempt; launching a replacement is not success.
 
-If no eligible vendor remains, self-review and finish ordinary writing, and
-briefly disclose that outside the drafted prose. If the user requires an
-external review as a gate, report the unmet gate instead. A skill supplies
-instructions; it cannot grant host access or an authenticated CLI.
+For a transient HTTP 429 with a retry hint, respect that hint before the one
+same-route retry; known quota exhaustion calls for a different usable pool
+instead. Never evade rate limits or authentication requirements.
 
-Bound each invocation with the execution tool's timeout or `timeout` (for
-example, 240 seconds).
+If selection has no candidates, refresh discovery and scoped quota using
+`cross-subagents`' preparation procedure, and reselect with the original
+requirements and accumulated, resource-scoped exclusions. A stale fallback list
+or one selector failure is not proof that all combinations are unavailable.
+Clear a resource exclusion only on new evidence that the blocker has changed
+(for example, confirmed quota reset or restored authentication).
+
+If fresh discovery confirms no runnable combination, keep the review pending
+and the draft intact. Report attempted routes, concrete blockers, and known
+reset times outside the prose. Ask the user whether to wait for capacity,
+restore access, or explicitly waive the review; do not finish by self-review
+and disclaimer. Resume recovery when capacity becomes available, using a
+supported notification/deferred continuation if available; otherwise explain
+that resumption needs a new user turn. Do not poll, retry known-blocked routes
+indefinitely, invent availability, install software, or broaden the cost cap,
+vendor independence, permissions, or billing without approval.
+
+Bound each invocation with both `run.py --timeout` and an outer execution-tool
+timeout long enough for startup and cleanup (for example, 240 and 300 seconds).
+An outer timeout is also a recoverable failed attempt. Before replacement,
+confirm the previous invocation has ended or cancel it through supported means;
+do not launch duplicate live reviews. On eventual success, briefly report the
+actual reviewer and any handovers outside the draft.
 
 ## Cleanup
 
@@ -176,7 +227,10 @@ CACHE=$(PYTHONPATH="$CROSS/scripts" python3 -c \
 rm -rf "$review_dir" "$CACHE/runs/$RUN_ID"
 ~~~~
 
-On failure, delete `$review_dir/prompt.txt` (the draft-bearing file), keep only
-the minimum metadata needed to explain the failure, and disclose its path. If a
-session was retained (`session_cleaned_up: false`), record its ID before
+Do not clean up the prompt or draft after an individual failed attempt: the
+next route needs them. While recovery is blocked, retain them privately with
+the attempt ledger and disclose the pending-state path. On success, explicit
+waiver, or cancellation, clean up draft-bearing local and cache artifacts for
+this run, retaining only the minimum metadata needed to explain failures.
+If a session was retained (`session_cleaned_up: false`), record its ID before
 cleanup and disclose it. Never delete another run's artifacts.

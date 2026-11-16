@@ -1,0 +1,5 @@
+schema_version: "1.1"
+name: route-recovery
+expected_outcome: |
+  Recovery reaches E after scoped auth, timeout, quota and empty-response failures.
+  Other routes on the same agent/vendor remain eligible and success is validated.
