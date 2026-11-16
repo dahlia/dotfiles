@@ -1,0 +1,5 @@
+schema_version: "1.1"
+name: resume-partial-result
+expected_outcome: |
+  Resume inherits route/cwd/sandbox but repeats external access and policy flags,
+  reads partial-result metadata, assesses denials and distinguishes useful credit.

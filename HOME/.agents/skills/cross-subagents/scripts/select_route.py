@@ -29,7 +29,7 @@ from pathlib import Path
 import re
 import sys
 import time
-from typing import Any
+from typing import Any, Callable
 
 from common import (
     SCHEMA_VERSION,
@@ -1707,6 +1707,7 @@ def select_step_plan(
     quota_agents: list[str] | None = None,
     exclude_quota_agents: list[str] | None = None,
     quota_cache_only: bool = False,
+    all_models: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Plan N independent review/generation steps.
 
@@ -1717,7 +1718,7 @@ def select_step_plan(
     """
     base = dict(defaults or {})
     supplied_quota_state = quota_state
-    all_models = collect_all_models(refresh=False)
+    all_models = all_models if all_models is not None else collect_all_models(refresh=False)
     if quota_state is None:
         owners: set[str] = set()
         for spec in specs:
@@ -1874,7 +1875,10 @@ def select_step_plan(
     return result
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None, *, refresh_discovery: bool = False,
+    discover_models: Callable[[], dict[str, Any]] | None = None,
+) -> int:
     enforce_utf8()
     parser = argparse.ArgumentParser(
         description="Select an optimal model route, fallback chain, or multi-step plan."
@@ -2056,6 +2060,9 @@ def main(argv: list[str] | None = None) -> int:
             "quality_floor": args.quality_floor,
             "sandbox": args.sandbox,
         }
+        discovered = discover_models() if discover_models is not None else (
+            collect_all_models(refresh=True) if refresh_discovery else None
+        )
         plan = select_step_plan(
             specs,
             defaults=defaults,
@@ -2067,6 +2074,7 @@ def main(argv: list[str] | None = None) -> int:
             exclude_quota_agents=args.exclude_quota_agent,
             quota_cache_only=args.quota_cache_only,
             run_id=args.run_id,
+            all_models=discovered,
         )
         if args.human:
             if plan["status"] == "no_route_available":
@@ -2091,7 +2099,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(plan, indent=2, ensure_ascii=False))
         return 0 if plan["status"] == "ok" else 1
 
+    discovered = discover_models() if discover_models is not None else (
+        collect_all_models(refresh=True) if refresh_discovery else None
+    )
     res = select_routes(
+        all_models=discovered,
         task=args.task,
         min_context=args.min_context,
         require_modalities=args.require_modality,

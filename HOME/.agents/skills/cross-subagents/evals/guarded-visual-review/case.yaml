@@ -1,0 +1,5 @@
+schema_version: "1.1"
+name: guarded-visual-review
+expected_outcome: |
+  A safe visual review plan preserves vision, vendor independence, read-only
+  isolation and guard, quota ownership, and verifies results without escalation.

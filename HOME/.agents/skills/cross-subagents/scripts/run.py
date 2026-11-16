@@ -4534,7 +4534,9 @@ def _handover_audit(run_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str,
     return handovers, quota_failures
 
 
-def build_run_report(run_id: str, only_significant: bool = False) -> dict[str, Any]:
+def build_run_report(
+    run_id: str, only_significant: bool = False, include_defects: bool = False,
+) -> dict[str, Any]:
     """Reconstruct the full recursive subagent invocation tree and normalized participant list for `run_id`."""
     run_dir = get_run_dir(run_id)
     tasks_by_id: dict[str, dict[str, Any]] = {}
@@ -4630,7 +4632,7 @@ def build_run_report(run_id: str, only_significant: bool = False) -> dict[str, A
     all_trailers = [p["assisted_by"] for p in participants]
     sig_trailers = [p["assisted_by"] for p in participants if p["significant"]]
 
-    return {
+    report = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
         "generated_at": now_iso(),
@@ -4643,6 +4645,10 @@ def build_run_report(run_id: str, only_significant: bool = False) -> dict[str, A
         "assisted_by_trailers": sig_trailers if only_significant else all_trailers,
         "significant_assisted_by_trailers": sig_trailers,
     }
+    if include_defects:
+        from defects import list_reports
+        report["defects"] = list_reports(run_id=run_id)
+    return report
 
 
 def format_human_run_report(report: dict[str, Any]) -> str:
@@ -4700,6 +4706,14 @@ def format_human_run_report(report: dict[str, Any]) -> str:
             )
             if handover.get("context_file"):
                 lines.append(f"    context: {handover['context_file']}")
+
+    if "defects" in report:
+        lines.append("")
+        lines.append("Skill defects recorded for this run:")
+        if not report["defects"]:
+            lines.append("  none")
+        for defect in report["defects"]:
+            lines.append(f"  - {defect['severity']}: {defect['title']} — {defect['path']}")
 
     sig_trailers = report.get("significant_assisted_by_trailers") or []
     if sig_trailers:
@@ -4885,6 +4899,9 @@ def evaluate_cost_gate(
 
 def main() -> int:
     enforce_utf8()
+    if len(sys.argv) > 1 and sys.argv[1] == "inspect":
+        from task_inspection import main as inspect_main
+        return inspect_main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] in ("report", "mark", "record-native", "record-handover"):
         mode = sys.argv[1]
         sub_parser = argparse.ArgumentParser(prog=f"run.py {mode}")
@@ -4901,8 +4918,12 @@ def main() -> int:
                 help="Filter participants and Assisted-by trailers to significant contributions only.",
             )
             sub_parser.add_argument("--human", action="store_true", help="Print human-readable call tree.")
+            sub_parser.add_argument("--include-defects", action="store_true", help="Include open skill defects recorded for this run.")
             s_args = sub_parser.parse_args(sys.argv[2:])
-            rep = build_run_report(s_args.run_id, only_significant=s_args.only_significant)
+            rep = build_run_report(
+                s_args.run_id, only_significant=s_args.only_significant,
+                include_defects=s_args.include_defects,
+            )
             if s_args.human:
                 print(format_human_run_report(rep))
             else:

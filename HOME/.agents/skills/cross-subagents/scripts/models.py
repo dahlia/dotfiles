@@ -669,9 +669,13 @@ def resolve_official_model_id(
     return normalize_official_model_id(raw_model_id, alias_lookup=alias_map)[0]
 
 
-def collect_all_models(agents: list[str] | None = None, refresh: bool = False) -> dict[str, Any]:
+def collect_all_models(
+    agents: list[str] | None = None, refresh: bool = False, *,
+    probe_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     target_agents = [canonical_agent_name(a) for a in agents] if agents else list(AGENT_BINARIES.keys())
-    probe_data = probe_all(agents=target_agents, refresh=refresh)
+    if probe_data is None:
+        probe_data = probe_all(agents=target_agents, refresh=refresh)
     results: dict[str, Any] = {}
     for agent in target_agents:
         results[agent] = collect_agent_models(agent, probe_data=probe_data, refresh=refresh)

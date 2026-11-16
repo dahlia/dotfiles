@@ -1,0 +1,5 @@
+schema_version: "1.1"
+name: independent-step-plan
+expected_outcome: |
+  Independent vendor-distinct planned steps preserve per-step caps and persisted
+  fallback constraints, with honest native attribution and fan-out supervision.
