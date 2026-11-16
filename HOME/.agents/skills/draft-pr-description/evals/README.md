@@ -34,3 +34,9 @@ than either score alone.
 The label and template sets in `grade_evals.py` were captured when the cases
 were written. Refresh them with `scripts/collect_context.py` before trusting a
 failure that depends on them.
+
+`verification-policy` is a self-contained editorial exercise with four
+scenarios: routine gates, a platform coverage gap, benchmark evidence, and a
+required testing template. It needs no repository fixture or clipboard access.
+Grade its assertions against the generated bodies; `scripts/grade_evals.py`
+does not cover this case.

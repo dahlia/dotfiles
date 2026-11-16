@@ -8,7 +8,7 @@ patterns are for drafts with no template; a template always wins.
 Start from the size
 -------------------
 
-A one-line dependency bump is one paragraph and a sentence about testing. A
+A one-line dependency bump is usually one paragraph, without a testing addendum. A
 bug fix with a subtle invariant is two or three paragraphs. A feature that
 changes a public API may need four paragraphs and one `##` section for
 migration.
@@ -29,8 +29,9 @@ the one paragraph that explains a risky decision to keep the PR short.
 Small fixes
 -----------
 
-Lead with the symptom and the cause, then say what changed. Mention the test
-only if it is not obvious.
+Lead with the symptom and the cause, then say what changed. Mention verification
+only when it changes the reviewer's judgment or next action, not to report
+routine gate completion.
 
 ~~~~ markdown
 Loading a document from a `file:` URL bypassed the scheme check whenever
@@ -178,9 +179,29 @@ What does not need its own section
 
  -  “Summary” at the top that repeats the title.
  -  “Changes” listing every file the diff already shows.
- -  “Testing” with “N/A” or “should pass”.
+ -  “Testing” with “N/A”, “should pass”, or a list of routine passing gates.
  -  “Screenshots” for a change with no visual surface.
  -  A closing “Thoughts?” unless a decision is genuinely open.
  -  A checklist the template did not require, especially items like “I have
     read the contributing guide” that the author cannot verify on the reader's
-    behalf.
+     behalf.
+
+Verification that changes the review
+------------------------------------
+
+Without an explicit project requirement, omit routine check results rather
+than replacing a testing section with the same list in prose. Include a known
+coverage gap and the follow-up it needs, or evidence that supports the change's
+claim beyond the usual gates.
+
+For example, a hypothetical platform-specific fix might need this paragraph:
+
+~~~~ markdown
+The reconnect path works after suspend on Linux. The Windows branch still
+needs a suspend/resume check; I do not have a Windows device. Could someone
+with one confirm that the connection recovers without restarting the app?
+~~~~
+
+The tested platform bounds the evidence; the untested branch and concrete
+request tell the reviewer what remains to be done. A bare “tests not run” or
+“all checks pass” would provide neither.

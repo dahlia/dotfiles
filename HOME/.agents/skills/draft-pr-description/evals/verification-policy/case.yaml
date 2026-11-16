@@ -1,0 +1,8 @@
+schema_version: "1.1"
+name: verification-policy
+expected_outcome: |
+  The routine change omits verification boilerplate. The platform change
+  states the tested and untested scope, the device limitation, and a concrete
+  request for Windows suspend/resume testing. The performance change retains
+  the measured comparison and dataset without routine gate reports. The
+  template case preserves both headings and supplies the test command/result.

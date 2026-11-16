@@ -90,8 +90,10 @@ reviewer focus you would prioritize differently are editorial judgments; write
 the PR they asked for.
 
 Never invent a test result, a benchmark number, a migration step, or an issue
-number. A missing sentence is better than a fabricated one. If verification was
-not run, say what should be run or leave the claim out; do not imply CI passed.
+number. A missing sentence is better than a fabricated one. Omission of routine
+results is not evidence that checks passed. Disclose known verification gaps
+that affect review or merge readiness, but do not turn an unknown run history
+into a generic “tests not run” disclaimer or imply CI passed.
 
 
 Read the repository before writing a word
@@ -244,8 +246,9 @@ Load the `writing` skill before writing a sentence of it when it is available;
 the review section below covers its proofreading step.
 
 The body answers the questions a reviewer will ask, in the order they will ask
-them: why does this change exist, how does it work, what could break, and how do
-you know it works. The diff answers “what changed”. Repeating that is the most
+them: why does this change exist, how does it work, and what could break.
+Include verification information only when it changes the reviewer's judgment
+or next action. The diff answers “what changed”. Repeating that is the most
 common way a PR description becomes long and useless.
 
 **Why.** Open with the situation that makes the change necessary: the bug, the
@@ -264,10 +267,27 @@ and breaking changes. If nothing changes for users, say so once. If a follow-up
 is deliberately out of scope, name it and link the issue that tracks it. This
 keeps the reviewer from asking for work that belongs elsewhere.
 
-**Verification.** Report only what was actually run: the command, the relevant
-result, and any gap. “`pnpm test` passes” is useful when it ran; “should pass”
-is not evidence. If you could not run the tests, say which ones need a run
-instead of implying they passed.
+**Verification, when it matters.** A PR description is not a work log. Running
+the project's routine local gates is expected, so omit lists of passing lint,
+type checks, builds, and tests. Do not add a testing paragraph or section merely
+to show that work was done, even when the commands really ran.
+
+Include a known gap when it affects confidence in the change: what remains
+untested, why, and what still needs checking. For platform-specific code, name
+the platforms actually tested when that defines the limits of coverage. If
+hardware or an environment is unavailable, ask someone with access to check
+the specific behavior, rather than ending with a bare “not tested” disclaimer.
+
+Successful verification can also matter when it supports the change's claim
+beyond routine gates, such as a before-and-after performance measurement or
+reproduction and resolution of a hardware-specific bug. Give the relevant
+result and enough context to interpret its scope, not a command transcript.
+Report only supported facts; an expectation is not a result.
+
+Follow explicit template or contributing-guide requirements for test
+information, including required headings and checkboxes. Otherwise, leave
+routine results out. This is an editorial rule, not permission to skip required
+checks, conceal a known failure, or invent a successful run.
 
 End with the issue relationship when there is one:
 
@@ -281,10 +301,10 @@ issue at merge time, which is worse than no link.
 
 ### Length and shape
 
-Most PRs need two to four paragraphs. A one-line dependency bump needs one
-paragraph and the verification. A large feature may need four paragraphs and a
-short `##` section for migration. Length follows the risk and the number of
-decisions, not the number of files.
+Most PRs need two to four paragraphs. A one-line dependency bump usually needs
+one paragraph, without a routine testing addendum. A large feature may need four
+paragraphs and a short `##` section for migration. Length follows the risk and
+the number of decisions, not the number of files.
 
 Use prose. Bullets fragment reasoning and hide the connection between items.
 Reserve them for genuinely discrete lists: migration steps, breaking changes,
@@ -505,7 +525,10 @@ Before handing the draft over:
     actually provided or you actually observed?
  -  If the diff contradicted the request, did you stop and report instead of
     drafting around it?
- -  Are test results reported only where they were actually run?
+ -  Is each verification detail required by the project or useful to the
+    reviewer's judgment or next action, rather than a routine gate report?
+ -  Are reported results supported, and are known material gaps or failures
+    disclosed with the specific follow-up needed?
  -  Do the headings follow the template's levels, or, with no template, stay at
     `##` and below, with no headings at all on a short PR?
  -  Are labels, reviewers, and milestone real for this repository?
@@ -524,7 +547,7 @@ Hand it over
 
 Tell the user where the draft is, what it contains in one line, whether the body
 is on the clipboard, and what still needs a decision: a missing reviewer, a
-milestone you left unset, a test you could not run, a template section that
+milestone you left unset, a material verification gap, a template section that
 needs their input. If they want it posted, `gh pr create` takes the fields
 directly:
 
