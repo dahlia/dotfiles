@@ -13,6 +13,77 @@
 	ci = commit
 	co = switch --create
 	st = status --short --branch
+	# Fast-forward only; never discard local commits or working-tree changes.
+	sync-upstream-branches = "!f() (\n\
+		if [ \"$#\" -ne 1 ]; then\n\
+			echo 'Usage: git sync-upstream-branches <remote>' >&2\n\
+			exit 1\n\
+		fi\n\
+		remote=$1\n\
+		case \"$remote\" in ''|-*) echo 'Invalid remote name.' >&2; exit 1 ;; esac\n\
+		git remote get-url \"$remote\" >/dev/null || exit 1\n\
+		[ \"$(git rev-parse --is-inside-work-tree)\" = true ] || exit 1\n\
+		status=$(git status --porcelain --untracked-files=all) || exit 1\n\
+		if [ -n \"$status\" ]; then\n\
+			echo 'Aborting: commit or stash all changes (including untracked files) first.' >&2\n\
+			exit 1\n\
+		fi\n\
+		for state in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply sequencer BISECT_START; do\n\
+			state_path=$(git rev-parse --git-path \"$state\") || exit 1\n\
+			if [ -e \"$state_path\" ]; then\n\
+				echo 'Aborting: finish the Git operation in progress first.' >&2\n\
+				exit 1\n\
+			fi\n\
+		done\n\
+		git fetch --prune --no-tags --no-prune-tags \"$remote\" \"+refs/heads/*:refs/remotes/$remote/*\" || exit 1\n\
+		refs=$(git for-each-ref --format='%(refname)' \"refs/remotes/$remote/\") || exit 1\n\
+		branches=$(printf '%s\\n' \"$refs\" | while IFS= read -r ref; do\n\
+			branch=${ref#refs/remotes/$remote/}\n\
+			printf '%s\\n' \"$branch\" | LC_ALL=C grep -E '^(main|next|[0-9]+\\.[0-9]+-maintenance)$'\n\
+		done)\n\
+		if [ -z \"$branches\" ]; then\n\
+			echo 'No matching remote branches.'\n\
+			exit 0\n\
+		fi\n\
+		current=$(git symbolic-ref -q HEAD) || current=\n\
+		# Check every branch before changing any local branch.\n\
+		for branch in $branches; do\n\
+			local_ref=refs/heads/$branch\n\
+			remote_ref=refs/remotes/$remote/$branch\n\
+			if git show-ref --verify --quiet \"$local_ref\"; then\n\
+				if [ \"$local_ref\" != \"$current\" ]; then\n\
+					worktree=$(git for-each-ref --format='%(worktreepath)' \"$local_ref\") || exit 1\n\
+					if [ -n \"$worktree\" ]; then\n\
+						printf 'Aborting: %s is checked out in another worktree: %s\\n' \"$branch\" \"$worktree\" >&2\n\
+						exit 1\n\
+					fi\n\
+				fi\n\
+				if ! git merge-base --is-ancestor \"$local_ref\" \"$remote_ref\"; then\n\
+					printf 'Aborting: %s contains local-only commits (or ancestry cannot be verified).\\n' \"$branch\" >&2\n\
+					exit 1\n\
+				fi\n\
+			fi\n\
+		done\n\
+		# Update the current branch first: Git checks working-tree collisions.\n\
+		for branch in $branches; do\n\
+			if [ \"refs/heads/$branch\" = \"$current\" ]; then\n\
+				git -c merge.autostash=false merge --ff-only --no-overwrite-ignore \"refs/remotes/$remote/$branch\" || exit 1\n\
+			fi\n\
+		done\n\
+		for branch in $branches; do\n\
+			local_ref=refs/heads/$branch\n\
+			remote_ref=refs/remotes/$remote/$branch\n\
+			[ \"$local_ref\" != \"$current\" ] || continue\n\
+			if git show-ref --verify --quiet \"$local_ref\"; then\n\
+				git branch -f \"$branch\" \"$remote_ref\" || exit 1\n\
+			else\n\
+				git branch --no-track \"$branch\" \"$remote_ref\" || exit 1\n\
+				git config \"branch.$branch.remote\" \"$remote\" || exit 1\n\
+				git config \"branch.$branch.merge\" \"refs/heads/$branch\" || exit 1\n\
+			fi\n\
+		done\n\
+		printf 'Synced maintenance/main/next branches with %s (fast-forward only).\\n' \"$remote\"\n\
+	); f"
 [log]
 	date = iso8601
 [core]
