@@ -63,6 +63,13 @@ the clear, concrete defects first: wrong logic, off-by-one errors, wrong
 conditions, unhandled errors, crashes, broken edge cases, typos in
 identifiers, and changed behavior with no test.
 
+Start with the changed paths and hunks. Read surrounding code only to verify
+a specific likely defect. Run at most one targeted check if it can resolve a
+concrete uncertainty; do not run a full build, test suite or repository sweep.
+After the first pass through the scoped diff, finalize with the findings you
+can substantiate. If you could not cover the scope, say which parts remain
+unreviewed instead of returning the clean sentinel.
+
 Report a finding only when all three hold:
 
 1. It is a defect in code this change set added or modified — not in
@@ -89,8 +96,7 @@ NO ACTIONABLE FINDINGS
 Fast filter — re-review
 -----------------------
 
-Resume the step 1 session, so the reviewer remembers its own findings. A
-transient retry starts a fresh session, so this template repeats the scope.
+Resume the step 1 session, so the reviewer remembers its own findings.
 
 ~~~~
 I have applied the valid fixes from your review. Findings I did not act on:
@@ -114,9 +120,9 @@ and caches. Repository outputs must stay in [OUTPUT PATHS]. Do not install
 dependencies, update snapshots, regenerate protected source or start/change
 external services. Report necessary reads or checks that could not run.
 
-Confirm the fixes are genuinely resolved and introduced no regressions, then
-check the current state for anything new. Use the same inspection and test
-policy as before. Do not re-raise findings marked rejected or deferred above.
+Inspect the fixes and their direct effects first; do not restart the original
+audit. Use the same one-targeted-check limit as the initial fast pass.
+Do not re-raise findings marked rejected or deferred above.
 Apply the same bar and the same reporting format, including the separate
 "OUT OF SCOPE" heading, and put the complete review in your final message.
 
@@ -124,6 +130,22 @@ If nothing meets the bar, your final message must be exactly:
 NO ACTIONABLE FINDINGS
 ~~~~
 
+
+Timeout continuation
+--------------------
+
+Use this only in the retained session, for the same unchanged review scope.
+
+~~~~
+The previous turn timed out. Continue from your existing inspection; do not
+repeat reads or checks you already completed. Keep the review scope and
+read-only rules unchanged.
+
+Prioritize the most important unreviewed changed hunks and finalize promptly.
+For the fast filter, do not start new builds or broad checks. Collect verified
+findings from both turns in one final answer. If required coverage remains
+incomplete, say exactly what was not reviewed; do not use the clean sentinel.
+~~~~
 
 Frontier — initial review
 -------------------------

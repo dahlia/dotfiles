@@ -160,6 +160,8 @@ models by task-fit evidence only, so a tight account does not silently demote a
 vendor's flagship to a third model. The default `--step-distinct-vendor` keeps
 steps 2 and 3 on different vendors, which is what makes the second frontier
 read independent.
+The selector also favors eligible routes with better local review completion
+times and fewer timeouts. History cannot override the role constraints.
 
 ~~~~ bash
 PLAN="$WORK/plan.json"
@@ -278,16 +280,17 @@ STEP_ROUTE=$(jq -r '.selected.route_id' "$WORK/step${STEP}.json")
 PREFIX="$WORK/step${STEP}-r${ROUND}-a${ATTEMPT}"
 PROMPT="$WORK/step${STEP}-r${ROUND}-prompt.txt"
 
-KEEP=""
-if [ "$ROUND" = 1 ]; then KEEP="--keep-session"; fi
-RESUME=""
-if [ "$ROUND" -gt 1 ]; then RESUME="--resume-task step${STEP}-r1"; fi
+TASK_ID="step${STEP}-r${ROUND}-a${ATTEMPT}"
+# For a new reviewer leave RESUME_FROM empty. For a follow-up use the
+# latest usable task ID; for a timeout retry use the timed-out task ID.
+SESSION_ARGS=(--keep-session)
+if [ -n "${RESUME_FROM:-}" ]; then SESSION_ARGS=(--resume-task "$RESUME_FROM"); fi
 
 python3 "$GUARD" --root "$REPO_ROOT" \
   --prefix "$PREFIX" --stdin "$PROMPT" -- \
   python3 "$CROSS/scripts/run.py" \
     --run-id "$RUN_ID" \
-    --task-id "step${STEP}-r${ROUND}" \
+    --task-id "$TASK_ID" \
     --route "$STEP_ROUTE" \
     --task code_review \
     --sandbox read-only \
@@ -297,7 +300,7 @@ python3 "$GUARD" --root "$REPO_ROOT" \
     --no-fallback \
     --timeout 900 \
     --prompt-file "$PROMPT" \
-    $KEEP $RESUME
+    "${SESSION_ARGS[@]}"
 ~~~~
 
 If `$WORK/step${STEP}.json` is missing or `STEP_ROUTE` is empty or `null`, skip
@@ -311,7 +314,7 @@ jq -r '.status, .changes' "$PREFIX.guard.json"
 jq -r '.status, .error_class, .cleanup_verified, .official_agent,
        .official_model_id, .model_verified, (.observed_model // "-"),
        (.denials_observed // .permission_denials // [] | length),
-       (.result_file // "-")' "$PREFIX.stdout"
+       .resumable, (.session_id // "-"), (.result_file // "-")' "$PREFIX.stdout"
 ~~~~
 
 Pass `--prompt-file` explicitly: `run.py` prefers a cached task prompt over
@@ -403,7 +406,9 @@ A round is usable only when **all** of these hold:
     matching receipt identifying the completed host task and terminal event;
  -  `denials_observed` is empty (older adapter output names the same list
     `permission_denials`; accept either, and read the count printed above);
- -  `result_file` exists and its trimmed text is non-empty.
+ -  `result_file` exists, its trimmed text is non-empty, and the reviewer did
+    not report incomplete required coverage. Triage any verified findings
+    from an incomplete answer, but do not count the round as clean.
 
 `guard.json` status `mutated` (exit 40) or a guard failure (exit 2) stops the
 whole loop. Preserve `$WORK`, show the changed paths, and never run
@@ -414,11 +419,31 @@ child could write after the guard comparison, so the round did not review a stab
 `null` CLI value as unknown, never as clean. Native rounds use host completion
 evidence instead; missing completion evidence is unknown.
 
-Classify failures by `error_class` before applying the generic retry rule.
-`quota`, `auth` or `model_unavailable` (and `status: quota`) means the step is
-unavailable: re-plan it (above) or stop. `timeout`, `transient` or `failed`
-gets one fresh-prefix retry with `--prompt-file` pointing at the current
-prompt; a second failure ends that step.
+Classify failures by `error_class` before retrying. `quota`, `auth` or
+`model_unavailable` (and `status: quota`) means re-plan the step or report it
+unavailable. For a timeout:
+
+1. If the guard is unchanged, cleanup is verified and `resumable: true`, retry
+   **once** with `--resume-task` pointing to the timed-out task, not to round
+   one or the last successful task. Keep the exact route and repository scope
+   and repeat all sandbox/tool flags. Use the [timeout continuation
+   prompt](references/review-prompts.md#timeout-continuation), a new task ID
+   and a fresh guard prefix. A new prefix does not require a new session.
+2. If the session cannot be resumed, or the continuation also times out,
+   re-plan once for this step under its role constraints. Exclude the timed-out
+   route and the other frontier reviewer's vendor (planned and actual); a
+   timeout need not rule out the whole failed vendor. Honor explicit pins.
+   Start a replacement reviewer at round 1 using a fresh prefix and task ID
+   (keep attempt numbering unique across the step), without replaying edits.
+   If no eligible replacement exists or it also cannot finish, report the
+   step unknown. An advisory step 1 timeout never blocks steps 2 and 3.
+
+For native execution resume only through a supported follow-up to the same
+host task after verified termination and an unchanged guard; otherwise report
+unknown, preserving the guard artifacts. Never assume the original native
+reviewer has stopped. `transient` or `failed` still gets at most one retry
+when cleanup and the guard permit it; reuse a known-good earlier session for
+a later round, and use a fresh task ID and guard prefix.
 
 A non-empty `denials_observed` (or the same list under its older
 `permission_denials` name) is **blocked**, never clean: the reviewer was
@@ -480,7 +505,8 @@ means the reviewer re-reviews a range that still ends at the pre-fix commit; it
 would grade code you already changed and report a stale verdict as fresh.
 
 Then write the re-review prompt, naming the previous findings and their
-dispositions, and invoke with `--resume-task step${STEP}-r1`. Do not resume on
+dispositions, and resume the latest usable task for that reviewer (including
+a successful timeout continuation). Do not resume on
 a different model: a different model is a different reviewer and starts at
 round 1.
 

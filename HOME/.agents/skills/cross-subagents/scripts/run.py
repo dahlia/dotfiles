@@ -2140,6 +2140,7 @@ def invoke_opencode(
             "status": "timeout",
             "exit_code": code,
             "session_id": retained_session_id,
+            "timeout_resume_supported": has_session_cmd and not stream_errors,
             "usage": usage,
             "requested_model": route.get("requested_model") or model_spec,
             "resolved_model": model_spec,
@@ -2791,17 +2792,14 @@ def _summarize_result_excerpt(result_file: Path | None) -> str | None:
 
 def load_coroutine_session(run_dir: Path, resume_task_id: str) -> dict[str, Any]:
     validate_safe_identifier(resume_task_id, "resume_task_id")
+    meta = read_json_file(ensure_child_path(run_dir, resume_task_id) / "meta.json")
+    if meta and meta.get("resumable") is False:
+        raise ValueError(f"Task '{resume_task_id}' has no resumable session (resumable=False).")
     sessions_file = run_dir / "sessions.json"
     sessions = read_json_file(sessions_file) or {}
     entry = (sessions.get("tasks") or {}).get(resume_task_id)
     if not entry:
-        meta_path = ensure_child_path(run_dir, resume_task_id) / "meta.json"
-        meta = read_json_file(meta_path)
         if meta and meta.get("session_id"):
-            if meta.get("resumable") is False:
-                raise ValueError(
-                    f"Task '{resume_task_id}' was executed in one-shot mode (resumable=False) and cannot be resumed."
-                )
             return {
                 "session_id": meta["session_id"],
                 "route_id": meta.get("route_id") or f"{meta['agent']}/{meta['provider']}/{meta['model']}",
@@ -4098,7 +4096,18 @@ def execute_task(
                     )
 
                     resumable_flag = bool(
-                        res["status"] == "ok" and res.get("session_id") and (keep_session or resume_session_id)
+                        res.get("session_id") and (keep_session or resume_session_id)
+                        and (res["status"] == "ok" or (
+                            res["status"] == "timeout" and res.get("cleanup_verified") is True
+                            and res.get("session_cleaned_up") is False
+                            and res.get("timeout_resume_supported", True)
+                            and _verify_model_match(
+                                res.get("resolved_model") or route["model_id"], route["canonical_key"],
+                                res.get("observed_model"),
+                                expected_provider=route["provider"] if agent == "opencode" else None,
+                                expected_variant=effort or route.get("variant"),
+                            )
+                        ))
                     )
                     if resumable_flag and res.get("session_id"):
                         save_coroutine_session(
@@ -4166,6 +4175,9 @@ def execute_task(
                         "started_at": started_at,
                         "ended_at": ended_at,
                         "duration_ms": duration_ms,
+                        "task_category": task_norm,
+                        "resumed": bool(resume_session_id),
+                        "timeout_seconds": timeout_sec,
                         "session_id": res.get("session_id"),
                         "resumable": resumable_flag,
                         "session_cleaned_up": res.get("session_cleaned_up"),
@@ -4218,6 +4230,11 @@ def execute_task(
                         "started_at": started_at,
                         "ended_at": ended_at,
                         "duration_ms": duration_ms,
+                        "task_category": task_norm,
+                        "resumed": bool(resume_session_id),
+                        "timeout_seconds": timeout_sec,
+                        "cleanup_verified": res.get("cleanup_verified"),
+                        "denial_count": len(res.get("denials_observed") or []),
                         "status": res["status"],
                         "exit_code": res["exit_code"],
                         "error_class": res.get("error_class"),

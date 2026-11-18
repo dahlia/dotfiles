@@ -70,6 +70,10 @@ Carry these requirements into selection **and execution**:
 
 Print the selection rationale: fit, vendor tier, limiting bucket/reset,
 vision/speed when requested, and release age when decisive.
+For code review, the rationale also shows available local CLI completion and
+timeout history (last 30 days, up to 40 samples per route). This adjusts
+ranking, not eligibility or vendor tier. Resumed turns, quota errors and
+permission blocks are not new initial-review samples.
 For flag semantics or multi-step plans, read
 [selection-plans.md](references/selection-plans.md). Independent planned steps
 are not fallback chains; save constraints with `--run-id` and execute each
@@ -150,6 +154,8 @@ For multi-turn work, initial `--keep-session`, then a new task/prompt with
 `--resume-task <initial-task-id>`. **Resume does not restore external read
 grants or tool/isolation/guard policies**; read
 [sessions.md](references/sessions.md) and repeat required options.
+If a timeout receipt says `resumable: true` and protected inputs are
+unchanged, continue from that task ID rather than an earlier round.
 
 Use background completion notifications or synchronous execution with
 `--timeout`. Never poll status/files through sleep loops or repeated LLM turns.

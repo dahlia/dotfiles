@@ -54,6 +54,7 @@ from common import (
 from models import collect_all_models, get_survey, lookup_model_release_date, resolve_official_model_id, route_unavailability_reason
 from probe import get_agent_recipe
 from quota import collect_quota
+from review_history import load_review_history, review_history_adjustment
 
 TASK_QUALITY_FLOORS: dict[str, float] = {
     "code_review": 0.72,
@@ -1316,6 +1317,7 @@ def select_routes(
     quota_cache_only: bool = False,
     prefer_canonical_key: str | None = None,
     allowed_billing_modes: set[str] | None = None,
+    review_history: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run the 5-step route selection algorithm and return top route + fallback chain."""
     task_norm = task.strip().lower().replace("-", "_")
@@ -1324,6 +1326,8 @@ def select_routes(
     if speed_norm not in SPEED_WEIGHTS:
         speed_norm = "normal"
     speed_weight = SPEED_WEIGHTS[speed_norm]
+    if review_history is None:
+        review_history = load_review_history(get_cache_dir() / "runs") if task_norm == "code_review" else {}
 
     pins = load_session_pins(run_id=run_id) if use_saved_pins else {}
     eff_pin_agent = canonical_agent_name(pin_agent) if pin_agent else pins.get("pin_agent")
@@ -1416,6 +1420,8 @@ def select_routes(
             credit_pressure = q_eval["credit_expiry_pressure"]
             cost_idx = traits["cost_index"]
             speed_score = traits["speed_score"]
+            observed_review = review_history.get(r_id) if task_norm == "code_review" else None
+            history_adjustment = review_history_adjustment(observed_review, speed_norm) if observed_review else 0.0
 
             headroom = q_eval.get("effective_headroom")
             headroom_sort = float(headroom) if headroom is not None else 0.75
@@ -1430,6 +1436,7 @@ def select_routes(
                 + speed_weight * speed_score
                 + WEIGHT_RECENCY * traits["recency_score"]
                 + headroom_bonus
+                + history_adjustment
             )
             score = round(score, 4)
 
@@ -1460,10 +1467,18 @@ def select_routes(
             )
             tier_rank = tier_ranks.get(route["canonical_key"])
             tier_str = f", vendor tier {tier_rank}" if tier_rank else ""
+            history_str = ""
+            if observed_review:
+                seconds = observed_review["median_completion_seconds"]
+                completion = f", median {seconds:g}s completed" if seconds is not None else ""
+                history_str = (
+                    f", local reviews: {observed_review['timeouts']}/{observed_review['samples']} timeouts"
+                    f"{completion}, adjustment {history_adjustment:+.3f}"
+                )
             rationale = (
                 f"{r_id} [{off_agent} / {off_model}] selected — {task_norm} fit {traits['task_fit']:.2f} "
                 f"({traits['trait_source']}){vision_str}{speed_str}{tier_str}{age_str}, "
-                f"{q_eval['bucket_id']} {used_str}{reset_str}, score {score:.3f}"
+                f"{q_eval['bucket_id']} {used_str}{reset_str}{history_str}, score {score:.3f}"
             )
 
             candidates.append(
@@ -1489,6 +1504,8 @@ def select_routes(
                     "latency_tier": traits["latency_tier"],
                     "tokens_per_sec": traits["tokens_per_sec"],
                     "speed_score": speed_score,
+                    "review_history": observed_review,
+                    "review_history_adjustment": history_adjustment,
                     "release_date": traits["release_date"],
                     "model_age_days": traits["model_age_days"],
                     "recency_score": traits["recency_score"],
@@ -1750,6 +1767,11 @@ def select_step_plan(
     used_canonicals: set[str] = set()
     used_vendors: set[str] = set()
     used_buckets: set[str] = set()
+    review_history = (
+        load_review_history(get_cache_dir() / "runs")
+        if any(str(({**base, **spec}).get("task")).strip().lower().replace("-", "_") == "code_review" for spec in specs)
+        else {}
+    )
     steps: list[dict[str, Any]] = []
     unfilled: list[dict[str, Any]] = []
 
@@ -1810,6 +1832,7 @@ def select_step_plan(
             all_models=all_models,
             quota_state=quota_state,
             sandbox_mode=merged.get("sandbox"),
+            review_history=review_history,
         )
 
         if res["status"] != "ok" or not res.get("selected"):

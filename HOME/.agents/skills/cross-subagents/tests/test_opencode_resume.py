@@ -12,6 +12,45 @@ import run
 
 
 class TestOpenCodeResume(unittest.TestCase):
+    def test_timeout_continuation_reuses_retained_session_only_after_cleanup(self):
+        route = common.normalize_model_route('opencode', 'opencode', 'glm-5.3-flash-free')
+        for cleanup, support, session, keep, expected in [
+            (True, True, 'retained', True, True),
+            (False, True, 'retained', True, False),
+            (True, False, 'retained', True, False),
+            (True, True, None, True, False),
+            (True, True, 'retained', False, False),
+        ]:
+            with self.subTest(cleanup=cleanup, support=support, session=session, keep=keep), \
+                    tempfile.TemporaryDirectory() as td, patch.dict(
+                        os.environ, {'CROSS_SUBAGENTS_CACHE_DIR': str(Path(td) / 'cache')}
+                    ), patch.object(run, 'resolve_explicit_route', return_value=route), patch.object(
+                        run, 'probe_all', return_value={'agents': {'opencode': {
+                            'usable': True, 'binary': 'true', 'version': '2.0.0', 'recipe_flags': {},
+                        }}}
+                    ), patch.object(run, 'invoke_opencode', return_value={
+                        'status': 'timeout', 'exit_code': 124, 'error_class': 'timeout',
+                        'session_id': session, 'cleanup_verified': cleanup,
+                        'session_cleaned_up': False, 'timeout_resume_supported': support,
+                    }) as invoke:
+                options = dict(run_id='timeout-resume', cwd=td, sandbox_mode='read-only',
+                               allow_shell=True, isolate=True, force_route=True, no_fallback=True,
+                               task_category='code_review')
+                result = run.execute_task(task_id='r1-a1', route_str=route['route_id'],
+                                          keep_session=keep, prompt_text='review', **options)
+                self.assertEqual(result['status'], 'timeout')
+                self.assertIsNone(result['result_file'])
+                self.assertEqual(result['resumable'], expected)
+                followup = run.execute_task(task_id='r1-a2', resume_task_id='r1-a1',
+                                            prompt_text='continue review', **options)
+                self.assertEqual(invoke.call_count, 2 if expected else 1)
+                if expected:
+                    self.assertIn('retained', invoke.call_args.args)
+                    self.assertIn('continue review', invoke.call_args.args[2])
+                    self.assertTrue(followup['resumed'])
+                else:
+                    self.assertEqual(followup['status'], 'failed')
+
     def test_resume_roots_reach_the_read_only_agent(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(
             os.environ, {'CROSS_SUBAGENTS_CACHE_DIR': str(Path(td) / 'cache')}

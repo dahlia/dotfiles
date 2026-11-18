@@ -29,6 +29,14 @@ are supplied.
 `--resume-task` forces session retention internally, even when `--keep-session`
 is omitted on the follow-up; omission does not make a resumed turn ephemeral.
 
+After a timeout, `resumable: true` means a session ID was retained, subprocess
+cleanup was verified, and there was no known model mismatch or unsupported
+resume path. It does not mean the task finished. If protected inputs are
+unchanged (including any external guard), resume the **timed-out task ID**
+with a new task ID and a short continuation prompt. Keep the same route and
+permissions. If the CLI cannot load that session, report the failed resume
+and choose a fresh route only under the original constraints.
+
 Resume stored conversation state when supported. Retention, compaction and
 accounting depend on CLI/model. Summarize and start fresh when changing model
 families or when prior history is no longer useful.
