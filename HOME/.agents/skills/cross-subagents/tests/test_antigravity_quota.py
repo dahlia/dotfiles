@@ -46,7 +46,8 @@ class AntigravityQuotaTests(unittest.TestCase):
             with self.subTest(agent=agent, model=model):
                 route = common.normalize_model_route(agent, provider, model)
                 route["applicable_buckets"] = [route["quota_bucket"]]  # legacy catalog
-                self.assertEqual(select_route.evaluate_route_quota(route, state["buckets"], False)["exhausted"], expected)
+                with patch.object(select_route.time, "time", return_value=1794497812):
+                    self.assertEqual(select_route.evaluate_route_quota(route, state["buckets"], False)["exhausted"], expected)
         self.assertEqual(state["buckets"]["antigravity:group:gemini"]["used_percent"], 6.7)
         self.assertNotIn("third-party-5h", state["buckets"]["antigravity:group:third-party"]["windows"])
 
@@ -57,7 +58,7 @@ class AntigravityQuotaTests(unittest.TestCase):
             ("antigravity", antigravity), ("opencode", opencode),
         ]}
         state = self.parse()
-        with patch.object(select_route, "get_survey", return_value=None), patch.object(select_route, "route_unavailability_reason", return_value=None):
+        with patch.object(select_route, "get_survey", return_value=None), patch.object(select_route, "route_unavailability_reason", return_value=None), patch.object(select_route.time, "time", return_value=1794497812):
             selection = select_route.select_routes(
                 task="general", pin_model="gemini-4-argon", all_models=catalog,
                 quota_state={"agents": {"antigravity": state}, "buckets": state["buckets"]},

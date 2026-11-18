@@ -17,6 +17,7 @@ class HandoverTests(unittest.TestCase):
     def test_automatic_quota_fallback_survives_final_metadata_and_significance_filter(self):
         primary = common.normalize_model_route("opencode", "opencode-go", "gemini-4-argon")
         replacement = common.normalize_model_route("opencode", "google", "gemini-4-argon")
+        replacement["auth_plan"] = "subscription"
         replacement_prompts = []
         def invoke(*args, **kwargs):
             route, attempt_dir = args[1], args[3]
@@ -164,13 +165,16 @@ class HandoverTests(unittest.TestCase):
             run, "check_route_eligibility", return_value=(
                 False, "quota_exhausted:antigravity:default", {"exhausted": True}, {}
             )
-        ), patch.object(run, "invoke_antigravity") as invoke:
+        ), patch.object(run, "select_routes", return_value={"status": "no_route_available"}), patch.object(
+            run, "invoke_antigravity"
+        ) as invoke:
             result = run.execute_task(run_id="preflight", task_id="review",
                 route_str=primary["route_id"], prompt_text="review", cwd=td)
             self.assertEqual(result["status"], "quota")
             self.assertEqual(result["error_class"], "quota")
             self.assertIn("hand-over", result["error"])
             self.assertNotIn("--force-route", result["error"])
+            self.assertEqual(result["quota_recovery"]["status"], "needs_coordinator")
             invoke.assert_not_called()
             self.assertEqual(len(run.build_run_report("preflight")["quota_failures"]), 1)
 

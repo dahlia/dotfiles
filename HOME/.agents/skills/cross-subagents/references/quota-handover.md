@@ -9,8 +9,11 @@ remaining assignment.
 Choose a replacement
 --------------------
 
-Refresh quota with `quota.py status --refresh --human` after an exhaustion
-error. `run.py` records observed failures; native callers must record the same
+Reselect under the original quota-read ownership. The quota owner may use
+`prepare.py --refresh-quota` with the original scope; workers with
+`--quota-state` or `--quota-cache-only` must not replace it with live reads.
+`run.py` records observed failures and uses the provider's reset deadline
+when available; native callers must record the same
 evidence with
 `quota.py record-observation --bucket <bucket> --error <error>` using the
 affected route's bucket. Distinguish
@@ -36,7 +39,10 @@ as a reason to drop its whole step.
 
 When another route satisfies those requirements and the user's instructions
 allow substitution, hand over without waiting for approval. `run.py` may run a
-compatible fallback automatically. If its constrained chain cannot continue,
+compatible fallback automatically. An explicit route without a tier bound
+keeps the canonical model for automatic recovery; use an authorized tier
+bound when the request permits similarly capable replacements. Keep genuine
+user model pins even with a tier bound. If the constrained chain cannot continue,
 the coordinator must reselect and launch a new task. An implementation pin
 introduced by `--route` is not necessarily a user's exact-model requirement;
 consult the original request before retaining or relaxing it.
@@ -110,7 +116,8 @@ python3 <skill-dir>/scripts/run.py record-handover --run-id <run-id> \
 
 Use `--decision user` for an explicit choice and `--decision timeout` for the
 30-minute default. Include changed requirements and the basis for the choice
-in `--reason`. `run.py` records its own automatic fallback links. Do not record
+in `--reason`. `run.py` records its own automatic fallback links, including
+eligible replacements for routes blocked at preflight. Do not record
 a proposed replacement as an executed hand-over. Inspect metadata and results
 for the replacement just as for the original task; another exhaustion starts
 the same recovery procedure with accumulated failed routes excluded.

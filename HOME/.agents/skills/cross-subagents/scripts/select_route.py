@@ -40,6 +40,7 @@ from common import (
     get_cache_dir,
     infer_applicable_quota_buckets,
     route_quota_buckets,
+    route_quota_owner,
     infer_model_vendor as infer_vendor_from_common,
     infer_model_family,
     is_bare_generation_prefix,
@@ -1032,7 +1033,7 @@ def evaluate_route_quota(
     max_credit_pressure = 0.0
     min_headroom: float | None = None
     limiting_bucket_id = route["quota_bucket"]
-    limiting_bucket: dict[str, Any] = buckets.get(limiting_bucket_id) or {}
+    limiting_bucket: dict[str, Any] = {}
 
     for b_id in app_buckets:
         b = buckets.get(b_id) or {}
@@ -1040,14 +1041,16 @@ def evaluate_route_quota(
             continue
         is_obs_limited = b.get("status") == "observed_limited"
         b_stale = False if is_obs_limited else agent_stale
-        # A refresh failure does not replenish a confirmed Antigravity limit
-        # whose provider reset is still in the future.
         reset = b.get("resets_at_epoch")
-        if (route["agent"] == "antigravity" and b.get("exhausted")
-                and isinstance(reset, (int, float)) and reset > time.time()):
-            b_stale = False
+        if not is_obs_limited and isinstance(reset, (int, float)):
+            if reset <= time.time():
+                continue  # The old window no longer describes current usage.
+            if b.get("exhausted"):
+                b_stale = False  # Staleness does not replenish a confirmed limit.
+        if b_stale:
+            continue
 
-        if b.get("exhausted") and not b_stale:
+        if b.get("exhausted"):
             exhausted_buckets.append(b_id)
 
         sc = float(b.get("scarcity", 0.25))
@@ -1065,6 +1068,7 @@ def evaluate_route_quota(
 
     if not limiting_bucket:
         max_scarcity = 0.25
+        limiting_bucket = {}
 
     return {
         "bucket_id": limiting_bucket_id,
@@ -1124,7 +1128,7 @@ def check_route_eligibility(
     """Shared hard-eligibility evaluator for both automatic selection and explicit `--route` requests."""
     agent = route["agent"]
     buckets = quota_state.get("buckets") or {}
-    agent_q = (quota_state.get("agents") or {}).get(agent) or {}
+    agent_q = (quota_state.get("agents") or {}).get(route_quota_owner(route)) or {}
     agent_stale = bool(agent_q.get("stale", False))
 
     q_eval = evaluate_route_quota(route, buckets, agent_stale)
@@ -1255,11 +1259,9 @@ def quota_agents_for_routes(
     denied = {canonical_agent_name(a) for a in (exclude_quota_agents or [])}
     relevant: set[str] = set()
     for agent, data in all_models.items():
-        if not data.get("usable") or agent in excluded or agent in denied:
+        if not data.get("usable") or agent in excluded:
             continue
         if pin_agent and agent != pin_agent:
-            continue
-        if allowed is not None and agent not in allowed:
             continue
         for route in data.get("routes") or []:
             if pin_provider and route["provider"].lower() != pin_provider:
@@ -1276,8 +1278,9 @@ def quota_agents_for_routes(
                 continue
             if route.get("hidden") and not pin_model:
                 continue
-            relevant.add(agent)
-            break
+            owner = route_quota_owner(route)
+            if owner not in denied and (allowed is None or owner in allowed):
+                relevant.add(owner)
     return sorted(relevant)
 
 
@@ -1311,6 +1314,8 @@ def select_routes(
     quota_agents: list[str] | None = None,
     exclude_quota_agents: list[str] | None = None,
     quota_cache_only: bool = False,
+    prefer_canonical_key: str | None = None,
+    allowed_billing_modes: set[str] | None = None,
 ) -> dict[str, Any]:
     """Run the 5-step route selection algorithm and return top route + fallback chain."""
     task_norm = task.strip().lower().replace("-", "_")
@@ -1527,8 +1532,12 @@ def select_routes(
             kept.append(candidate)
         candidates = kept
 
+    if allowed_billing_modes is not None:
+        candidates = [c for c in candidates if c["billing_mode"] in allowed_billing_modes]
+
     candidates.sort(
         key=lambda c: (
+            bool(prefer_canonical_key and c["canonical_key"] == prefer_canonical_key),
             round(c["score"], 2),
             c["_headroom_sort"],
             -c["latency_tier"],
@@ -1553,6 +1562,10 @@ def select_routes(
             "selected": None,
             "fallbacks": [],
             "filtered_count": len(filtered_out),
+            "quota_blocked_count": sum(
+                r["reason"].startswith(("quota_exhausted:", "insufficient_absolute_quota:"))
+                for r in filtered_out
+            ),
             "filtered_sample": filtered_out[:15],
         }
 

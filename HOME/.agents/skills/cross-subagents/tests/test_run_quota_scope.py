@@ -44,7 +44,7 @@ class RunQuotaScopeTests(unittest.TestCase):
             run, 'check_route_eligibility', return_value=(False, 'quota_exhausted:test', {'exhausted': True}, {})
         ) as eligibility:
             run.execute_task(run_id='supplied', task_id='review', route_str=route['route_id'],
-                             prompt_text='review', cwd=td, quota_state=snapshot)
+                             prompt_text='review', cwd=td, quota_state=snapshot, no_fallback=True)
             collect.assert_not_called()
             self.assertIs(eligibility.call_args.kwargs['quota_state'], snapshot)
 
@@ -63,7 +63,8 @@ class RunQuotaScopeTests(unittest.TestCase):
             run, 'check_route_eligibility', return_value=(False, 'quota_exhausted:test', {'exhausted': True}, {})
         ):
             run.execute_task(run_id='plan', task_id='review', route_str=route['route_id'],
-                             prompt_text='review', cwd=td, quota_agents=['opencode', 'claude-code'])
+                             prompt_text='review', cwd=td, quota_agents=['opencode', 'claude-code'],
+                             no_fallback=True)
             collect.assert_called_once_with(agents=[], refresh=False, cache_only=True)
 
     def test_cli_passes_quota_controls_to_execution_and_cost_gate(self):

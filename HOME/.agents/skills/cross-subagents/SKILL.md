@@ -43,7 +43,10 @@ Probe/model TTL is 24 hours; quota TTL is 15 minutes. Selection collects
 candidate quota itself; no separate unscoped `quota.py status` is needed.
 `--refresh` refreshes discovery only; `--refresh-quota` refreshes quota and is
 incompatible with `--quota-cache-only`/`--quota-state`. Never replace
-coordinator-owned quota with a live read. For individual diagnostics the
+coordinator-owned quota with a live read. A confirmed exhausted bucket stays
+blocked until its known reset even if the reading becomes stale. Claude Code
+and OpenCode's `claude-agent` bridge share Claude subscription buckets; a
+Fable-only limit does not block other Claude models. For individual diagnostics the
 original probe.py, models.py, defects.py and select_route.py remain available.
 Probe resolves mise shims and multiple PATH installations. OpenCode host and
 target require v2+: surface v1 warnings, use another agent or request upgrade.
@@ -112,8 +115,12 @@ Add `--route <agent>/<provider>/<model>` for an explicit selection.
 Fallback must preserve persisted plan constraints; without a plan it retains
 the canonical model within the vendor unless bounded substitution is explicit.
 Use `--no-fallback` for exact-route-only gates. Do not silently downgrade,
-change vendors or broaden permissions. A failed attempt does not cancel work:
-quota blocks follow [quota-handover.md](references/quota-handover.md).
+change vendors, introduce metered billing or broaden permissions. On quota
+failure `run.py` excludes the affected pool and reselects within the original
+constraints. If a receipt has `quota_recovery.status: needs_coordinator`,
+follow [quota-handover.md](references/quota-handover.md) in the same turn.
+If no compatible route exists, ask the user about the closest available
+replacement or waiting for reset; do not just summarize the failure.
 
 Choose the least authority appropriate to the task:
 `--sandbox read-only` for reviews, default `workspace-write` for scoped edits;

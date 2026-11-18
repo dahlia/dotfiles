@@ -37,6 +37,7 @@ from common import (
     normalize_official_model_id,
     parse_iso_age_seconds,
     read_json_file,
+    route_quota_buckets,
     validate_safe_identifier,
 )
 from probe import probe_all, run_cmd, strip_ansi
@@ -80,7 +81,7 @@ FALLBACK_TZ_OFFSETS: dict[str, timezone] = {
 
 CLAUDE_USAGE_LINE_RE = re.compile(
     r"^Current\s+(?P<scope>session|week(?:\s*\((?P<group>[^)]+)\))?):\s*"
-    r"(?P<used>\d+(?:\.\d+)?)%\s*used\s*[·•-]\s*resets\s+(?P<reset_full>.+?)\s*$",
+    r"(?P<used>\d+(?:\.\d+)?)%\s*used(?:\s*[·•—–-]\s*resets\s+(?P<reset_full>.+?))?\s*$",
     re.IGNORECASE,
 )
 
@@ -429,13 +430,13 @@ def resolve_timezone(tz_name: str | None) -> Any:
         return FALLBACK_TZ_OFFSETS.get(cleaned.upper())
 
 
-def parse_claude_reset_time(reset_text: str, tz_name: str | None) -> int | None:
+def parse_claude_reset_time(reset_text: str, tz_name: str | None, *, now_epoch: int | None = None) -> int | None:
     """Parse human reset strings like 'Oct 31, 10pm' or 'Oct 28, 11:50pm' in the given timezone."""
     tz = resolve_timezone(tz_name)
     if tz is None:
         return None
 
-    now = datetime.now(tz)
+    now = datetime.now(tz) if now_epoch is None else datetime.fromtimestamp(now_epoch, tz)
     cleaned = reset_text.strip()
     cleaned_norm = re.sub(
         r"(\b\d{1,2})(?::(\d{2}))?\s*(am|pm)\b",
@@ -497,7 +498,7 @@ def query_claude_quota(binary: str, plan_type: str | None = None) -> dict[str, A
         group = (m.group("group") or "").strip().lower()
         used_raw_str = m.group("used")
         used_val = float(used_raw_str)
-        reset_full = m.group("reset_full").strip()
+        reset_full = (m.group("reset_full") or "").strip()
         tz_match = re.search(r"\(([^)]+)\)\s*$", reset_full)
         if tz_match:
             tz_name = tz_match.group(1).strip()
@@ -514,6 +515,8 @@ def query_claude_quota(binary: str, plan_type: str | None = None) -> dict[str, A
             win_mins = 10080  # 7-day weekly window
         else:
             slug = re.sub(r"[^a-z0-9]+", "-", group).strip("-")
+            if re.fullmatch(r"(?:claude-)?fable(?:-\d+(?:-\d+)*)?(?:-(?:only|models?))?", slug):
+                slug = "fable"
             bucket_id = f"claude-code:{slug}"
             win_mins = 10080
 
@@ -525,6 +528,8 @@ def query_claude_quota(binary: str, plan_type: str | None = None) -> dict[str, A
             capacity_factor=cap_factor,
             reached_limit=None,
         )
+        if buckets.get(bucket_id, {}).get("used_percent", -1) > used_val:
+            continue
         buckets[bucket_id] = {
             "bucket_id": bucket_id,
             "agent": "claude-code",
@@ -539,15 +544,7 @@ def query_claude_quota(binary: str, plan_type: str | None = None) -> dict[str, A
         }
 
     if not buckets:
-        unknown_metrics = compute_window_metrics(None, 10080, None, cap_factor)
-        buckets["claude-code:all-models"] = {
-            "bucket_id": "claude-code:all-models",
-            "agent": "claude-code",
-            "used_percent": None,
-            "parse_warning": "Could not parse usage lines from `/usage` output; treating as unknown.",
-            "raw_excerpt": result_text[:400],
-            **unknown_metrics,
-        }
+        raise RuntimeError("Could not parse Claude `/usage`; retaining previous readings as stale.")
 
     return {
         "agent": "claude-code",
@@ -653,6 +650,14 @@ def quota_observation_bucket(route: dict[str, Any], error_text: str) -> str:
             key = normalize_official_model_id(route["model_id"])[0]
             return f"antigravity:model:{key}"
         return "antigravity:default"
+    if "claude-code:session" in route_quota_buckets(route):
+        if re.search(r'\b(?:five_hour|session (?:usage )?limit|5[- ]hour (?:usage )?limit)\b', error_text, re.I):
+            return "claude-code:session"
+        if re.search(r'\b(?:seven_day|all[- ]models(?: quota| limit)?)\b', error_text, re.I):
+            return "claude-code:all-models"
+        if "claude-code:fable" in route_quota_buckets(route):
+            return "claude-code:fable"
+        return "claude-code:all-models"
     return route["quota_bucket"]
 
 
@@ -660,6 +665,8 @@ def _structured_retry_after_seconds(error_text: str) -> int | None:
     """Read provider retry delays from the JSON error records retained by adapters."""
     delays: list[int] = []
     for line in error_text.splitlines():
+        if line.strip().startswith("AGY_ERROR:"):
+            line = line.strip().removeprefix("AGY_ERROR:")
         try:
             record = json.loads(line)
         except (ValueError, TypeError):
@@ -677,30 +684,40 @@ def _structured_retry_after_seconds(error_text: str) -> int | None:
     return max(delays) if delays else None
 
 
+def _provider_reset_epoch(bucket_id: str, error_text: str, observed_epoch: int) -> int | None:
+    delay = _structured_retry_after_seconds(error_text)
+    if delay is not None:
+        return observed_epoch + delay
+    # agy reports compact durations, e.g. "Resets in 37h56m4s".
+    match = re.search(r"\b(?:resets?\s+in|retry[- ]after)\s*:?\s*((?:\d+\s*[dhms]\s*)+)(?!\w)", error_text, re.I)
+    if match:
+        units = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+        seconds = sum(int(n) * units[u.lower()] for n, u in re.findall(r"(\d+)\s*([dhms])", match[1], re.I))
+        return observed_epoch + max(1, seconds)
+    if bucket_id.startswith("claude-code:"):
+        absolute = re.search(r"\bresets\s+at\s+(\d{4}-\d\d-\d\dT[\d:.]+(?:Z|[+-]\d\d:\d\d))", error_text, re.I)
+        if absolute:
+            try:
+                return int(datetime.fromisoformat(absolute[1].replace("Z", "+00:00")).timestamp())
+            except ValueError:
+                pass
+        match = re.search(r"\bresets\s+([^()\n]+?)\s*\(([^()\n]+)\)", error_text, re.I)
+        if match:
+            return parse_claude_reset_time(*match.groups(), now_epoch=observed_epoch)
+    match = re.search(r"\b(?:resets?\s+in|retry[- ]after)\s*:?\s*(\d+)\s*minutes?\b", error_text, re.I)
+    return observed_epoch + max(1, int(match[1]) * 60) if match else None
+
+
 def record_quota_observation(bucket_id: str, error_text: str, reset_seconds: int | None = None) -> dict[str, Any]:
     """Record an observed rate-limit / 429 event under an exclusive file lock."""
     obs_file = get_observations_file()
     now_ts = int(time.time())
 
-    provider_resets_at: int | None = None
-    if reset_seconds is None:
-        reset_seconds = _structured_retry_after_seconds(error_text)
-    if reset_seconds is not None:
-        backoff_seconds = max(1, int(reset_seconds))
-        provider_resets_at = now_ts + backoff_seconds
-    else:
-        m_sec = re.search(r"retry\s+after\s+(\d+)\s*s", error_text, re.IGNORECASE)
-        m_min = re.search(r"(\d+)\s*minutes?", error_text, re.IGNORECASE)
-        if m_sec:
-            backoff_seconds = int(m_sec.group(1))
-            provider_resets_at = now_ts + backoff_seconds
-        elif m_min:
-            backoff_seconds = int(m_min.group(1)) * 60
-            provider_resets_at = now_ts + backoff_seconds
-        else:
-            backoff_seconds = 900  # Default 15-minute synthetic cooldown
-
-    backoff_until = now_ts + backoff_seconds
+    provider_resets_at = (
+        now_ts + max(1, int(reset_seconds)) if reset_seconds is not None
+        else _provider_reset_epoch(bucket_id, error_text, now_ts)
+    )
+    backoff_until = provider_resets_at if provider_resets_at and provider_resets_at > now_ts else now_ts + 900
     entry = {
         "bucket_id": bucket_id,
         "observed_at": now_iso(),
@@ -708,6 +725,7 @@ def record_quota_observation(bucket_id: str, error_text: str, reset_seconds: int
         "backoff_until_epoch": backoff_until,
         "provider_resets_at_epoch": provider_resets_at,
         "resets_at_epoch": provider_resets_at,
+        "reset_parse_version": 1,
         "error_excerpt": error_text[:300],
     }
 
@@ -793,6 +811,13 @@ def overlay_observations(payload: dict[str, Any]) -> dict[str, Any]:
             r"\bindividual\s+(?:model\s+)?quota\b", str(obs.get("error_excerpt") or ""), re.IGNORECASE
         ):
             continue
+        # Upgrade the old 15-minute Antigravity observations in memory, without
+        # restarting their countdown or modifying the cache on a read.
+        if (b_id.startswith("antigravity:") and "reset_parse_version" not in obs
+                and not obs.get("provider_resets_at_epoch") and isinstance(obs.get("observed_epoch"), int)):
+            reset = _provider_reset_epoch(b_id, str(obs.get("error_excerpt") or ""), obs["observed_epoch"])
+            if reset is not None:
+                obs = {**obs, "backoff_until_epoch": reset, "provider_resets_at_epoch": reset}
         backoff_until = obs.get("backoff_until_epoch") or obs.get("resets_at_epoch")
         if not isinstance(backoff_until, int) or backoff_until <= now_ts:
             continue
@@ -957,6 +982,16 @@ def collect_quota(
             else:
                 q_res = build_observed_quota(agent, a_info)
             fp = compute_agent_config_fingerprint(agent, binary, ver)
+            prev = existing_agents.get(agent) or {}
+            if agent in ("claude-code", "antigravity") and prev.get("config_fingerprint") == fp:
+                # A valid partial report is not evidence that an omitted,
+                # previously exhausted window has reset.
+                for bucket_id, bucket in (prev.get("buckets") or {}).items():
+                    reset = bucket.get("resets_at_epoch")
+                    if (bucket.get("exhausted") and isinstance(reset, (int, float))
+                            and reset > time.time()
+                            and (q_res["buckets"].get(bucket_id) or {}).get("used_percent") is None):
+                        q_res["buckets"][bucket_id] = bucket
             q_res["binary"] = binary
             q_res["agent_version"] = ver
             q_res["config_fingerprint"] = fp

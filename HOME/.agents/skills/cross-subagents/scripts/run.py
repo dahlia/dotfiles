@@ -53,6 +53,7 @@ from common import (
     get_cache_dir,
     infer_applicable_quota_buckets,
     route_quota_buckets,
+    route_quota_owner,
     is_bare_generation_prefix,
     locked_update_json,
     make_bounded_instance_id,
@@ -437,6 +438,8 @@ def classify_failure(exit_code: int, stdout_text: str, stderr_text: str, timed_o
     if exit_code == 127:
         return "not_installed"
     combined = f"{stdout_text}\n{stderr_text}".lower()
+    if re.search(r"\bhit your [\w-]+ limit\b|\bindividual (?:model )?quota (?:reached|exhausted)\b", combined):
+        return "quota"
     rate_limited = any(
         k in combined
         for k in (
@@ -1224,6 +1227,7 @@ def invoke_claude_code(
     usage: dict[str, int | None] = {"input_tokens": None, "output_tokens": None}
     result_text = ""
     is_error = False
+    terminal_errors = ""
     subtype: str | None = None
     denials_observed: list[Any] = []
     observed_models: list[str] = []
@@ -1264,6 +1268,8 @@ def invoke_claude_code(
         is_error = bool(payload.get("is_error", False))
         subtype = payload.get("subtype")
         result_text = (payload.get("result") or "").strip()
+        if isinstance(payload.get("errors"), list):
+            terminal_errors = "\n".join(str(e) if isinstance(e, str) else json.dumps(e) for e in payload["errors"])
         m_usage = payload.get("modelUsage")
         if isinstance(m_usage, dict):
             observed_models = [str(k) for k in m_usage.keys()]
@@ -1379,8 +1385,9 @@ def invoke_claude_code(
             (attempt_dir / "partial_result.md").write_text(result_text + "\n", encoding="utf-8")
         # Only the CLI's own error message (result when is_error) is
         # classification evidence, never the full payload with its transcript.
-        err_class = classify_failure(code, result_text if is_error else "", err, timed_out=False)
-        if code == 0 and not is_error and (subtype_failed or not result_text):
+        provider_error = "\n".join(filter(None, [result_text if is_error else "", terminal_errors, err]))
+        err_class = classify_failure(code, "", provider_error, timed_out=False)
+        if code == 0 and err_class == "failed" and not is_error and (subtype_failed or not result_text):
             err_class = "format"
         return {
             "status": "quota" if err_class == "quota" else "failed",
@@ -1388,6 +1395,7 @@ def invoke_claude_code(
             "session_id": session_id,
             "usage": usage,
             "warnings": warnings,
+            "quota_evidence": provider_error if err_class == "quota" else None,
             "requested_model": requested_model,
             "resolved_model": resolved_model,
             "observed_model": observed_primary,
@@ -1398,7 +1406,7 @@ def invoke_claude_code(
             "session_cleaned_up": no_persist,
             "cleanup_verified": cleanup_verified,
             "error_class": err_class,
-            "error": (result_text if is_error else err.strip())[:500]
+            "error": provider_error.strip()[:500]
             or _denial_error(denials_observed)
             or (
                 "Claude output was not valid JSON."
@@ -2560,7 +2568,7 @@ def invoke_antigravity(
             err_class = "permission"
         elif code == 0 and result_status == "SUCCESS" and not response_text:
             err_class = "format"
-        elif code == 0 and result_status is None and not model_changed:
+        elif code == 0 and result_status is None and err_class == "failed":
             # No terminal `result` event: a protocol/shape change, not a
             # provider failure. Classify as format so self-repair and fallback
             # can run instead of reporting an opaque "failed".
@@ -2583,6 +2591,7 @@ def invoke_antigravity(
             "cleanup_note": cleanup_note,
             "denials_observed": denials_observed,
             "error_class": err_class,
+            "quota_evidence": err_combined if err_class == "quota" else None,
             "error": err_combined[:500]
             or _denial_error(denials_observed)
             or (
@@ -3012,6 +3021,11 @@ def _write_early_failure_contract(
         "result_file": None,
         "lease_mode": None,
     }
+    if err_class == "quota":
+        meta_payload["quota_recovery"] = {
+            "status": "needs_coordinator",
+            "guidance": "Follow references/quota-handover.md; ask before relaxing constraints.",
+        }
     atomic_write_json(task_dir / "meta.json", meta_payload)
     append_manifest_event(
         run_dir,
@@ -3326,7 +3340,10 @@ def execute_task(
 
             task_norm = task_category.strip().lower().replace("-", "_")
             route_chain: list[dict[str, Any]] = []
+            recovery_policy: dict[str, Any] | None = None
             selection_rationale = ""
+            preflight_block: str | None = None
+            preflight_buckets: list[str] = []
 
             if route_str and route_str.lower() != "auto":
                 explicit_route = resolve_explicit_route(route_str, force_route=force_route)
@@ -3356,9 +3373,10 @@ def execute_task(
                     req_mods_set = set(eff_req_mods)
                     explicit_quota_state = quota_state
                     if explicit_quota_state is None:
-                        allowed = {canonical_agent_name(a) for a in quota_agents} if quota_agents is not None else {explicit_route["agent"]}
+                        owner = route_quota_owner(explicit_route)
+                        allowed = {canonical_agent_name(a) for a in quota_agents} if quota_agents is not None else {owner}
                         denied = {canonical_agent_name(a) for a in (exclude_quota_agents or [])}
-                        targets = sorted(({explicit_route["agent"]} & allowed) - denied)
+                        targets = sorted(({owner} & allowed) - denied)
                         explicit_quota_state = collect_quota(agents=targets, refresh=False, cache_only=quota_cache_only)
 
                     ok, reason, q_eval, traits = check_route_eligibility(
@@ -3381,16 +3399,22 @@ def execute_task(
                         sandbox_mode=effective_sandbox,
                     )
                     if not ok:
-                        if q_eval.get("exhausted") or "quota" in reason:
-                            raise ValueError(
+                        if reason.startswith(("quota_exhausted:", "insufficient_absolute_quota:")):
+                            preflight_block = (
                                 f"quota_exhausted: Explicit route '{explicit_route['route_id']}' "
                                 f"is ineligible ({reason}). Refresh quota and select another eligible "
                                 "route under the original constraints, or follow the quota hand-over procedure."
                             )
-                        raise ValueError(
-                            f"Explicit route '{explicit_route['route_id']}' failed eligibility check ({reason}). "
-                            "Pass --force-route to bypass."
-                        )
+                            preflight_buckets = q_eval.get("exhausted_buckets") or []
+                            if no_fallback or resume_session_id:
+                                raise ValueError(preflight_block)
+                        else:
+                            raise ValueError(
+                                f"Explicit route '{explicit_route['route_id']}' failed eligibility check ({reason}). "
+                                "Pass --force-route to bypass."
+                            )
+                    if preflight_block and not traits:
+                        traits = evaluate_route_traits(explicit_route, task_norm)
                     explicit_route = {
                         **explicit_route,
                         "cost_index": traits["cost_index"],
@@ -3457,6 +3481,14 @@ def execute_task(
                             selection_rationale += (
                                 "; fallbacks retain the requested model constraint"
                             )
+                        if not force_route:
+                            for pin in ("pin_agent", "pin_provider", "pin_model"):
+                                if pins.get(pin) and not fb_policy.get(pin):
+                                    fb_policy[pin] = pins[pin]
+                        fb_policy["exclude_route_ids"] = list(dict.fromkeys([
+                            *(fb_policy.get("exclude_route_ids") or []), explicit_route["route_id"],
+                        ]))
+                        recovery_policy = fb_policy
                         sel = select_routes(
                             task=task_category,
                             run_id=eff_run_id,
@@ -3465,6 +3497,10 @@ def execute_task(
                             exclude_quota_agents=exclude_quota_agents,
                             quota_cache_only=quota_cache_only,
                             quota_state=quota_state,
+                            exclude_buckets=preflight_buckets,
+                            prefer_canonical_key=explicit_route["canonical_key"] if preflight_block else None,
+                            allowed_billing_modes={"subscription", "free", explicit_route["billing_mode"]}
+                            if preflight_block else None,
                             **fb_policy,
                         )
                         exp_buckets = set(
@@ -3474,15 +3510,25 @@ def execute_task(
                         for fb in [sel.get("selected")] + (sel.get("fallbacks") or []):
                             if not fb or fb["route_id"] == explicit_route["route_id"]:
                                 continue
+                            if preflight_block and (
+                                set(preflight_buckets).intersection(route_quota_buckets(fb))
+                                or (fb.get("billing_mode") or classify_route_billing(fb))
+                                not in {"subscription", "free", explicit_route["billing_mode"]}
+                            ):
+                                continue
                             fb_copy = dict(fb)
                             fb_buckets = set(
                                 fb_copy.get("applicable_buckets") or [fb_copy["quota_bucket"]]
                             )
                             fb_copy["same_bucket_as_primary"] = bool(fb_buckets & exp_buckets)
                             route_chain.append(fb_copy)
+                if preflight_block:
+                    route_chain = route_chain[1:]
+                    if not route_chain:
+                        raise ValueError(preflight_block)
+                    selection_rationale = f"{preflight_block} Using eligible replacement {route_chain[0]['route_id']}."
             else:
-                sel = select_routes(
-                    task=task_category,
+                recovery_policy = dict(
                     min_context=min_context,
                     require_modalities=eff_req_mods,
                     require_vision=require_vision,
@@ -3496,14 +3542,23 @@ def execute_task(
                     max_tier=max_tier,
                     max_cost_index=max_cost_index,
                     exclude_route_ids=exclude_route_ids,
+                )
+                sel = select_routes(
+                    task=task_category,
                     run_id=eff_run_id,
                     sandbox_mode=effective_sandbox,
                     quota_agents=quota_agents,
                     exclude_quota_agents=exclude_quota_agents,
                     quota_cache_only=quota_cache_only,
                     quota_state=quota_state,
+                    **recovery_policy,
                 )
                 if sel["status"] != "ok" or not sel.get("selected"):
+                    if sel.get("quota_blocked_count"):
+                        raise ValueError(
+                            f"quota_exhausted: No eligible route for '{task_category}'; "
+                            "inspect selection details and follow the quota hand-over procedure."
+                        )
                     raise RuntimeError(f"No eligible route found for task '{task_category}'.")
                 selection_rationale = sel["rationale"]
                 route_chain.append(sel["selected"])
@@ -3660,7 +3715,7 @@ def execute_task(
         try:
             probe_data = probe_all(refresh=False)
             attempts_history: list[dict[str, Any]] = []
-            exhausted_buckets: set[str] = set()
+            exhausted_buckets: set[str] = set(preflight_buckets)
 
             child_env = dict(os.environ)
             child_env["CROSS_SUBAGENTS_RUN_ID"] = eff_run_id
@@ -3685,10 +3740,35 @@ def execute_task(
 
             invocation_prompt = combined_prompt
             handover_contexts: list[str] = []
-            for route_idx, route in enumerate(route_chain):
+            remaining_routes = iter(route_chain)
+            recovery_selections = 0
+            attempted_routes: set[str] = set()
+            primary = explicit_route if preflight_block else route_chain[0]
+            primary_billing = primary.get("billing_mode") or classify_route_billing(primary)
+            recovery_billing = {"subscription", "free", primary_billing}
+            if preflight_block:
+                _write_early_failure_contract(
+                    run_dir, task_dir, eff_run_id, eff_task_id, explicit_route["route_id"], effective_sandbox,
+                    effective_cwd, ValueError(preflight_block), eff_parent, eff_parent_task, task_summary,
+                )
+            route_idx = -1
+            while True:
+                route = next(remaining_routes, None)
+                if route is None:
+                    break
+                route_idx += 1
                 route_buckets = set(route_quota_buckets(route))
-                if exhausted_buckets and (route_buckets & exhausted_buckets):
+                if route["route_id"] in attempted_routes or (route_buckets & exhausted_buckets):
                     continue
+                if ((preflight_block or any(a.get("error_class") == "quota" for a in attempts_history))
+                        and (route.get("billing_mode") or classify_route_billing(route)) not in recovery_billing):
+                    continue
+                attempted_routes.add(route["route_id"])
+                if preflight_block and not attempts_history:
+                    record_handover(
+                        eff_run_id, eff_task_id, eff_task_id, explicit_route["route_id"],
+                        route["route_id"], preflight_block, "automatic",
+                    )
 
                 if attempts_history and attempts_history[-1].get("error_class") == "quota":
                     previous = attempts_history[-1]
@@ -3982,13 +4062,14 @@ def execute_task(
                     if res.get("error_class") in ("quota", "auth"):
                         if res.get("error_class") == "quota":
                             error = res.get("error") or "Rate limit reached"
-                            bucket = quota_observation_bucket(route, error)
                             # The display error is truncated by adapters. Keep
                             # full provider records for retry deadline parsing.
                             observation_error = "\n".join([
                                 error,
+                                res.get("quota_evidence") or "",
                                 *(str(warning) for warning in (res.get("warnings") or [])),
                             ])
+                            bucket = quota_observation_bucket(route, observation_error)
                             record_quota_observation(bucket, observation_error)
                         else:
                             bucket = route["quota_bucket"]
@@ -4182,7 +4263,37 @@ def execute_task(
 
                 # Never switch models mid-coroutine when resuming an existing session
                 if resume_session_id or no_fallback:
-                    return attempts_history[-1]
+                    break
+
+                if (attempts_history[-1].get("error_class") == "quota"
+                        and recovery_policy is not None and recovery_selections < 3):
+                    recovery_selections += 1
+                    recovery_args = {
+                        **recovery_policy,
+                        "exclude_route_ids": list(dict.fromkeys([
+                            *(recovery_policy.get("exclude_route_ids") or []),
+                            *(a["route_id"] for a in attempts_history),
+                        ])),
+                        "exclude_buckets": sorted(exhausted_buckets),
+                    }
+                    # Re-rank against the actual failed pool, not all pools the
+                    # failed model uses. Preserve the coordinator's read scope.
+                    try:
+                        fresh = select_routes(
+                            task=task_category, run_id=eff_run_id, sandbox_mode=effective_sandbox,
+                            quota_agents=quota_agents, exclude_quota_agents=exclude_quota_agents,
+                            quota_cache_only=quota_cache_only, quota_state=quota_state,
+                            prefer_canonical_key=route["canonical_key"],
+                            allowed_billing_modes=recovery_billing,
+                            **recovery_args,
+                        )
+                    except Exception as exc:
+                        attempts_history[-1]["quota_reselection_error"] = type(exc).__name__
+                    else:
+                        if fresh.get("selected"):
+                            remaining_routes = iter([fresh["selected"], *(fresh.get("fallbacks") or [])])
+                        elif fresh.get("status") == "no_route_available":
+                            remaining_routes = iter(())
 
                 if attempts_history[-1].get("error_class") in (
                     "quota",
@@ -4196,7 +4307,16 @@ def execute_task(
                     continue
                 break
 
-            return attempts_history[-1]
+            last = attempts_history[-1]
+            if last.get("error_class") == "quota":
+                last["quota_recovery"] = {
+                    "status": "needs_coordinator",
+                    "excluded_buckets": sorted(exhausted_buckets),
+                    "attempted_routes": list(dict.fromkeys(a["route_id"] for a in attempts_history)),
+                    "guidance": "No compatible automatic replacement completed. Follow references/quota-handover.md; ask before relaxing constraints.",
+                }
+                atomic_write_json(task_dir / "meta.json", last)
+            return last
         except Exception as exec_exc:
             return _write_early_failure_contract(
                 run_dir=run_dir,

@@ -945,7 +945,9 @@ def infer_applicable_quota_buckets(
     c_key = (model_id or canonical_key).lower()
     if agent == "codex":
         return ["codex:codex"]
-    if agent == "claude-code":
+    if agent == "claude-code" or (agent == "opencode" and provider == "claude-agent"):
+        # OpenCode's Claude Agent bridge uses Claude Code subscription usage,
+        # unlike the independent OpenCode Console/Go/API providers.
         buckets = ["claude-code:session", "claude-code:all-models"]
         if canonical_key.startswith("claude-fable") or "fable" in c_key:
             buckets.append("claude-code:fable")
@@ -966,9 +968,16 @@ def infer_default_quota_bucket(agent: str, provider: str, canonical_key: str) ->
 
 def route_quota_buckets(route: dict[str, Any]) -> list[str]:
     """Include newly introduced scopes even for routes saved by older versions."""
-    if route["agent"] != "antigravity" and route.get("applicable_buckets"):
+    bridge = route["agent"] == "opencode" and route["provider"] == "claude-agent"
+    if not bridge and route["agent"] not in ("antigravity", "claude-code") and route.get("applicable_buckets"):
         return list(route["applicable_buckets"])
     inferred = infer_applicable_quota_buckets(
         route["agent"], route["provider"], route["canonical_key"], route.get("model_id")
     )
     return list(dict.fromkeys([*(route.get("applicable_buckets") or []), *inferred]))
+
+
+def route_quota_owner(route: dict[str, Any]) -> str:
+    if route["agent"] == "opencode" and route["provider"] == "claude-agent":
+        return "claude-code"
+    return route["agent"]
