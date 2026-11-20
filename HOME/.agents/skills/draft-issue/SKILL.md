@@ -28,6 +28,11 @@ skipping the context produces a form nobody can act on.
 The draft is a Markdown file, not a posted issue. The user decides when it goes
 out.
 
+Load `writing-code-forge` with the skill tool before drafting; if it is not
+discoverable by name, read the sibling *writing-code-forge/SKILL.md* in the
+same skills directory. Follow it for language, Markdown template handling,
+heading levels, style, links, review, and formatting.
+
 
 Pin down the target and the kind of issue
 -----------------------------------------
@@ -95,9 +100,9 @@ Read the tracker before writing a word
 
 Read the repository's own material instead of assuming GitHub defaults.
 `scripts/collect_context.py` gathers most of it in one pass: templates, labels,
-issue types, custom issue fields, milestones, and recent issues with their text, which is also the
-evidence for the language decision. Paths below are relative to this skill's
-directory.
+issue types, custom issue fields, milestones, and recent issues with their
+text, which is also the evidence for the language decision. Paths below are
+relative to this skill's directory.
 
 ~~~~ bash
 python3 <skill-dir>/scripts/collect_context.py --repo OWNER/REPO
@@ -125,37 +130,8 @@ involved. If a near-duplicate exists, tell the user and draft an addition to
 that issue instead, or a narrower issue that says what the existing one misses.
 
 
-Match the tracker's language
-----------------------------
-
-The issue is written in the language the tracker already uses, which is usually
-English even when the user and the maintainers share another language. Judge it
-from evidence, in roughly this order:
-
- -  the recent issues and pull requests in that repository, especially ones
-    written by maintainers;
- -  the README, contributing guide, and issue templates;
- -  the language the user used for their last few contributions there.
-
-Do not infer it from the programming language of the code, the maintainers'
-names or nationality, or the language of this conversation. A Korean-speaking
-maintainer of an English-language project still wants English issues, and the
-reverse happens too.
-
-If the sample is mixed or too small to tell, look for a stated policy in
-`CONTRIBUTING.md`, the docs, or the templates themselves, and follow it. When
-that settles nothing, ask the user which language to use. Maintaining the
-project does not make someone's own language the tracker's language. Say which
-evidence you used when you report back, so the user can correct it in one line.
-
-Once the language is chosen, write the entire draft in it, including the title.
-Identifiers, error messages, and quoted output stay as they are.
-
-
 Follow the issue template
 -------------------------
-
-Look for a template before inventing a structure.
 
 On GitHub, templates live in `.github/ISSUE_TEMPLATE/`: `*.yml` issue forms,
 `*.md` templates, and a `config.yml` that controls the chooser. A legacy
@@ -183,21 +159,17 @@ Ubuntu 24.04, kernel 6.8.0-45-generic
 Pressing *Export* closes the dialog without writing a file.
 ~~~~
 
-Write the draft as the rendered result, not as YAML. Fill required fields from
-what you actually know. When a required field needs information the user never
-gave, ask for it once, in a single batch, instead of inventing a version number
-or an operating system; a fabricated environment detail is worse than an
-incomplete draft because it sends the maintainer down the wrong path.
+Write the draft as the rendered result, not as YAML. Use `###` for peer
+sections and `####` inside a field. Apply the shared rules for missing required
+information rather than inventing environment details.
 
 Include optional fields when they carry something, and drop the ones that would
 only contain “N/A”. Do not paste the form's instructions or placeholders into
 the body.
 
 Not every field is a label and a paragraph. A `checkboxes` field becomes a task
-list, with a box checked only where the user's information supports it; a
-required acknowledgment nobody confirmed stays unchecked, which means the draft
-is not ready to post. A `dropdown` becomes the selected option as plain text.
-`markdown` fields are instructions to the submitter and never part of the issue.
+list; a `dropdown` becomes the selected option as plain text. `markdown`
+fields are instructions to the submitter and never part of the issue.
 
 Templates carry their own metadata header too: `name`, `about`, `title`,
 `labels`, `assignees`, and sometimes `type` or `projects`. Strip that header
@@ -206,39 +178,12 @@ title prefix it defines (`[Bug]: `, for instance) in the title. That prefix is
 the one exception to the no-prefix rule in *references/frontmatter.md*. Never
 leave two frontmatter blocks in one file.
 
-**Markdown templates** keep whatever structure their author wrote. Replace the
-placeholder text, remove HTML comments that only explain the form, and keep the
-section headings.
-
 **No template** means you choose the shape. See *references/structure.md* for
 the section patterns that work for each kind of issue.
 
 
-Keep the heading scale
-----------------------
-
-Without a template, a body never starts at `#`. The tracker renders the issue
-title as the page's first-level heading, so a body `#` duplicates it. With a
-template, the template wins, even when it keeps an `#` of its own.
-
- -  If a template exists, keep its headings and their levels exactly. A new
-    top-level section uses the template's shallowest level, and a section nested
-    under an existing one drops a level. A form that renders `###` fields gets
-    `###` for a new top-level section and `####` inside a field.
- -  With no template, start at `##`.
- -  Do not renumber, restyle, or drop a heading the template defined, and do not
-    remove them because the body is short.
-
-When there is no template and the body is a paragraph or two, use no headings at
-all. A two-paragraph bug report with `## Description` above it reads like
-ceremony, and the reader has to scan two levels of structure to find one fact.
-
-
 Write the body
 --------------
-
-Load the `writing` skill before writing a sentence of it when it is available;
-the review section below covers its proofreading step.
 
 The body has to answer the questions the maintainer will ask, in the order they
 will ask them: what is happening, what should happen, what did you do to see
@@ -266,38 +211,15 @@ chosen one wins. Write that as prose. A table of options with columns for pros
 and cons makes a design decision look like a procurement evaluation, and
 maintainers rarely write that way in their own tracker.
 
-Linking rules:
-
- -  Quote a technical specification by linking to the section that says it, not
-    to the document's front page.
- -  Fediverse Enhancement Proposals always use `https://w3id.org/fep/xxxx`,
-    never the repository's rendered path.
- -  Refer to issues and pull requests by number alone (`#123`,
-    `owner/repo#123`). Forges link those automatically, and a manual link
-    breaks when the number is wrong.
- -  Inside a list item that number is all you need, at least on GitHub: `#123`
-    renders as the number, the title, and the state, so restating the title
-    there wastes the sentence. Outside a list the reference stays bare, so name
-    the issue when the reader has to know what it is.
- -  Write a commit hash as a plain full hash, with no backticks and no
-    hand-written link. GitHub links a full hash in the body on its own, a
-    backticked hash suppresses that link, and a short hash is ambiguous.
- -  Link manually only when the target lives on another forge, for example a
-    Codeberg issue referenced from a GitHub issue.
- -  When pointing at a single comment inside a discussion, use the comment
-    permalink wrapped in angle brackets:
-    `<https://github.com/fedify-dev/fedify/issues/664#issuecomment-4203452333>`.
-    The brackets mark where the URL ends so a following period stays outside
-    the link.
-
 
 Fill in the frontmatter
 -----------------------
 
 Everything that is not the body goes in YAML frontmatter at the top of the
 draft: title, issue type, custom issue fields, labels, milestone, and
-relationships to other issues. *references/frontmatter.md* has the schema, the example, and how each
-field maps to `gh issue create` and GitHub GraphQL mutations.
+relationships to other issues. *references/frontmatter.md* has the schema, the
+example, and how each field maps to `gh issue create` and GitHub GraphQL
+mutations.
 
 Choose labels and types from what the repository actually offers. An invented
 label does not apply, and a type from another owner may not exist for
@@ -356,57 +278,11 @@ and record that number in the frontmatter.
 Report the absolute paths when you finish.
 
 
-Format with hongdown
---------------------
-
-The project's Markdown style is hongdown's style. Format every draft, and never
-let it wrap lines: issue text is edited in the browser, and hard wraps turn
-each edit into a reflow.
-
-~~~~ bash
-hongdown --write --no-line-width <draft.md>        # one file
-hongdown --write --no-line-width <drafts-dir>/     # a whole directory
-~~~~
-
-If `hongdown` is not on `PATH`, try mise, then the release binary:
-
-~~~~ bash
-mise x aqua:dahlia/hongdown -- hongdown --write --no-line-width <paths>
-~~~~
-
-Only if both are missing, download the archive for this platform from
-<https://github.com/dahlia/hongdown/releases/latest> into a temporary
-directory, unpack it, and run the binary there.
-`gh release view --repo dahlia/hongdown --json tagName,assets` lists the exact
-asset names; match the target triple against `uname -sm`. Do not install
-anything system-wide for a one-off format.
-
-Check the result afterwards. Formatting reorders reference links and may turn
-`--` in prose into an em dash, which the writing rules avoid; rewrite that
-sentence and format again. A mangled code block or a lost frontmatter field is
-also a formatting failure, not a cosmetic one. When a later edit changes the
-draft, format it once more before handing it over.
-
-
-Review the prose
+Review the issue
 ----------------
 
-Load the `writing` skill when it is available and follow it for the body. It
-carries the house rules on tone, structure, and proper nouns, and it applies to
-issue bodies as much as to blog posts.
-
-The skill's own scope is English prose. When the tracker's language is not
-English, take its structure, tone, and review procedure, and treat its
-English-specific rules, such as spelling and punctuation conventions, as
-advisory.
-
-Run the cross-vendor style review that `writing` describes, following its rules
-for selection, validation, and fallback. A short issue is still public writing,
-so size is not a reason to skip it. If no reviewer can be reached, self-review
-against the checklist below and say in your report that the external review did
-not happen.
-
-Before handing the draft over:
+Follow the review and formatting steps in `writing-code-forge`. Before handing
+the draft over, also check:
 
  -  Does the body state what happened and what was expected, with enough detail
     to reproduce it?
@@ -416,11 +292,8 @@ Before handing the draft over:
     provided or you actually observed?
  -  If you tested the premise and it did not hold, did you stop and report
     instead of drafting around it?
- -  Do the headings follow the template's levels, or, with no template, stay at
-    `##` and below, with no headings at all on a short issue?
  -  Are the labels, type, custom issue fields and their values, and milestone
     real for this repository?
- -  Is the language the same as the tracker's, throughout, including the title?
 
 
 Hand it over

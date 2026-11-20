@@ -24,6 +24,11 @@ file-by-file narrative out.
 The draft is a Markdown file outside the checkout, not a posted pull request.
 The user decides when it goes out.
 
+Load `writing-code-forge` with the skill tool before drafting; if it is not
+discoverable by name, read the sibling *writing-code-forge/SKILL.md* in the
+same skills directory. Follow it for language, Markdown template handling,
+heading levels, style, links, review, and formatting.
+
 
 Establish the change under review
 ---------------------------------
@@ -138,39 +143,8 @@ PR body; the commit skill owns that. When the user's status is unclear, ask
 before adding or omitting a required line.
 
 
-Match the tracker's language
-----------------------------
-
-Write the PR in the language the repository already uses, which is usually
-English even when the user and the maintainers share another language. Judge it
-from evidence, in roughly this order:
-
- -  recent merged pull requests, especially ones written by maintainers;
- -  the README, contributing guide, and PR template;
- -  the language the user used for their last few contributions there.
-
-Do not infer it from the programming language of the code, the maintainers'
-names or nationality, or the language of this conversation. A Korean-speaking
-maintainer of an English-language project still wants an English PR.
-
-If the sample is mixed or too small to tell, look for a stated policy in
-`CONTRIBUTING.md`, the docs, or the templates themselves, and follow it. When
-that settles nothing, ask the user which language to use. Say which evidence you
-used when you report back, so the user can correct it in one line.
-
-An explicit instruction from the user wins over the tracker's default. If they
-ask for English in a Korean-language project, write English and mention the
-mismatch once.
-
-Once the language is chosen, write the entire draft in it, including the title
-and any headings. Identifiers, error messages, and quoted output stay as they
-are.
-
-
 Follow the PR template
 ----------------------
-
-Look for a template before inventing a structure.
 
 On GitHub, templates live in the repository root, `docs/`, or `.github/`, named
 `pull_request_template.md` or `PULL_REQUEST_TEMPLATE.md` in any capitalization.
@@ -183,40 +157,8 @@ Pick the template that matches the kind of change. A bug fix does not belong in
 a feature-request template just because it is the only file present. If several
 templates exist and none clearly fits, ask which one to use.
 
-**Markdown templates** keep whatever structure their author wrote. Replace the
-placeholder text, remove HTML comments that only explain the form, and keep the
-section headings and their levels. Fill required sections from what you actually
-know. When a section needs information the user never gave, ask for it once, in
-a single batch, instead of inventing a version number, a test command, or a
-screenshot.
-
-Checkboxes become task lists. Check a box only where the user's information or
-your own verified work supports it. A required acknowledgment nobody confirmed
-stays unchecked, which means the draft is not ready to post; say so rather than
-ticking it to make the file look complete.
-
 Templates sometimes carry a title prefix (`[Bug]: `, `feat: `). Keep it in the
 title. That is the one exception to the no-prefix rule below.
-
-
-Keep the heading scale
-----------------------
-
-Without a template, a body never starts at `#`. The forge renders the PR title
-as the page's first-level heading, so a body `#` duplicates it. With a template,
-the template wins, even when it keeps an `#` of its own.
-
- -  If a template exists, keep its headings and their levels exactly. A new
-    top-level section uses the template's shallowest level, and a section nested
-    under an existing one drops a level.
- -  With no template, start at `##`.
- -  Do not renumber, restyle, or drop a heading the template defined.
-
-Most PRs need no headings at all. A two-paragraph fix with `## Summary` above it
-reads like ceremony, and the reviewer has to scan structure to find one fact.
-Use `##` sections only when the change has distinct parts that a reader would
-want to navigate: a migration procedure, a breaking change, a large feature with
-several surfaces. Even then, two or three sections is usually the ceiling.
 
 
 Write the title
@@ -227,7 +169,7 @@ scanning a release changelog who has not opened the diff.
 
  -  Imperative mood: “Pin OpenTelemetry JS SDK 2.x in the manual”, not “Pinned
     the SDK” or “This PR pins the SDK”.
- -  Sentence case. No Title Case, no trailing period.
+ -  No trailing period.
  -  No `[Feature]`, `[Fix]`, or `feat:` prefix unless the template defines one.
     Labels and the diff already say what kind of change it is.
  -  Be specific about the surface. “Fix tab handling” is weaker than “Reject
@@ -235,15 +177,9 @@ scanning a release changelog who has not opened the diff.
  -  Keep it short enough to scan. If it needs a comma and two clauses, it is
     probably two ideas.
 
-The title follows the same language as the body and the same proper-noun
-spelling.
-
 
 Write the body
 --------------
-
-Load the `writing` skill before writing a sentence of it when it is available;
-the review section below covers its proofreading step.
 
 The body answers the questions a reviewer will ask, in the order they will ask
 them: why does this change exist, how does it work, and what could break.
@@ -295,9 +231,10 @@ End with the issue relationship when there is one:
 Fixes #1292.
 ~~~~
 
-Use `Fixes` or `Closes` only when merging should close the issue. Otherwise
-write `Related to #1316.` A PR that says “Fixes” but does not fix it closes the
-issue at merge time, which is worse than no link.
+Use `Fixes` or `Closes` only when merging should close the issue and the
+target forge supports that keyword. Otherwise write `Related to #1316.` A PR
+that says “Fixes” but does not fix it can close the issue at merge time, which
+is worse than no link.
 
 ### Length and shape
 
@@ -314,74 +251,6 @@ a set of related fixes. Do not use bold lead-ins inside bullets, emoji, or a
 Do not open with “This PR”, “This pull request aims to”, or “In this PR we”.
 Start with the problem or the change itself. Do not close with “In summary” or
 a restatement of the title. The reviewer has read both.
-
-### Linking rules
-
- -  Refer to issues and pull requests by number alone (`#123`,
-    `owner/repo#123`). Forges link those automatically, and a manual link
-    breaks when the number is wrong.
- -  Inside a list item that number is all you need, at least on GitHub: `#123`
-    renders as the number, the title, and the state, so restating the title
-    there wastes the sentence. Outside a list the reference stays bare, so name
-    the issue when the reader has to know what it is.
- -  Write a commit hash as a plain full hash, with no backticks and no
-    hand-written link. GitHub links a full hash in the body on its own, a
-    backticked hash suppresses that link, and a short hash is ambiguous.
- -  Link manually only when the target lives on another forge, for example a
-    Codeberg issue referenced from a GitHub PR.
- -  When pointing at a single comment inside a discussion, use the comment
-    permalink wrapped in angle brackets:
-    `<https://github.com/fedify-dev/fedify/issues/664#issuecomment-4203452333>`.
-    The brackets mark where the URL ends so a following period stays outside
-    the link.
- -  Quote a technical specification by linking to the section that says it, not
-    to the document's front page.
- -  Fediverse Enhancement Proposals always use `https://w3id.org/fep/xxxx`,
-    never the repository's rendered path.
- -  Do not invent an issue number to make the body look complete. If you do not
-    know it, leave the sentence out or ask.
-
-
-House style
------------
-
-These rules apply to the title and body unless the repository's template or
-contributing guide says otherwise.
-
-**No em dashes.** Replace them with a comma, colon, semicolon, parentheses, or
-a rewritten sentence. Hongdown can turn `--` in prose into an em dash, so check
-the formatted file and rewrite any that appear. A spaced hyphen used as a dash
-is the same problem.
-
-**No spaces around slashes.** Write `src/foo.ts`, `HTTP/2`, `read/write`, and
-`CI/CD`, not `src / foo.ts` or `CI / CD`. The slash joins the terms; spacing
-breaks the join and makes paths hard to copy.
-
-**Italicize filenames, paths, and extensions.** Write *src/index.ts*,
-*docs/manual/opentelemetry.md*, *PULL.md*, and *.ts*, not backticked paths. This
-is the house convention in the target repositories, and it keeps prose visually
-distinct from code. A path inside a code block, a URL, or a literal command
-stays as it is. Inline code is for identifiers, functions (`parseHeader()`),
-commands, flags, environment variables, HTTP methods and status codes, SQL and
-Redis commands, and specification type names.
-
-**Sentence case for headings and titles.** “Breaking changes”, not “Breaking
-Changes”. Proper nouns keep their capitalization. Do not number headings unless
-the template does.
-
-**Official names.** Follow the official spelling of products, projects,
-protocols, and file formats: GitHub, macOS, Node.js, npm, Wi-Fi, VS Code,
-HTTP/2. A lowercase official name at the start of a sentence gets a rewritten
-sentence, not a capital letter.
-
-**Concision.** Delete sentences that only announce importance (“It is worth
-noting that”, “This is a crucial change”). Prefer concrete Saxon words: use,
-show, help, not utilize, demonstrate, facilitate. Keep the reasoning; cut the
-scaffolding.
-
-**No anthropomorphism.** Software does not want, understand, or decide. Say what
-the code checks, returns, or rejects. Ordinary shorthand such as “the server
-rejects the request” is fine.
 
 
 Fill in the frontmatter
@@ -442,36 +311,26 @@ record that number in the frontmatter.
 Report the absolute path when you finish.
 
 
-Format with hongdown
---------------------
+Review the pull request
+-----------------------
 
-The project's Markdown style is hongdown's style. Format every draft, and never
-let it wrap lines: PR text is edited in the browser, and hard wraps turn each
-edit into a reflow.
+Follow the review and formatting steps in `writing-code-forge` before copying
+the body to the clipboard. Also check:
 
-~~~~ bash
-hongdown --write --no-line-width <draft.md>        # one file
-hongdown --write --no-line-width <drafts-dir>/     # a whole directory
-~~~~
-
-If `hongdown` is not on `PATH`, try mise, then the release binary:
-
-~~~~ bash
-mise x aqua:dahlia/hongdown -- hongdown --write --no-line-width <paths>
-~~~~
-
-Only if both are missing, download the archive for this platform from
-<https://github.com/dahlia/hongdown/releases/latest> into a temporary
-directory, unpack it, and run the binary there.
-`gh release view --repo dahlia/hongdown --json tagName,assets` lists the exact
-asset names; match the target triple against `uname -sm`. Do not install
-anything system-wide for a one-off format.
-
-Check the result afterwards. Formatting reorders reference links and may turn
-`--` in prose into an em dash, which the house style avoids; rewrite that
-sentence and format again. A mangled code block or a lost frontmatter field is
-also a formatting failure, not a cosmetic one. When a later edit changes the
-draft, format it once more before handing it over.
+ -  Does the first paragraph say why the change exists, and does the rest say
+    how it works without walking the diff file by file?
+ -  Is every version, path, command, and output in the draft something the user
+    actually provided or you actually observed?
+ -  If the diff contradicted the request, did you stop and report instead of
+    drafting around it?
+ -  Is each verification detail required by the project or useful to the
+    reviewer's judgment or next action, rather than a routine gate report?
+ -  Are reported results supported, and are known material gaps or failures
+    disclosed with the specific follow-up needed?
+ -  Are labels, reviewers, and milestone real for this repository?
+ -  If an AI policy applies, did you check whether the user is exempt, and did
+    you include a disclosure only when the policy covers them?
+ -  Is the issue relationship correct (`Fixes` only when merge should close it)?
 
 
 Copy the body to the clipboard
@@ -497,49 +356,6 @@ body and exits non-zero instead of pretending it copied something.
 Clipboard access is a convenience, not a gate. If the environment has no
 display or the command is missing, say so in the handover and leave the file
 path; do not retry in a loop or install a clipboard package for one draft.
-
-
-Review the prose
-----------------
-
-Load the `writing` skill when it is available and follow it for the body. It
-carries the house rules on tone, structure, and proper nouns, and it applies to
-PR descriptions as much as to blog posts.
-
-The skill's own scope is English prose. When the tracker's language is not
-English, take its structure, tone, and review procedure, and treat its
-English-specific rules, such as spelling and punctuation conventions, as
-advisory.
-
-Run the cross-vendor style review that `writing` describes, following its rules
-for selection, validation, and fallback. A PR description is public writing, so
-size is not a reason to skip it. If no reviewer can be reached, self-review
-against the checklist below and say in your report that the external review did
-not happen.
-
-Before handing the draft over:
-
- -  Does the first paragraph say why the change exists, and does the rest say
-    how it works without walking the diff file by file?
- -  Is every version, path, command, and output in the draft something the user
-    actually provided or you actually observed?
- -  If the diff contradicted the request, did you stop and report instead of
-    drafting around it?
- -  Is each verification detail required by the project or useful to the
-    reviewer's judgment or next action, rather than a routine gate report?
- -  Are reported results supported, and are known material gaps or failures
-    disclosed with the specific follow-up needed?
- -  Do the headings follow the template's levels, or, with no template, stay at
-    `##` and below, with no headings at all on a short PR?
- -  Are labels, reviewers, and milestone real for this repository?
- -  If an AI policy applies, did you check whether the user is exempt, and did
-    you include a disclosure only when the policy covers them?
- -  Is the language the same as the tracker's, throughout, including the title?
- -  No em dashes, no spaces around slashes, filenames and paths italicized, and
-    sentence case headings?
- -  Is the issue relationship correct (`Fixes` only when merge should close it)?
- -  Is the draft outside the checkout, formatted with hongdown, and is the
-    clipboard filled with the body alone?
 
 
 Hand it over

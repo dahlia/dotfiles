@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: github-issue-form
+expected_outcome: |
+  A Korean issue draft that keeps the form's exact headings, distinguishes
+  filename formatting from inline code, cites the RFC section and the
+  comment permalink, and does not hard-wrap the body.

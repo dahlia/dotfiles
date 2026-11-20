@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: gitlab-merge-request
+expected_outcome: |
+  An English merge request draft that distinguishes GitLab issue and merge
+  request shorthand, links the Codeberg issue, and preserves the
+  repository's short, heading-free style without inventing test results.
