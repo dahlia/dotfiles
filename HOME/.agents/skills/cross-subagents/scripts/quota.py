@@ -592,7 +592,8 @@ def parse_antigravity_quota(records: Any) -> dict[str, Any]:
         windows.extend(w for w in extra if isinstance(w, dict))
     buckets: dict[str, dict[str, Any]] = {}
     for item in windows:
-        scope = _antigravity_window_scope(str(item.get("title") or ""))
+        title = str(item.get("title") or "")
+        scope = _antigravity_window_scope(title)
         window = item.get("window")
         if not scope or not isinstance(window, dict) or item.get("usageKnown") is False:
             continue
@@ -606,9 +607,13 @@ def parse_antigravity_quota(records: Any) -> dict[str, Any]:
         # A passed reset cannot certify current availability or exhaustion.
         if reset_epoch is not None and reset_epoch <= time.time():
             used = None
-        metrics = compute_window_metrics(used, window.get("windowMinutes"), reset_epoch)
+        duration = window.get("windowMinutes")
+        if duration is None and re.search(r"\bweekly\s*$", title, re.IGNORECASE):
+            duration = 10080
+        metrics = compute_window_metrics(used, duration, reset_epoch)
         normalized = {
             "bucket_id": scope, "agent": "antigravity", "used_percent": used,
+            "window_duration_mins": duration,
             "resets_at_epoch": reset_epoch, "source_updated_at": usage["updatedAt"],
             **metrics,
         }

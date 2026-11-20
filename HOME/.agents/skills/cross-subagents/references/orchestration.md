@@ -277,9 +277,21 @@ across planned steps, listed under `planned_routes`). Without either, the JSON
 is labelled `selection_source: "auto"` and its `note` states that the estimate
 is a generic representative route rather than the work plan.
 
-Print the one-line summary showing the planned call count, primary route, and
-estimated cost index. If the fan-out involves 5 or more calls (or exceeds the
-cost index gate), ask the user for confirmation before spawning the batch.
+Print the one-line summary and ask before spawning if
+`requires_user_confirmation` is true. The default thresholds are 5 total calls
+(including the coordinator) or an estimated cost index of 1.5. The thresholds
+are waived for an explicit route or fully resolved plan containing subscriptions
+when every subscription route has at least 25% remaining in its current weekly
+quota windows or a verified, unexpired free reset credit on the same account.
+Known free routes can be mixed with subscriptions without invalidating the
+waiver. Metered or unknown billing and unresolved planned routes still require
+confirmation. If the coordinator uses a different route, include it in the
+plan or check it separately before dispatch. Missing or stale quota evidence
+does not earn a waiver.
+
+Use `prepare.py` first to populate the quota cache, or supply a fresh
+coordinator snapshot. The waiver neither bypasses execution-time quota checks
+nor authorizes credit redemption; the existing reset-credit policy still applies.
 
 Every invocation appends `task_started` and `task_finished` events to
 `$SKILL_CACHE_DIR/runs/<run-id>/manifest.jsonl`, and `run.py mark` appends

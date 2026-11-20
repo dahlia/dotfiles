@@ -61,6 +61,7 @@ from common import (
     normalize_official_model_id,
     now_iso,
     official_agent_name,
+    parse_iso_age_seconds,
     read_json_file,
     validate_official_model_id,
     validate_safe_identifier,
@@ -76,7 +77,7 @@ from probe import (
     probe_all,
     strip_ansi,
 )
-from quota import collect_quota, record_quota_observation, quota_observation_bucket
+from quota import QUOTA_TTL_SECONDS, collect_quota, record_quota_observation, quota_observation_bucket
 from registry import acquire_lease, heartbeat_lease, is_pid_alive, release_lease
 from select_route import (
     check_route_eligibility,
@@ -94,6 +95,7 @@ DEFAULT_QUEUE_TIMEOUT_SECONDS = 300
 HEARTBEAT_INTERVAL_SECONDS = 30.0
 COST_GATE_MAX_CALLS = 5
 COST_GATE_MAX_COST_INDEX = 1.5
+COST_GATE_MIN_WEEKLY_REMAINING = 25.0
 # A terminal finish reason that means the final assistant message is complete.
 # Anything else (`length`, `tool-calls`, `content-filter`, unknown) is truncated.
 OPENCODE_SUCCESS_FINISH = frozenset({"stop", "end_turn", "completed", "finish", "done"})
@@ -4888,6 +4890,67 @@ def _catalog_routes(route_ids: list[str]) -> dict[str, dict[str, Any]]:
     return index
 
 
+def _subscription_gate_exemption(
+    route: dict[str, Any], state: dict[str, Any], now_ts: float,
+) -> str | None:
+    """Use actual weekly percentages, not capacity-weighted quota scores."""
+    if not all(route.get(key) for key in ("agent", "provider", "canonical_key")):
+        return None
+    owner = route_quota_owner(route)
+    account = (state.get("agents") or {}).get(owner) or {}
+    age = parse_iso_age_seconds(account.get("collected_at"))
+    if account.get("stale") or age is None or age >= QUOTA_TTL_SECONDS:
+        return None
+    if owner == "antigravity":
+        source_age = parse_iso_age_seconds(account.get("source_updated_at"))
+        if source_age is None or source_age >= QUOTA_TTL_SECONDS:
+            return None
+
+    buckets = {**(account.get("buckets") or {}), **(state.get("buckets") or {})}
+    weekly_remaining: list[float] = []
+    for bucket_id in route_quota_buckets(route):
+        bucket = buckets.get(bucket_id) or {}
+        windows = (bucket.get("windows") or {}).values() if bucket.get("windows") else [bucket]
+        weekly = [w for w in windows if w and w.get("window_duration_mins") == 10080]
+        if bucket_id in ("claude-code:all-models", "claude-code:fable") and not weekly:
+            weekly_remaining.append(0.0)  # A known weekly scope is missing from a partial report.
+        for window in weekly:
+            reset = window.get("resets_at_epoch")
+            used = window.get("used_percent")
+            try:
+                used_pct = float(used) if not isinstance(used, bool) else -1.0
+            except (ValueError, TypeError, OverflowError):
+                used_pct = -1.0
+            if (
+                bucket.get("status") == "observed_limited"
+                or window.get("exhausted")
+                or not isinstance(reset, (int, float))
+                or not reset > now_ts
+                or not 0 <= used_pct <= 100
+            ):
+                weekly_remaining.append(0.0)
+            else:
+                weekly_remaining.append(100.0 - used_pct)
+    if weekly_remaining and min(weekly_remaining) >= COST_GATE_MIN_WEEKLY_REMAINING:
+        return "weekly_quota"
+
+    # Only Codex currently reports account-scoped reset grants. A count alone
+    # is not evidence of a usable free grant; monetary balances do not count.
+    if owner == "codex":
+        credits = account.get("reset_credits") or {}
+        if credits.get("available_count") != 0 and any(
+            isinstance(credit, dict)
+            and credit.get("id")
+            and credit.get("status") == "available"
+            and credit.get("free_grant") is True
+            and isinstance(credit.get("expires_at"), (int, float))
+            and credit["expires_at"] > now_ts
+            for credit in credits.get("credits") or []
+        ):
+            return "free_reset_credit"
+    return None
+
+
 def evaluate_cost_gate(
     num_calls: int,
     task_category: str = "general",
@@ -4914,10 +4977,14 @@ def evaluate_cost_gate(
     """
     selection_source = "auto"
     plan_routes: list[dict[str, Any]] = []
+    resolved_plan: list[dict[str, Any]] = []
+    plan_steps: list[dict[str, Any]] = []
+    planned_ids: list[str] = []
     top: dict[str, Any] = {}
     fallbacks: list[dict[str, Any]] = []
     estimate_scope = "generic auto-selected representative route (not a planned route)"
 
+    plan = load_selection_plan(run_id) if not route_str or run_id else {}
     if route_str:
         top = resolve_explicit_route(route_str, force_route=force_route)
         selection_source = "explicit_route"
@@ -4931,8 +4998,8 @@ def evaluate_cost_gate(
         billing_mode = top.get("billing_mode") or classify_route_billing(top)
         cost_estimated = bool(top.get("cost_estimated", True))
     else:
-        plan = load_selection_plan(run_id)
-        planned_ids = [str(step.get("route_id") or "").strip() for step in plan.get("steps") or []]
+        plan_steps = plan.get("steps") or []
+        planned_ids = [str(step.get("route_id") or "").strip() for step in plan_steps]
         catalog_index = _catalog_routes(planned_ids)
         resolved_plan = [
             catalog_index[route_id.lower()]
@@ -4993,11 +5060,58 @@ def evaluate_cost_gate(
         fallback_buffer = round(0.15 * fb_cost * num_calls, 3)
 
     total_cost_idx = round(effective_calls * unit_cost + fallback_buffer, 3)
-    requires_confirmation = (
-        effective_calls >= COST_GATE_MAX_CALLS
-        or total_cost_idx >= COST_GATE_MAX_COST_INDEX
-        or billing_mode in ("unknown", "mixed")
-    )
+    priced_routes = resolved_plan or ([top] if top else [])
+    modes = [str(route.get("billing_mode") or classify_route_billing(route)) for route in priced_routes]
+    reasons: list[str] = []
+    if not route_str and (
+        plan.get("status") in ("partial", "no_route_available")
+        or len(resolved_plan) != len(planned_ids)
+    ):
+        reasons.append("unresolved_planned_route")
+    if "api_metered" in modes:
+        reasons.append("metered_billing")
+    if not modes or any(mode not in ("subscription", "free", "api_metered") for mode in modes):
+        reasons.append("unknown_billing")
+
+    exemptions: dict[str, str] = {}
+    subscriptions = [route for route, mode in zip(priced_routes, modes) if mode == "subscription"]
+    quota_waiver = False
+    if not reasons and selection_source in ("explicit_route", "saved_plan") and subscriptions:
+        cached_state: dict[str, Any] | None = None
+        now_ts = time.time()
+        quota_waiver = True
+        for index, (route, mode) in enumerate(zip(priced_routes, modes)):
+            if mode != "subscription":
+                continue
+            route_id = route["route_id"]
+            constraints = (
+                plan_steps[index].get("constraints") if selection_source == "saved_plan"
+                else planned_constraints_for_route(plan, route_id)
+            ) or {}
+            state = quota_state if quota_state is not None else constraints.get("quota_state")
+            if state is None:
+                # The gate reuses preparation's cache; it never needs a new
+                # provider read or to widen the coordinator's quota ownership.
+                if cached_state is None:
+                    cached_state = collect_quota(agents=[], cache_only=True)
+                state = cached_state
+            exemption = _subscription_gate_exemption(route, state, now_ts)
+            if exemption:
+                exemptions[route_id] = exemption
+            else:
+                quota_waiver = False
+
+    if not quota_waiver:
+        if effective_calls >= COST_GATE_MAX_CALLS:
+            reasons.append("call_threshold")
+        if total_cost_idx >= COST_GATE_MAX_COST_INDEX:
+            reasons.append("cost_index_threshold")
+    requires_confirmation = bool(reasons)
+    gate_detail = "within auto gate"
+    if requires_confirmation:
+        gate_detail = f"CONFIRMATION REQUIRED ({', '.join(reasons)})"
+    elif quota_waiver:
+        gate_detail += f" ({', '.join(sorted(set(exemptions.values())))})"
     est_tag = "estimated" if cost_estimated else "verified"
     route_label = top.get("route_id") or f"{len(plan_routes)} planned route(s)"
     summary = (
@@ -5005,7 +5119,7 @@ def evaluate_cost_gate(
         f"{' + 1 orchestrator' if requires_orchestrator else ''} on {route_label} "
         f"(billing={billing_mode}, {est_tag} cost index {total_cost_idx:.2f}; "
         f"scope: {estimate_scope}) — "
-        f"{'CONFIRMATION REQUIRED' if requires_confirmation else 'within auto gate'}; "
+        f"{gate_detail}; "
         f"{'spawn dedicated orchestrator subagent' if requires_orchestrator else 'direct invocation allowed'}."
     )
     result = {
@@ -5022,6 +5136,8 @@ def evaluate_cost_gate(
         "fallback_allowance_index": fallback_buffer,
         "estimated_cost_index": total_cost_idx,
         "requires_user_confirmation": requires_confirmation,
+        "confirmation_reasons": reasons,
+        "subscription_exemptions": exemptions,
         "requires_orchestrator_subagent": requires_orchestrator,
         "summary": summary,
     }

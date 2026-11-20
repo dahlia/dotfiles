@@ -3394,6 +3394,90 @@ class TestCrossSubagents(unittest.TestCase):
         self.assertIn("not a planned route", gate["estimate_scope"])
         self.assertIn("note", gate)
 
+    def test_cost_gate_waives_large_batch_for_current_weekly_headroom_or_free_credit(self):
+        route = common.normalize_model_route("codex", "openai", "gpt-6.1-sol")
+        route.update(billing_mode="subscription", cost_index=0.9)
+        now = 1800000000
+        credit = {"id": "coupon", "status": "available", "free_grant": True, "expires_at": now + 86400}
+        for used, reset, age, credits, exemption in [
+            (75.0, now + 600, 1, [], "weekly_quota"),
+            (75.01, now + 600, 1, [], None),
+            (0.0, now, 1, [], None),
+            (20.0, now + 600, 900, [credit], None),
+            (95.0, now + 600, 1, [credit], "free_reset_credit"),
+            (None, now + 600, 1, [], None),
+            (95.0, now + 600, 1, [{**credit, "expires_at": now}], None),
+            (95.0, now + 600, 1, [{**credit, "free_grant": False}], None),
+            (95.0, now + 600, 1, [{**credit, "free_grant": None}], None),
+            (95.0, now + 600, 1, [{**credit, "status": "redeemed"}], None),
+        ]:
+            with self.subTest(used=used, reset=reset, age=age, credits=credits):
+                state = {
+                    "agents": {"codex": {"collected_at": "sample", "reset_credits": {
+                        "available_count": 1, "credits": credits,
+                    }}},
+                    "buckets": {"codex:codex": {"windows": {
+                        "primary": {"window_duration_mins": 300, "used_percent": 1, "resets_at_epoch": now + 60},
+                        "secondary": {"window_duration_mins": 10080, "used_percent": used, "resets_at_epoch": reset},
+                    }}},
+                }
+                with patch.object(run, "resolve_explicit_route", return_value=route), patch.object(
+                    run.time, "time", return_value=now
+                ), patch.object(run, "parse_iso_age_seconds", return_value=age), patch.object(
+                    run, "collect_quota"
+                ) as collect:
+                    gate = run.evaluate_cost_gate(8, route_str=route["route_id"], quota_state=state)
+                collect.assert_not_called()
+                self.assertEqual(gate["total_planned_calls"], 9)
+                self.assertEqual(gate["requires_user_confirmation"], exemption is None)
+                self.assertEqual(gate["subscription_exemptions"].get(route["route_id"]), exemption)
+                if exemption is None:
+                    self.assertEqual(gate["confirmation_reasons"], ["call_threshold", "cost_index_threshold"])
+
+    def test_cost_gate_checks_every_planned_subscription_and_does_not_waive_billing(self):
+        routes = [
+            common.normalize_model_route("codex", "openai", "gpt-6.1-sol"),
+            common.normalize_model_route("opencode", "claude-agent", "claude-fable-5-1"),
+        ]
+        for route in routes:
+            route.update(billing_mode="subscription", cost_index=0.5)
+        ids = [route["route_id"] for route in routes]
+        plan = {"steps": [{"route_id": route_id} for route_id in ids]}
+        now = 1800000000
+
+        def weekly(used):
+            return {"window_duration_mins": 10080, "used_percent": used, "resets_at_epoch": now + 60}
+
+        state = {
+            "agents": {agent: {"collected_at": "sample"} for agent in ("codex", "claude-code")},
+            "buckets": {"codex:codex": weekly(20), "claude-code:all-models": weekly(30)},
+        }
+        index = {route_id.lower(): route for route_id, route in zip(ids, routes)}
+        with patch.object(run, "load_selection_plan", return_value=plan), patch.object(
+            run, "_catalog_routes", return_value=index
+        ), patch.object(run.time, "time", return_value=now), patch.object(
+            run, "parse_iso_age_seconds", return_value=0
+        ), patch.object(run, "collect_quota", return_value=state) as collect:
+            gate = run.evaluate_cost_gate(4, run_id="plan")
+            collect.assert_called_once_with(agents=[], cache_only=True)
+            self.assertTrue(gate["requires_user_confirmation"])  # Fable weekly data is missing.
+            self.assertEqual(gate["subscription_exemptions"], {ids[0]: "weekly_quota"})
+            state["buckets"]["claude-code:fable"] = weekly(90)
+            self.assertTrue(run.evaluate_cost_gate(4, run_id="plan")["requires_user_confirmation"])
+            state["buckets"]["claude-code:fable"] = weekly(75)
+            self.assertFalse(run.evaluate_cost_gate(4, run_id="plan")["requires_user_confirmation"])
+            plan["status"] = "partial"
+            self.assertEqual(run.evaluate_cost_gate(1, run_id="plan")["confirmation_reasons"], ["unresolved_planned_route"])
+            plan["status"] = "ok"
+            routes[1]["billing_mode"] = "free"
+            self.assertFalse(run.evaluate_cost_gate(4, run_id="plan")["requires_user_confirmation"])
+            routes[1]["billing_mode"] = "api_metered"
+            self.assertEqual(run.evaluate_cost_gate(1, run_id="plan")["confirmation_reasons"], ["metered_billing"])
+            routes[1]["billing_mode"] = "unknown"
+            self.assertEqual(run.evaluate_cost_gate(1, run_id="plan")["confirmation_reasons"], ["unknown_billing"])
+            del index[ids[1].lower()]
+            self.assertEqual(run.evaluate_cost_gate(1, run_id="plan")["confirmation_reasons"], ["unresolved_planned_route"])
+
 
 if __name__ == "__main__":
     unittest.main()
