@@ -80,6 +80,27 @@ concrete, concise language and describe what software does rather than what it
 wants or thinks.
 
 
+Typeset mathematical notation
+-----------------------------
+
+A one-off expression like a + b is fine in plain prose. Use TeX math for
+substantive algorithm explanations that rely on mathematical notation, for
+nontrivial expressions such as recurrences, and when formulas recur often
+enough that consistent notation helps, even if each one is simple.
+
+Use inline math for symbols and short expressions, and display math for
+longer equations or formulas the reader needs to refer back to. Define
+symbols where they first appear. Keep literal code and pseudocode in code
+formatting.
+
+Check what the destination renders. [GitHub Markdown math] supports `$...$`
+inline and `$$` blocks in issues, pull requests, and Discussions. Use the
+target forge's supported syntax; if it cannot render math on that surface,
+use readable plain-text notation instead.
+
+[GitHub Markdown math]: https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/writing-mathematical-expressions
+
+
 Link to the evidence
 --------------------
 
@@ -145,8 +166,9 @@ keep the prose unwrapped and report that Hongdown did not run.
 Before formatting, scan the prose for trailing reference bundles and attach
 each reference to the relevant claim. Format after the last edit. Check that
 the formatter preserved frontmatter, heading text and levels, code blocks,
-and link targets. It can reorder reference definitions and turn `--` in prose
-into an em dash; rewrite the sentence and format again if it does. Check the
-calling skill's requirements before handing over the draft.
+math delimiters and TeX commands, and link targets. It can reorder reference
+definitions and turn `--` in prose into an em dash; rewrite the sentence and
+format again if it does. Check the calling skill's requirements before
+handing over the draft.
 
 [Hongdown releases]: https://github.com/dahlia/hongdown/releases/latest
