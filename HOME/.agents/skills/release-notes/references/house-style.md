@@ -79,15 +79,11 @@ in changelog order. A section is prose, not bullets. The reliable shape is:
 5.  **Caveats and limits.** Which transports/runtimes are supported, which are
     not, what the default is, what the application is still responsible for.
     Saying what a feature does *not* do is a trust signal, not a weakness.
-6.  **A documentation link inline**, in the sentence that introduces the
-    feature or right after the example (“See the \[MIME composition guide] for
-    streaming output, signing, and attachment lifetime rules.”). Never park
-    links in a separate list.
-7.  **Issue and PR numbers**, bare, worked into the sentence that describes
-    the change (“The original proposal and implementation are in #812 and
-    #818.”), not appended as a closing parenthetical. See “Referring to issues
-    and PRs” below.
-8.  **A shoutout** when an external contributor did the work (see below).
+6.  **Documentation and references.** Link the feature guide when you introduce
+    the feature or explain the example. Cite the proposal and implementation
+    where they help explain the change. Use the linking rules in
+    `writing-code-forge`.
+7.  **A shoutout** when an external contributor did the work (see below).
 
 Headings are sentence case and unnumbered. They may name a function or
 package inline (`deferredValue()` for handler-time fallbacks, `fedify bench`,
@@ -140,66 +136,11 @@ JSR-only or npm-only.
 Links
 -----
 
- -  Reference-style links (`[label]: url`) with the definitions collected after
-    the paragraph or at the end of the section. hongdown manages placement; you
-    just write the reference or an inline link.
- -  Documentation links go to the published site, deep-linked to the relevant
-    heading when one exists (`.../smtp#oauth-20-authentication`).
  -  Project blurb links to the project site; the version-specific *CHANGES.md*
     link in the closing points at the tag
     (`https://github.com/OWNER/REPO/blob/1.2.0/CHANGES.md` or `#version-120`).
- -  Issue and PR numbers are bare `#123`, never Markdown links.
- -  Cross-repository references use `owner/repo#123`.
  -  Third-party projects mentioned in prose get a link on first mention
     (`[Lemmy]`, `[Piscina]`, `[Inquirer.js]`).
-
-
-Referring to issues and PRs
----------------------------
-
-Numbers are bare (`#123`) because GitHub links them automatically, and they
-belong inside the sentence that describes the change, not in a bundle tacked
-onto the end of it. Prefer the optique 834 shape:
-
-> The original proposal and implementation are in #812 and #818.
-> The design rationale and alternative approaches considered are discussed in
-> #819. This work was tracked in #472 and implemented in #611. Thanks to
-> @narekhovhannisyan for contributing the Mailtrap transport in #32. That
-> limitation, raised in #16, is gone in this release. The full design is spread
-> across #27 through #33. #12 and #35 cover the rest of it.
-
-Avoid the trailing-bundle shape (logtape 197):
-
-> See the scoped configuration documentation for the full lifetime and
-> nesting rules. (#185, #188)
-> … keeping any remaining arguments under an `args` property. (#184)
-
-The difference looks small on the page and matters to the reader: “in #812 and
-#818” says which number is the proposal and which is the implementation, while
-a closing “(#185, #188)” leaves them to guess. When a change spans many
-numbers, spread them through a sentence (“landed in #869, #870, and #912”) or
-anchor each to the phrase it belongs to (“the SMTP extension requests (#42,
-#43, #44, #45, and #46), envelope overrides (#52), and streaming attachments
-(#56)”). A parenthetical cluster is acceptable when it sits mid-sentence and
-every number is anchored to something; the sentence-final dump is the thing to
-avoid. If a sentence cannot absorb the numbers, that is often a sign the
-change needs a sentence of its own rather than a citation.
-
-Shoutouts and cross-repository references follow the same rule: put them in
-the sentence (“tracked in fedify-dev/fedify#651”, “proposed the feature in
-#886 and implemented it in #956”) rather than appending them.
-
-Bulleted lists relax the rule. A bullet in “Other changes”, “Smaller
-improvements”, or “Bug fixes” is already a self-contained item, and the
-reference is metadata, so it may end with a short parenthetical bundle:
-
->  -  Fixed `Endpoints.toJsonLd()` emitting invalid `"type": "as:Endpoints"` in
->     JSON-LD output. (#576)
->  -  Public profile pages now include dedicated *Followers* and *Following*
->     pages (#491).
-
-Keep the bundle to the end of the bullet and keep it short. Reserve the
-sentence-final bundle for lists; do not use it in prose sections.
 
 
 Shoutouts
@@ -329,18 +270,9 @@ canceled, license (noun), center, catalog.
 Markdown conventions
 --------------------
 
-hongdown enforces these on the final file; write a normal draft and let it
-normalize:
+Use `writing-code-forge` for Markdown style and Hongdown formatting.
 
- -  Setext headings (`Title` over `===` or `---`).
- -  `~~~~` fences for code blocks, with a language tag.
- -  ` -  ` for list items (space, hyphen, two spaces).
- -  A thematic break renders as `   - - - - - - ...`.
- -  Link reference definitions collected at the end of their section.
- -  Long lines are left long; run hongdown with `--no-line-width`.
+ -  Label code blocks with the language.
  -  GitHub alerts (`> [!NOTE]`) are allowed for upgrade gotchas that must not be
     missed.
  -  Tables are allowed for mappings and matrices of options.
- -  File names, paths, and extensions are italic, not code: *CHANGES.md*,
-    *docs/*, *staging/index.ts*, *.eml*, *.env*. Keep backticks for code,
-    commands, and identifiers.

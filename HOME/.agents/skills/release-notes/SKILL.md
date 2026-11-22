@@ -30,9 +30,10 @@ This means the writing is downstream of the research. Go read the actual
 discussion before you write a sentence. A release note that misstates a
 default or invents a motivation is worse than no note at all.
 
-If the `writing` skill is available in this environment, load it before
-drafting prose. It carries the house rules that keep the note from reading
-like generic AI copy, and everything here assumes it.
+Load `writing-code-forge` with the skill tool before drafting; if it is not
+discoverable by name, read the sibling *writing-code-forge/SKILL.md* in the
+same skills directory. Follow it for writing style, links, review, and
+formatting.
 
 Detailed conventions recovered from the maintainer's previous release notes
 live in *references/house-style.md*. Read that file before drafting; it is the
@@ -114,13 +115,8 @@ Read the new documentation
 New features almost always ship with documentation, usually under *docs/*.
 Find the pages for the features in this release and read them. They carry the
 details the changelog omits: full option lists, defaults, runtime caveats,
-and the recommended usage pattern. The documentation is also what you link to
-from the note, so you need its public URL, not its file path.
-
-Link to the published site when the project has one (`https://upyo.org/...`,
-`https://optique.dev/...`). Grep for the existing site base URL in the repo or
-in a previous release note if you are unsure. Only fall back to a repository
-path when no site exists.
+and the recommended usage pattern. If you do not know the public docs URL,
+look for the site's base URL in the repository or a previous release note.
 
 
 Recover the project's voice
@@ -161,15 +157,6 @@ version:
     glance, and verify every example runs or at least type-checks against the
     checked-out source before you include it. See “Example code” in the
     reference.
- -  Link the documentation for a feature inline in the paragraph that
-    introduces it, not in a separate “Links” list.
- -  Work issue and PR numbers into the sentence that describes the change, as
-    bare `#123` (“The original proposal and implementation are in #812 and
-    #818.”). GitHub links them automatically because the note is posted in the
-    same repository. Do not append a bundle like “(#185, #188)” at the end of a
-    sentence or paragraph: when a change spans several numbers, spread them
-    through the sentence or anchor each to the phrase it belongs to. Use
-    `owner/repo#123` only for cross-repository references.
  -  Shout out external contributors inside the feature section they worked on,
     usually as the last sentence, e.g. “Thanks to @name for contributing this in
     #123.” For releases with several contributors, also add a dedicated
@@ -183,8 +170,6 @@ version:
     inflate the release (“thrilled to announce”, “the most significant release
     in…”, “unprecedented”) or dramatize the problem (scene-setting, metaphors,
     “zombie posts”). See the Tone section of the reference.
- -  Write file names, paths, and extensions in italics (*CHANGES.md*, *docs/*,
-    *.eml*), and keep backticks for code, commands, and identifiers.
  -  Close with the project's usual sign-off and a link to *CHANGES.md*.
 
 Write in English unless the user asks otherwise, with American spelling
@@ -196,64 +181,17 @@ Then step back and reread the draft against these questions:
  -  Would someone who has never heard of the project want to try it?
  -  Is every factual claim traceable to the changelog, a discussion, or the
     docs? Delete or fix anything that is not.
- -  Are the issue and PR numbers inside sentences, or are they piled up in
-    closing parentheses like “(#185, #188)”? The maintainer prefers the former
-    in prose; trailing bundles are fine in “Other changes” and “Bug fixes”
-    bullets.
  -  Does the tone stay plain and matter-of-fact, or has it slid into promotion
     (“thrilled to announce”) or melodrama (a dramatized problem, a grandiose
     claim about the release)?
  -  Does it read like the previous release notes for this project?
 
-If the `writing` skill is loaded, run its review process on the draft before
-presenting it.
 
-
-Citation pass
--------------
-
-Parenthetical reference bundles are easy to write by reflex and easy to miss
-while drafting, so make one dedicated pass for them after the draft is
-otherwise done. Search the note for `(#` and handle every hit:
-
- -  Inside a bullet in “Other changes”, “Smaller improvements”, or “Bug fixes”:
-    leave it alone.
- -  Anywhere in prose: rewrite the sentence so the numbers sit inside it, naming
-    what each one refers to or spreading them through the clause. A paragraph
-    that ends with “(#185, #188).” is the defect to fix.
-
-For example, instead of:
-
-> Two fixes landed together: `captureRun()` now isolates its exit exception per
-> invocation, and Windows cleanup shares a single deadline (#953, #959).
-
-write:
-
-> Two fixes landed together: `captureRun()` now isolates its exit exception per
-> invocation, in #959, and Windows cleanup shares a single deadline, in #953.
-
-
-Format and save
+Review and save
 ---------------
 
-Write the note as ordinary Markdown. Keep long lines; do not hard-wrap. Then
-format it:
-
-~~~~ bash
-hongdown --write --no-line-width RELEASE-x.y.md
-~~~~
-
-If `hongdown` is not on `PATH`, run it through mise:
-
-~~~~ bash
-mise x aqua:dahlia/hongdown -- hongdown --write --no-line-width RELEASE-x.y.md
-~~~~
-
-hongdown rewrites ATX headings as Setext headings, fenced code blocks as
-`~~~~`, bullets as ` -  `, and collects link reference definitions at the end
-of their section. Running it on a normal draft is the expected input; do not
-try to pre-format by hand. It edits the file in place, so verify the result
-with a read afterward.
+Save the note as ordinary Markdown in *RELEASE-x.y.md*. Follow the review and
+formatting steps in `writing-code-forge` before handing it over.
 
 Leave the file on disk. Do not post to GitHub Discussions unless the user
 explicitly asks; posting is a separate, deliberate action. When the note is
