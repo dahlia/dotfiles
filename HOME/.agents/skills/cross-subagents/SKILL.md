@@ -194,11 +194,13 @@ Read only documents required by the current task, not this entire list.
 
 Before **any fan-out**, run `run.py --cost-gate <num_calls> --task <category>`;
 price the intended `--route` or saved `--run-id`, not a generic auto estimate.
-Print the cost/call estimate and honor `requires_user_confirmation`. Skip
-call/cost confirmation when every planned subscription route has verified
-weekly quota of at least 25% remaining or an available free reset credit.
-This does not approve metered billing or redeem a credit; see
-[orchestration.md](references/orchestration.md) for the gate rules.
+Print the cost/call estimate. When `requires_user_confirmation` is true and
+`confirmation_timeout_seconds` is set, ask with a 30-minute default to run
+the stated plan; otherwise require express approval. Skip call/cost
+confirmation when every planned subscription route has verified weekly quota
+of at least 25% remaining or an available free reset credit. Follow
+[orchestration.md](references/orchestration.md#cost-gate-and-observability) for
+the timer, cancellation and revalidation rules.
 For 3+ concurrent agents, use one orchestrator returning a consolidated summary.
 Schedule disjoint write_sets first, single-writer for overlaps, serialize
 lockfiles/schemas, worktrees last. Read orchestration.md before that batch.

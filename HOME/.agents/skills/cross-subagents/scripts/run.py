@@ -96,6 +96,7 @@ HEARTBEAT_INTERVAL_SECONDS = 30.0
 COST_GATE_MAX_CALLS = 5
 COST_GATE_MAX_COST_INDEX = 1.5
 COST_GATE_MIN_WEEKLY_REMAINING = 25.0
+COST_GATE_REPLY_TIMEOUT_SECONDS = 30 * 60
 # A terminal finish reason that means the final assistant message is complete.
 # Anything else (`length`, `tool-calls`, `content-filter`, unknown) is truncated.
 OPENCODE_SUCCESS_FINISH = frozenset({"stop", "end_turn", "completed", "finish", "done"})
@@ -5101,15 +5102,21 @@ def evaluate_cost_gate(
             else:
                 quota_waiver = False
 
+    can_default_after_timeout = not reasons and selection_source in ("explicit_route", "saved_plan")
     if not quota_waiver:
         if effective_calls >= COST_GATE_MAX_CALLS:
             reasons.append("call_threshold")
         if total_cost_idx >= COST_GATE_MAX_COST_INDEX:
             reasons.append("cost_index_threshold")
     requires_confirmation = bool(reasons)
+    timeout_seconds = (
+        COST_GATE_REPLY_TIMEOUT_SECONDS if requires_confirmation and can_default_after_timeout else None
+    )
     gate_detail = "within auto gate"
-    if requires_confirmation:
-        gate_detail = f"CONFIRMATION REQUIRED ({', '.join(reasons)})"
+    if timeout_seconds is not None:
+        gate_detail = f"ASK WITH {timeout_seconds // 60}-MINUTE DEFAULT ({', '.join(reasons)})"
+    elif requires_confirmation:
+        gate_detail = f"EXPLICIT CONFIRMATION REQUIRED ({', '.join(reasons)})"
     elif quota_waiver:
         gate_detail += f" ({', '.join(sorted(set(exemptions.values())))})"
     est_tag = "estimated" if cost_estimated else "verified"
@@ -5136,6 +5143,7 @@ def evaluate_cost_gate(
         "fallback_allowance_index": fallback_buffer,
         "estimated_cost_index": total_cost_idx,
         "requires_user_confirmation": requires_confirmation,
+        "confirmation_timeout_seconds": timeout_seconds,
         "confirmation_reasons": reasons,
         "subscription_exemptions": exemptions,
         "requires_orchestrator_subagent": requires_orchestrator,

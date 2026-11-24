@@ -3393,6 +3393,16 @@ class TestCrossSubagents(unittest.TestCase):
         self.assertEqual(gate["selection_source"], "auto")
         self.assertIn("not a planned route", gate["estimate_scope"])
         self.assertIn("note", gate)
+        self.assertIsNone(gate["confirmation_timeout_seconds"])
+
+    def test_cost_gate_generic_subscription_has_no_timeout_default(self):
+        selected = {"route_id": "codex/openai/gpt-6.1-sol", "cost_index": 0.9, "billing_mode": "subscription"}
+        with patch.object(run, "load_selection_plan", return_value={}), patch.object(
+            run, "select_routes", return_value={"selected": selected}
+        ):
+            gate = run.evaluate_cost_gate(4)
+        self.assertEqual(gate["confirmation_reasons"], ["call_threshold", "cost_index_threshold"])
+        self.assertIsNone(gate["confirmation_timeout_seconds"])
 
     def test_cost_gate_waives_large_batch_for_current_weekly_headroom_or_free_credit(self):
         route = common.normalize_model_route("codex", "openai", "gpt-6.1-sol")
@@ -3433,6 +3443,10 @@ class TestCrossSubagents(unittest.TestCase):
                 self.assertEqual(gate["subscription_exemptions"].get(route["route_id"]), exemption)
                 if exemption is None:
                     self.assertEqual(gate["confirmation_reasons"], ["call_threshold", "cost_index_threshold"])
+                    self.assertEqual(gate["confirmation_timeout_seconds"], 1800)
+                    self.assertIn("ASK WITH 30-MINUTE DEFAULT", gate["summary"])
+                else:
+                    self.assertIsNone(gate["confirmation_timeout_seconds"])
 
     def test_cost_gate_checks_every_planned_subscription_and_does_not_waive_billing(self):
         routes = [
@@ -3461,20 +3475,27 @@ class TestCrossSubagents(unittest.TestCase):
             gate = run.evaluate_cost_gate(4, run_id="plan")
             collect.assert_called_once_with(agents=[], cache_only=True)
             self.assertTrue(gate["requires_user_confirmation"])  # Fable weekly data is missing.
+            self.assertEqual(gate["confirmation_timeout_seconds"], 1800)
             self.assertEqual(gate["subscription_exemptions"], {ids[0]: "weekly_quota"})
             state["buckets"]["claude-code:fable"] = weekly(90)
             self.assertTrue(run.evaluate_cost_gate(4, run_id="plan")["requires_user_confirmation"])
             state["buckets"]["claude-code:fable"] = weekly(75)
             self.assertFalse(run.evaluate_cost_gate(4, run_id="plan")["requires_user_confirmation"])
             plan["status"] = "partial"
-            self.assertEqual(run.evaluate_cost_gate(1, run_id="plan")["confirmation_reasons"], ["unresolved_planned_route"])
+            gate = run.evaluate_cost_gate(1, run_id="plan")
+            self.assertEqual(gate["confirmation_reasons"], ["unresolved_planned_route"])
+            self.assertIsNone(gate["confirmation_timeout_seconds"])
             plan["status"] = "ok"
             routes[1]["billing_mode"] = "free"
             self.assertFalse(run.evaluate_cost_gate(4, run_id="plan")["requires_user_confirmation"])
             routes[1]["billing_mode"] = "api_metered"
-            self.assertEqual(run.evaluate_cost_gate(1, run_id="plan")["confirmation_reasons"], ["metered_billing"])
+            gate = run.evaluate_cost_gate(1, run_id="plan")
+            self.assertEqual(gate["confirmation_reasons"], ["metered_billing"])
+            self.assertIsNone(gate["confirmation_timeout_seconds"])
             routes[1]["billing_mode"] = "unknown"
-            self.assertEqual(run.evaluate_cost_gate(1, run_id="plan")["confirmation_reasons"], ["unknown_billing"])
+            gate = run.evaluate_cost_gate(1, run_id="plan")
+            self.assertEqual(gate["confirmation_reasons"], ["unknown_billing"])
+            self.assertIsNone(gate["confirmation_timeout_seconds"])
             del index[ids[1].lower()]
             self.assertEqual(run.evaluate_cost_gate(1, run_id="plan")["confirmation_reasons"], ["unresolved_planned_route"])
 
