@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -34,6 +35,74 @@ class GuardTests(unittest.TestCase):
 
     def git(self, *args):
         return subprocess.check_output(['git', '-C', str(self.root), *args])
+
+    def copy_attempt(self, flag, *args):
+        return subprocess.run([sys.executable, str(SCRIPTS / 'review-guard.py'),
+            '--root', str(self.root), '--prefix', str(self.base / 'copy-attempt'),
+            flag, *map(str, args)], capture_output=True)
+
+    def test_copy_preserves_review_inputs_and_only_copy_mutates(self):
+        (self.root / 'source').write_text('staged')
+        self.git('add', 'source')
+        (self.root / 'source').write_text('unstaged')
+        copy = self.base / 'copy'
+        result = self.copy_attempt('--prepare-copy', copy)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for args in [('status', '--porcelain=v1'), ('diff', '--cached'), ('diff',), ('rev-parse', 'HEAD')]:
+            self.assertEqual(subprocess.check_output(['git', '-C', str(copy), *args]), self.git(*args))
+        self.assertEqual((copy / 'untracked').read_text(), 'untracked input')
+        self.assertEqual((copy / 'ignored').read_text(), 'private ignored input')
+        self.assertEqual((copy / 'link').resolve(), copy / 'source')
+        self.assertFalse(os.path.samefile(copy / 'source', self.root / 'source'))
+        result = subprocess.run([sys.executable, str(SCRIPTS / 'review-guard.py'),
+            '--root', str(copy), '--prefix', str(self.base / 'copy-attempt'),
+            '--stdin', str(self.prompt), '--', sys.executable, '-c',
+            'from pathlib import Path; Path("source").write_text("changed"); '
+            'print(\'{"status":"ok","cleanup_verified":true}\')'], capture_output=True)
+        self.assertEqual(result.returncode, 40, result.stderr)
+        self.assertEqual((self.base / 'copy-attempt.exit').read_text().strip(), '0')
+        self.assertEqual(json.loads((self.base / 'copy-attempt.guard.json').read_text())['changes'], ['tree:source'])
+        result = self.copy_attempt('--verify-origin')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / 'source').read_text(), 'unstaged')
+
+    def test_origin_guard_reports_concurrent_edit(self):
+        result = self.copy_attempt('--prepare-copy', self.base / 'copy')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (self.root / 'untracked').write_text('edited by the user')
+        result = self.copy_attempt('--verify-origin')
+        self.assertEqual(result.returncode, 40, result.stderr)
+        changes = json.loads((self.base / 'copy-attempt.origin.guard.json').read_text())['changes']
+        self.assertEqual(changes, ['tree:untracked'])
+
+    def test_copy_rejects_linked_worktree(self):
+        linked = self.base / 'linked'
+        self.git('worktree', 'add', '--detach', '--quiet', str(linked))
+        self.root = linked
+        result = self.copy_attempt('--prepare-copy', self.base / 'copy')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(b'linked Git directory', result.stderr)
+
+    @unittest.skipUnless(shutil.which('bwrap'), 'bubblewrap not installed')
+    def test_review_mount_protects_origin_but_copy_is_disposable(self):
+        copy = self.base / 'copy'
+        result = self.copy_attempt('--prepare-copy', copy)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bwrap = ['bwrap', '--bind', '/', '/', '--ro-bind', str(self.root), str(self.root),
+                 '--dev', '/dev', '--proc', '/proc', '--unshare-pid', '--die-with-parent', '--']
+        probe = subprocess.run([*bwrap, 'true'], capture_output=True)
+        if probe.returncode != 0:
+            self.skipTest(probe.stderr.decode())
+        result = subprocess.run([*bwrap, sys.executable, '-c',
+            'import errno, sys; from pathlib import Path\n'
+            'try: Path(sys.argv[1]).write_text("must not persist")\n'
+            'except OSError as e: assert e.errno == errno.EROFS, e\n'
+            'else: raise AssertionError("origin was writable")\n'
+            'Path(sys.argv[2]).write_text("disposable")',
+            str(self.root / 'source'), str(copy / 'source')], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / 'source').read_bytes(), b'original\x00bytes')
+        self.assertEqual((copy / 'source').read_text(), 'disposable')
 
     def run_guard(self, code, allowed=None):
         self.prefix = self.base / 'attempt'

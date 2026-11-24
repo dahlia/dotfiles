@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import stat
 import subprocess
 import sys
@@ -250,6 +251,58 @@ def compare(before, after):
     return changes
 
 
+def tracked_paths(root):
+    return {os.fsdecode(p) for p in git(root, 'ls-files', '-z').split(b'\0') if p}
+
+
+def prepare_copy(root, copy):
+    """Copy a self-contained checkout without Git or file storage sharing."""
+    if copy.is_relative_to(root) or root.is_relative_to(copy) or os.path.lexists(copy):
+        raise ValueError('review copy must be a new directory outside the original')
+    local_env = git(root, 'rev-parse', '--local-env-vars').decode().splitlines()
+    if any(key in os.environ for key in local_env):
+        raise ValueError('Git environment overrides are not supported for review copies')
+
+    git_dirs = set()
+    for repo in [root, *(root / rel for rel in discover_nested(root))]:
+        git_dir = repo / '.git'
+        if not git_dir.is_dir() or git_dir.is_symlink():
+            raise ValueError(f'cannot copy a linked Git directory: {git_dir}')
+        keys = git(repo, 'config', '--local', '--no-includes', '--name-only', '-z', '--list').split(b'\0')
+        if any(k == b'core.worktree' or k.startswith((b'include.', b'includeif.')) for k in keys):
+            raise ValueError(f'cannot copy externally configured Git directory: {git_dir}')
+        for dirpath, dirs, files in os.walk(git_dir):
+            directory = Path(dirpath)
+            if directory == git_dir and 'worktrees' in dirs:
+                dirs.remove('worktrees')  # registrations for other checkouts
+            for name in dirs + files:
+                path = directory / name
+                if path.is_symlink() or path.relative_to(git_dir).as_posix() in {
+                    'commondir', 'objects/info/alternates', 'objects/info/http-alternates',
+                }:
+                    raise ValueError(f'cannot copy shared Git storage: {path}')
+        git_dirs.add(git_dir)
+
+    tracked = tracked_paths(root)
+    # Compare the entire source, not only the paths the reviewer will guard:
+    # ignored files can still be inputs, and the copy must see untracked files.
+    before = snapshot(root, [], tracked)[0]
+    shutil.copytree(root, copy, symlinks=True, ignore=lambda directory, names:
+                    {'worktrees'} if Path(directory) in git_dirs else set())
+    copied = snapshot(copy, [], tracked)[0]
+    if compare(before, snapshot(root, [], tracked)[0]):
+        raise ValueError('original changed during review copy preparation; preserve artifacts')
+    if compare(before, copied):
+        raise ValueError('review copy does not match the original inputs')
+    for rel, entry in before['tree'].items():
+        if entry[0] == 'link':
+            target = (root / rel).resolve()
+            expected = copy / target.relative_to(root) if target.is_relative_to(root) else target
+            if (copy / rel).resolve() != expected:
+                raise ValueError(f'symlink changes target in review copy: {rel}')
+    return {'root': str(root), 'copy': str(copy), 'tracked': sorted(tracked), 'before': before}
+
+
 def native_result(handoff, receipt):
     """Validate coordinator-supplied host evidence, never invent CLI telemetry."""
     error = None
@@ -292,6 +345,8 @@ def main():
     native = parser.add_mutually_exclusive_group()
     native.add_argument('--native-begin', action='store_true', help='snapshot before host delegation')
     native.add_argument('--native-finish', metavar='RECEIPT', help='verify after host completion')
+    native.add_argument('--prepare-copy', metavar='COPY', help='copy and record original inputs')
+    native.add_argument('--verify-origin', action='store_true', help='verify original after a copy attempt')
     parser.add_argument('--agent', help='official host agent name for native begin')
     parser.add_argument('--model', help='exact requested native model for native begin')
     parser.add_argument('command', nargs=argparse.REMAINDER)
@@ -304,11 +359,12 @@ def main():
         raise ValueError('artifacts must live outside the repository')
     prefix.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
-    if not command and not (args.native_begin or args.native_finish):
+    handoff_mode = args.native_begin or args.native_finish or args.prepare_copy or args.verify_origin
+    if not command and not handoff_mode:
         raise ValueError('missing reviewer command')
-    if command and (args.native_begin or args.native_finish):
-        raise ValueError('native handoff does not take a reviewer command')
-    if not args.native_finish and not args.stdin:
+    if command and handoff_mode:
+        raise ValueError('handoff does not take a reviewer command')
+    if (command or args.native_begin) and not args.stdin:
         raise ValueError('--stdin is required before execution')
     if args.native_begin and (not args.agent or not args.model):
         raise ValueError('native begin requires --agent and --model')
@@ -321,6 +377,25 @@ def main():
         with path.open('x', encoding='utf-8') as f:
             os.chmod(path, 0o600)
             json.dump(data, f, indent=2, ensure_ascii=True)
+    if args.prepare_copy:
+        copy = Path(os.path.abspath(args.prepare_copy))
+        if copy.parent != prefix.parent or copy.parent != copy.parent.resolve():
+            raise ValueError('review copy must be a sibling of the guard prefix')
+        if Path(str(prefix) + '.origin.json').exists():
+            raise ValueError('prefix already used; choose a fresh attempt prefix')
+        save('.origin.json', prepare_copy(root, copy))
+        return 0
+    if args.verify_origin:
+        origin = json.loads(Path(str(prefix) + '.origin.json').read_text())
+        if origin['root'] != str(root):
+            raise ValueError('origin snapshot belongs to a different repository')
+        after = snapshot(root, [], set(origin['tracked']))[0]
+        changes = compare(origin['before'], after)
+        status = 'mutated' if changes else 'unchanged'
+        save('.origin.guard.json', {'status': status, 'changes': changes})
+        if changes:
+            print('ORIGINAL REPOSITORY CHANGED: ' + str(prefix) + '.origin.guard.json', file=sys.stderr)
+        return 40 if changes else 0
     if args.native_finish:
         handoff = json.loads(Path(str(prefix) + '.handoff.json').read_text())
         if handoff['root'] != str(root):
@@ -342,7 +417,7 @@ def main():
         release_artifacts(prefix)
         print(json.dumps(result))
         return code
-    tracked = set(os.fsdecode(p) for p in git(root, 'ls-files', '-z').split(b'\0') if p)
+    tracked = tracked_paths(root)
     before, git_paths = snapshot(root, allowed, tracked)
     save('.before.json', before)
     # A private archive contains all protected files, including ignored files.

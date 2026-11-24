@@ -55,9 +55,9 @@ export REVIEW_OUTPUT_PATHS='[]'           # e.g. '["node_modules/.cache","dist",
 ~~~~
 
 If the cross-subagents cache (`$CROSS_SUBAGENTS_CACHE_DIR`, default
-`$XDG_CACHE_HOME/cross-subagents`) resolves inside the repository, add its
-relative path to `REVIEW_OUTPUT_PATHS`; otherwise `run.py`'s own artifacts look
-like reviewer writes to the guard.
+`$XDG_CACHE_HOME/cross-subagents`) resolves inside the repository, export
+`CROSS_SUBAGENTS_CACHE_DIR="$WORK/cross-cache"` before planning or running
+reviewers. Do not exempt runner writes in the original repository.
 
 Every file this skill generates lives in `$WORK`, never in the repository. A
 prompt or a `review.json` written to the working tree shows up as an untracked
@@ -244,10 +244,19 @@ reviewer: start its rounds from round 1, not by resuming the failed session.
 Step 3: Run the steps
 ---------------------
 
-Each round uses the selected native host reviewer or a `cross-subagents` CLI
-invocation, protected by this skill's input guard. The guard backs up the repository before the reviewer
-starts and compares it afterwards; `run.py` supplies route selection, CLI
-session handling, model-substitution detection, and the result contract.
+Run each attempt against a fresh, private copy under `$WORK`. The coordinator
+alone works in the original repository. The copy preserves the working tree
+(including untracked inputs), staged contents, HEAD and local Git history.
+`review-guard.py` checks the copy and the original separately.
+
+The CLI example uses Linux `bwrap` to mount the original read-only for the
+reviewer and its child processes. This protects against ordinary writes to the
+original, not effects on external services or unrelated paths. Keep the
+runner's own read-only settings. Use a native host route only if the host can
+enforce equivalent protection for every tool and descendant; a different cwd
+or prompt instruction alone does not qualify. Otherwise use the CLI for the
+exact route. See [unsupported checkouts and hosts](references/review-evidence.md#unsupported-checkouts-and-hosts)
+if the copy or protected launch cannot be prepared.
 
 Do **not** pass `run.py --guard` here. `review-guard.py` is the stronger guard:
 it archives protected files, tracks nested repositories and Git metadata, and
@@ -278,32 +287,40 @@ ATTEMPT=1
 STEP_ROUTE=$(jq -r '.selected.route_id' "$WORK/step${STEP}.json")
 # No route in the file means the step is unfilled: skip it and report why.
 PREFIX="$WORK/step${STEP}-r${ROUND}-a${ATTEMPT}"
-PROMPT="$WORK/step${STEP}-r${ROUND}-prompt.txt"
+PROMPT="$PREFIX.prompt.txt"
+COPY="$PREFIX.repo"
 
 TASK_ID="step${STEP}-r${ROUND}-a${ATTEMPT}"
-# For a new reviewer leave RESUME_FROM empty. For a follow-up use the
-# latest usable task ID; for a timeout retry use the timed-out task ID.
-SESSION_ARGS=(--keep-session)
-if [ -n "${RESUME_FROM:-}" ]; then SESSION_ARGS=(--resume-task "$RESUME_FROM"); fi
 
-python3 "$GUARD" --root "$REPO_ROOT" \
-  --prefix "$PREFIX" --stdin "$PROMPT" -- \
-  python3 "$CROSS/scripts/run.py" \
-    --run-id "$RUN_ID" \
-    --task-id "$TASK_ID" \
-    --route "$STEP_ROUTE" \
-    --task code_review \
-    --sandbox read-only \
-    --allow-shell \
-    --isolate \
-    --cwd "$REPO_ROOT" \
-    --no-fallback \
-    --timeout 900 \
-    --prompt-file "$PROMPT" \
-    "${SESSION_ARGS[@]}"
+if python3 "$GUARD" --root "$REPO_ROOT" --prefix "$PREFIX" --prepare-copy "$COPY"; then
+  GUARDED_EXIT=0
+  python3 "$GUARD" --root "$COPY" \
+    --prefix "$PREFIX" --stdin "$PROMPT" -- \
+    bwrap --bind / / --ro-bind "$REPO_ROOT" "$REPO_ROOT" \
+      --ro-bind "$PREFIX.origin.json" "$PREFIX.origin.json" \
+      --dev /dev --proc /proc --unshare-pid --die-with-parent -- \
+    python3 "$CROSS/scripts/run.py" \
+      --run-id "$RUN_ID" \
+      --task-id "$TASK_ID" \
+      --route "$STEP_ROUTE" \
+      --task code_review \
+      --sandbox read-only \
+      --allow-shell \
+      --isolate \
+      --cwd "$COPY" \
+      --no-fallback \
+      --timeout 900 \
+      --prompt-file "$PROMPT" || GUARDED_EXIT=$?
+
+  ORIGIN_EXIT=0
+  python3 "$GUARD" --root "$REPO_ROOT" --prefix "$PREFIX" --verify-origin ||
+    ORIGIN_EXIT=$?
+fi
 ~~~~
 
-If `$WORK/step${STEP}.json` is missing or `STEP_ROUTE` is empty or `null`, skip
+Check `bwrap` and its mount permissions before attempting the CLI launch.
+A confirmed pre-launch failure is unavailable, not uncertain reviewer
+termination. If `$WORK/step${STEP}.json` is missing or `STEP_ROUTE` is empty or `null`, skip
 the step and report it unfilled; never invoke `run.py` with an empty route.
 
 Read the guard result and the task metadata:
@@ -311,6 +328,7 @@ Read the guard result and the task metadata:
 ~~~~ bash
 cat "$PREFIX.exit"
 jq -r '.status, .changes' "$PREFIX.guard.json"
+jq -r '.status, .changes' "$PREFIX.origin.guard.json"
 jq -r '.status, .error_class, .cleanup_verified, .official_agent,
        .official_model_id, .model_verified, (.observed_model // "-"),
        (.denials_observed // .permission_denials // [] | length),
@@ -325,7 +343,8 @@ must be fresh: every retry gets `-a2`, `-a3`, and so on. Never reuse a prefix.
 ### Native host reviewers
 
 When `cross-subagents` selects an exact model available through the host's
-native delegation tools, follow its native preference and repository policy.
+native delegation tools and the host enforces the protection above, follow
+its native preference and repository policy.
 Use the two-phase guard below to span host tool calls without a CLI or FIFO
 bridge. The coordinator must remain idle with respect to protected inputs
 until the host reviewer has finished.
@@ -334,7 +353,9 @@ Before spawning the reviewer, prepare the prompt and a fresh `PREFIX`, then
 save the guard's readiness output outside the repository:
 
 ~~~~ bash
-python3 "$GUARD" --root "$REPO_ROOT" --prefix "$PREFIX" \
+python3 "$GUARD" --root "$REPO_ROOT" --prefix "$PREFIX" --prepare-copy "$COPY"
+# Only on successful preparation:
+python3 "$GUARD" --root "$COPY" --prefix "$PREFIX" \
   --stdin "$PROMPT" --native-begin --agent Codex --model "$MODEL" \
   > "$PREFIX.ready.json"
 ~~~~
@@ -342,7 +363,7 @@ python3 "$GUARD" --root "$REPO_ROOT" --prefix "$PREFIX" \
 Set `MODEL` to the exact selected model ID. A successful begin creates the
 backup, before-snapshot and *handoff.json*. It does not complete a round.
 Only then use the host's native spawn tool, giving the reviewer the same
-prompt, repository, read-only restrictions and allowed output paths. Retain
+prompt, copy (not the original), read-only restrictions and output paths. Retain
 the returned host task ID. Wait for that task's terminal completion event;
 a spawn acknowledgement, partial response, timeout or interrupted turn is
 insufficient. Complete or stop all of that reviewer's delegated work before
@@ -350,7 +371,7 @@ finishing the guard. If completion is uncertain, preserve artifacts and report
 the round unknown.
 
 Save the final answer in an absolute result path outside the repository. Write
-*receipt.json* from the host evidence, using this attempt's `handoff_id` from
+`$PREFIX.host-receipt.json` from the host evidence, using this attempt's `handoff_id` from
 *handoff.json*:
 
 ~~~~ json
@@ -375,8 +396,10 @@ only from explicit host model evidence. Without that evidence, keep `null` and
 differs from the requested ID invalidates the attempt.
 
 ~~~~ bash
-python3 "$GUARD" --root "$REPO_ROOT" --prefix "$PREFIX" \
-  --native-finish "$WORK/receipt.json"
+python3 "$GUARD" --root "$COPY" --prefix "$PREFIX" \
+  --native-finish "$PREFIX.host-receipt.json"
+GUARDED_EXIT=$?
+python3 "$GUARD" --root "$REPO_ROOT" --prefix "$PREFIX" --verify-origin
 ~~~~
 
 Finish uses the original exclusions and tracked paths, compares protected
@@ -388,48 +411,43 @@ the native rule below. After classification, `run.py record-native` with the
 real `--result-file` may register it in the call tree. That command alone is
 an attribution record, not guard, model or completion verification.
 
-For a native re-review, begin a fresh guard attempt before sending the follow-up
-to the same host reviewer. Wait for that follow-up's terminal event and save its
-answer and receipt before finishing. Do not use an earlier completion event or
-answer to close a later round.
+Use a fresh host task for a re-review, just as for a CLI re-review. Never use
+an earlier completion event or answer to close another attempt.
 
 ### Classify the round
 
-A round is usable only when **all** of these hold:
+First require verified termination for a launched reviewer and an
+`"unchanged"` origin guard. If the original changed or its guard could not
+verify it, or a launched reviewer might still be active, stop the entire
+loop without further edits or commits. Show changed paths, preserve `$WORK`,
+and never reset, clean or extract an archive over the user's work.
 
- -  `$PREFIX.exit` is the CLI reviewer command's exit code, not 40 or 2;
-    for native execution it is the successful finish code `0`;
- -  `$PREFIX.guard.json` has `"status": "unchanged"`;
- -  `$PREFIX.stdout` parses as JSON with `"status": "ok"`;
- -  For CLI execution, `cleanup_verified` is `true`. For native execution,
-    `native_host_execution` and `completion_verified` are `true`, with a retained
-    matching receipt identifying the completed host task and terminal event;
- -  `denials_observed` is empty (older adapter output names the same list
-    `permission_denials`; accept either, and read the count printed above);
- -  `result_file` exists, its trimmed text is non-empty, and the reviewer did
-    not report incomplete required coverage. Triage any verified findings
-    from an incomplete answer, but do not count the round as clean.
+Before counting coverage, require successful reviewer execution, valid JSON
+metadata with `status: ok`, no model substitution, no denials and a nonempty
+result with complete required coverage. CLI execution must report
+`cleanup_verified: true`; for native execution require
+`native_host_execution: true`, `completion_verified: true` and the matching
+receipt. Negative or missing completion evidence does not prove termination.
+Triage verified findings from blocked or incomplete answers without granting
+clean coverage.
 
-`guard.json` status `mutated` (exit 40) or a guard failure (exit 2) stops the
-whole loop. Preserve `$WORK`, show the changed paths, and never run
-`reset --hard`, `clean`, or automatic archive extraction over the user's work.
-
-For CLI execution, `cleanup_verified: false` also stops the loop. A surviving
-child could write after the guard comparison, so the round did not review a stable tree. Treat a
-`null` CLI value as unknown, never as clean. Native rounds use host completion
-evidence instead; missing completion evidence is unknown.
+An unchanged copy uses the usual clean/triage rules. A **mutated copy** does
+not invalidate the whole answer: follow
+[evidence and confirmation](references/review-evidence.md#evidence-and-confirmation).
+Require the same execution and coverage checks on both paths. For CLI the
+saved `.exit` is the command exit; the wrapper can return `40` independently.
+For native, `40` can accompany successful reviewer metadata. A failed **copy**
+guard with confirmed termination and verified original is unknown for that
+step, not a whole-loop stop. Keep the artifacts in either case.
 
 Classify failures by `error_class` before retrying. `quota`, `auth` or
 `model_unavailable` (and `status: quota`) means re-plan the step or report it
 unavailable. For a timeout:
 
-1. If the guard is unchanged, cleanup is verified and `resumable: true`, retry
-   **once** with `--resume-task` pointing to the timed-out task, not to round
-   one or the last successful task. Keep the exact route and repository scope
-   and repeat all sandbox/tool flags. Use the [timeout continuation
-   prompt](references/review-prompts.md#timeout-continuation), a new task ID
-   and a fresh guard prefix. A new prefix does not require a new session.
-2. If the session cannot be resumed, or the continuation also times out,
+1. If termination and origin checks permit it, retry **once** on the same
+   route and scope with a fresh copy, task ID, session and prefix. Do not
+   resume a session that remembers paths in a previous copy.
+2. If that retry also times out,
    re-plan once for this step under its role constraints. Exclude the timed-out
    route and the other frontier reviewer's vendor (planned and actual); a
    timeout need not rule out the whole failed vendor. Honor explicit pins.
@@ -438,12 +456,8 @@ unavailable. For a timeout:
    If no eligible replacement exists or it also cannot finish, report the
    step unknown. An advisory step 1 timeout never blocks steps 2 and 3.
 
-For native execution resume only through a supported follow-up to the same
-host task after verified termination and an unchanged guard; otherwise report
-unknown, preserving the guard artifacts. Never assume the original native
-reviewer has stopped. `transient` or `failed` still gets at most one retry
-when cleanup and the guard permit it; reuse a known-good earlier session for
-a later round, and use a fresh task ID and guard prefix.
+`transient` or `failed` gets at most one retry when termination and the origin
+guard permit it. Use a fresh copy, task ID, session and prefix.
 
 A non-empty `denials_observed` (or the same list under its older
 `permission_denials` name) is **blocked**, never clean: the reviewer was
@@ -488,8 +502,8 @@ empty `result_file`, or findings you have not triaged.
 Early exit is scoped to the step that earned it. It ends that step's rounds;
 it never skips a later step. A step 2 that closes clean on round three still
 gets step 3's independent frontier read, and step 3 runs whether step 2 ended
-clean, at its cap, or with findings applied. Only an unfilled route or a hard
-failure (above) removes a step — a clean earlier pass never does.
+clean, unknown, at its cap, or with findings applied. Only unavailable
+coverage or a hard stop removes a later step.
 
 Step 1 is advisory. If it ends clean, `failed`, `unavailable` or at its cap, go
 on to step 2; never let a cheap pass shorten or replace steps 2 and 3. If step 1
@@ -499,16 +513,14 @@ reviewers read the improved code.
 ### Between rounds
 
 For each round: triage every finding (below), apply the in-scope fixes, then —
-**in post-commit mode, commit the batch before resuming** (Step 4 rules).
-Unless the round ended the step under *Stop early*, resuming without committing
+**in post-commit mode, commit the batch before re-reviewing** (Step 4 rules).
+Unless the round ended the step under *Stop early*, re-reviewing without committing
 means the reviewer re-reviews a range that still ends at the pre-fix commit; it
 would grade code you already changed and report a stale verdict as fresh.
 
 Then write the re-review prompt, naming the previous findings and their
-dispositions, and resume the latest usable task for that reviewer (including
-a successful timeout continuation). Do not resume on
-a different model: a different model is a different reviewer and starts at
-round 1.
+dispositions, and launch a fresh attempt on the same route with a new copy.
+A different model is a different reviewer and starts at round 1.
 
 ### When a step cannot run
 
@@ -609,8 +621,8 @@ Close with a short summary the user can act on:
 
  -  The planned three routes, the actual observed model for each step, and how
     many rounds each took.
- -  Each step's outcome: clean, findings applied, failed, unavailable, or
-    blocked. For an unavailable step, give the `error_class` and the route that
+ -  Each step's outcome: clean, findings applied, unknown, failed, unavailable,
+    or blocked. For an unavailable step, give the `error_class` and the route that
     failed. For an unfilled plan step, give the reason. If a failed round left a
     retained session (`session_cleaned_up: false`), include its `session_id`.
  -  What you fixed.
@@ -624,7 +636,9 @@ Close with a short summary the user can act on:
     reviewer pass.
 
 Report execution modes, allowed output paths, retries and any validation that
-could not run. If any attempt failed, was blocked, mutated protected inputs or
+could not run. For copy mutations, list what changed, which findings or checks
+were confirmed on the baseline, and any remaining coverage gaps. If any
+attempt failed, was blocked, mutated protected inputs or
 lacked verification, preserve `$WORK` and report its path, even when a later
 retry succeeded. Keep guard reports and stderr so failures can be diagnosed
 without rerunning models. Only attempts needing recovery retain their large
@@ -675,9 +689,9 @@ Key rules
     marginal risk.
  -  **Keep every generated file in `$WORK`.** Prompts and JSON output written
     into the repository dirty a clean tree and can be swept into the commit.
- -  **Guard every attempt.** A fresh `review-guard.py` prefix per round and
-    retry; persistent changes invalidate the review. A snapshot detects
-    changes; it does not prevent external effects.
+ -  **Guard both trees.** Original safety controls whether the loop continues;
+    copy mutation controls which evidence needs checking. A snapshot detects
+    persistent changes; it does not prevent external effects.
  -  **Stage explicitly before committing.** The `commit` skill commits only what
     is already staged, and pre-commit reviews cover unstaged and untracked
     files.

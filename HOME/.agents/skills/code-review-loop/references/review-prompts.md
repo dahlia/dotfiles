@@ -22,6 +22,14 @@ The scope block is not decoration. Telling the reviewer what the change set is
 for suppresses most out-of-scope findings at the source, which is far cheaper
 than triaging them away afterwards.
 
+For every attempt prepend: "Review only the checkout provided for this attempt.
+Do not inspect or write to another checkout. If anything rewrites a protected
+input, stop using the changed input. In the final answer state what changed,
+which evidence was obtained on the original inputs, and what still needs
+checking. Do not use the clean sentinel to hide a write or a coverage gap."
+For small test scripts or fixtures, use scratch space outside the checkout
+and keep the code under test unchanged.
+
 Contents:
 
  -  [Fast filter — initial review](#fast-filter--initial-review)
@@ -96,7 +104,7 @@ NO ACTIONABLE FINDINGS
 Fast filter — re-review
 -----------------------
 
-Resume the step 1 session, so the reviewer remembers its own findings.
+Start a fresh session and supply the previous findings and dispositions.
 
 ~~~~
 I have applied the valid fixes from your review. Findings I did not act on:
@@ -131,22 +139,6 @@ NO ACTIONABLE FINDINGS
 ~~~~
 
 
-Timeout continuation
---------------------
-
-Use this only in the retained session, for the same unchanged review scope.
-
-~~~~
-The previous turn timed out. Continue from your existing inspection; do not
-repeat reads or checks you already completed. Keep the review scope and
-read-only rules unchanged.
-
-Prioritize the most important unreviewed changed hunks and finalize promptly.
-For the fast filter, do not start new builds or broad checks. Collect verified
-findings from both turns in one final answer. If required coverage remains
-incomplete, say exactly what was not reviewed; do not use the clean sentinel.
-~~~~
-
 Frontier — initial review
 -------------------------
 
@@ -165,10 +157,8 @@ focused tests, builds and type checks using existing dependencies. Temporary
 files and runtime caches are allowed; repository outputs must stay in these
 declared disposable paths: [OUTPUT PATHS]. Do not install dependencies, update
 snapshots, regenerate protected source or start/change external services.
-Your shell may not be sandboxed. The author backs up and checks protected
-inputs, but that does not prevent writes outside the repository. Report any
-necessary read or check that could not run; do not claim a complete clean
-review while required evidence is missing.
+Report any necessary read or check that could not run; do not claim a
+complete clean review while required evidence is missing.
 
 Review scope: [RANGE]
 
@@ -220,8 +210,8 @@ If nothing meets the bar, respond with exactly: NO ACTIONABLE FINDINGS
 Frontier — re-review
 --------------------
 
-Resume the same step session. The reviewer still has its own previous findings
-in context, so the prompt can stay short and repeat only the decisions.
+Start a fresh session on the same route. Include the previous findings and
+decisions so the reviewer does not need the earlier session.
 
 ~~~~
 I have applied the valid fixes from your review. Findings I did not act on:
