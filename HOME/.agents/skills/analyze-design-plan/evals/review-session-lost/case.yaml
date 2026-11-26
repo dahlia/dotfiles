@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: review-session-lost
+expected_outcome: |
+  Leave the first stage unapproved, do not run downstream stages or count a replacement session, and propose a panel restart only with user authorization.
