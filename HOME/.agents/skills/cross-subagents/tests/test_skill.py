@@ -2002,6 +2002,69 @@ class TestCrossSubagents(unittest.TestCase):
         self.assertEqual(len(res["denials_observed"]), 1)
         self.assertIn("denied", res["denials_observed"][0])
 
+    def test_codex_reports_nested_sandbox_denial_without_tool_events(self):
+        diagnostic = "sandbox-exec: sandbox_apply: Operation not permitted"
+        blocked = (
+            f"Review blocked: all read-only shell calls failed with `{diagnostic}`.\n\n"
+            "No source evidence was obtained."
+        )
+        reported = [f"Codex self-reported tool denial (no structured denial): {diagnostic}"]
+        cases = (
+            ("recorded event shape", blocked, True, [], reported),
+            ("missing result file", blocked, False, [], reported),
+            (
+                "structured denial takes precedence",
+                blocked,
+                True,
+                [{"type": "command_execution", "command": "git status", "status": "denied"}],
+                ["git status: denied (status=denied)"],
+            ),
+            ("quoted example", f"> {blocked}", True, [], []),
+            ("fenced example", f"```\n{blocked}\n```", True, [], []),
+            ("mention only", f"Checked for `{diagnostic}`; no tools were blocked.", True, [], []),
+            ("history only", "Final answer.", True, [{"type": "agent_message", "text": blocked}], []),
+            (
+                "command output only",
+                "Final answer.",
+                True,
+                [{"type": "command_execution", "exit_code": 1, "aggregated_output": diagnostic}],
+                [],
+            ),
+        )
+        for label, answer, write_result, earlier_items, expected in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                attempt_dir = Path(tmp)
+                events = [
+                    {"type": "thread.started", "thread_id": "thread-nested-sandbox"},
+                    *({"type": "item.completed", "item": item} for item in earlier_items),
+                    {"type": "item.completed", "item": {"type": "agent_message", "text": answer}},
+                    {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},
+                ]
+
+                def mock_run(cmd, prompt="", *args, **kwargs):
+                    if write_result:
+                        Path(cmd[cmd.index("-o") + 1]).write_text(answer + "\n", encoding="utf-8")
+                    return 0, "\n".join(json.dumps(event) for event in events), "", False, True
+
+                with patch.object(run, "run_process_with_timeout", side_effect=mock_run):
+                    res = run.invoke_codex(
+                        binary="echo",
+                        route={"route_id": "codex/openai/gpt-6.1-sol", "model_id": "gpt-6.1-sol"},
+                        prompt_text="dummy",
+                        attempt_dir=attempt_dir,
+                        resume_session_id=None,
+                        effort=None,
+                        keep_session=False,
+                        sandbox_mode="read-only",
+                        cwd=None,
+                        timeout_sec=5,
+                        child_env={},
+                    )
+                self.assertEqual(res["status"], "ok")
+                self.assertIsNone(res["error_class"])
+                self.assertEqual(res["denials_observed"], expected)
+                self.assertEqual((attempt_dir / "result.md").read_text(encoding="utf-8").strip(), answer)
+
     def test_codex_failure_names_the_denial_instead_of_empty_result(self):
         from run import invoke_codex
 

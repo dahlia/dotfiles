@@ -43,8 +43,12 @@ still be `ok` despite a refused tool call. A short answer warrants inspection;
 confirm required checks actually ran, and disclose refusals that affect the
 conclusion. A retry that succeeded does not erase earlier denials.
 
-Only explicit tool refusals, flags or runner errors naming OS/sandbox denial
-count. Ordinary command output is not evidence: tests printing “permission”,
+Structured denials come from explicit tool refusals, flags or runner errors
+naming OS/sandbox denial. If Codex has no structured denial and its completed
+answer starts by explicitly reporting shell calls failed with
+`sandbox-exec: sandbox_apply: Operation not permitted`, the receipt adds a
+single advisory labeled as a Codex self-report, not a verified tool event.
+Ordinary command output is not evidence: tests printing “permission”,
 `429` or “quota exceeded” must not become permission/quota failures.
 `warnings` similarly records recovered CLI errors without changing status.
 Failure classification uses structured CLI output, not the agent's answer or

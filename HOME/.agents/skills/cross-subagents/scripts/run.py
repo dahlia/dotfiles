@@ -19,7 +19,7 @@ Features:
     `tools_enforced`.
   - Offers an opt-in protected-input guard (`--guard`) that hashes the working tree and Git
     state before the attempt and fails the task when they changed.
-  - Treats structured tool denials as warnings (`denials_observed`) rather than failing a
+  - Treats tool denials as advisory (`denials_observed`) rather than failing a
     completed turn, and always exposes the attempt's own answer text through
     `attempt_result_file` in `meta.json`.
 """
@@ -232,6 +232,22 @@ def _denial_error(denials: list[Any]) -> str | None:
     if not cleaned:
         return None
     return ("Tool call(s) denied: " + "; ".join(cleaned))[:500]
+
+
+CODEX_NESTED_SANDBOX_ERROR = "sandbox-exec: sandbox_apply: Operation not permitted"
+CODEX_NESTED_SANDBOX_REPORT = re.compile(
+    r"(?:Review blocked: )?(?:All )?(?:read-only )?shell (?:calls?|commands?) failed with "
+    r"(`?)" + re.escape(CODEX_NESTED_SANDBOX_ERROR) + r"\1\.?",
+    re.IGNORECASE,
+)
+
+
+def _codex_self_reported_denial(final_text: str) -> str | None:
+    """Recognize an explicit leading report, not examples or generic permission prose."""
+    first_line = final_text.partition("\n")[0].strip()
+    if CODEX_NESTED_SANDBOX_REPORT.fullmatch(first_line):
+        return f"Codex self-reported tool denial (no structured denial): {CODEX_NESTED_SANDBOX_ERROR}"
+    return None
 
 
 # Antigravity headless mode cannot open an approval prompt, so a tool call that
@@ -980,6 +996,13 @@ def invoke_codex(
             or _denial_error(denials_observed)
             or ("Codex stream ended before turn.completed." if not saw_turn_completed else "Empty result from Codex."),
         }
+
+    # A nested macOS sandbox failure can reach Codex without any JSON tool
+    # event. Record its explicit report as one advisory, not a verified call.
+    if not denials_observed:
+        reported_denial = _codex_self_reported_denial(final_text)
+        if reported_denial:
+            denials_observed.append(reported_denial)
 
     return {
         "status": "ok",
