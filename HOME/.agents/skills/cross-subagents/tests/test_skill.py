@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1505,6 +1506,68 @@ class TestCrossSubagents(unittest.TestCase):
         self.assertEqual(res["status"], "ok")
         self.assertEqual(res["selected"]["canonical_key"], "glm-5.3")
         self.assertGreater(res["selected"]["recency_score"], 0.9)
+
+    def test_latest_astra_inherits_lineage_prior_and_passes_tier_filter(self):
+        catalog, quota = self._fake_selection_inputs()
+        latest = "gpt-6.2-astra"
+        catalog["codex"]["routes"].append(self._fake_route("codex", "openai", latest, latest, "codex:codex"))
+        with patch.object(select_route, "get_survey", return_value=None):
+            result = select_routes(
+                task="architecture", pin_agent="codex", latest_model="gpt-astra",
+                max_tier=1, all_models=catalog, quota_state=quota,
+            )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["selected"]["canonical_key"], latest)
+        self.assertEqual(result["selected"]["vendor_tier_rank"], 1)
+        self.assertEqual(result["selected"]["task_fit"], 0.96)
+        self.assertEqual(result["fallbacks"], [])
+
+    def test_latest_fable_ignores_recency_bonus_and_saved_model_pin(self):
+        catalog, quota = self._fake_selection_inputs()
+        old, latest = "claude-fable-5-1", "claude-fable-5-2"
+        catalog["claude-code"]["routes"].append(
+            self._fake_route("claude-code", "anthropic", latest, latest, "claude-code:session")
+        )
+        options = dict(task="architecture", pin_agent="claude-code", all_models=catalog, quota_state=quota)
+        with patch.object(select_route, "get_survey", return_value=None), patch.object(
+            select_route, "lookup_model_release_date",
+            side_effect=lambda **kw: (date.today().isoformat(), "registry") if kw["canonical_key"] == old else (None, None),
+        ), patch.object(select_route, "load_session_pins", return_value={"pin_model": old}):
+            ordinary = select_routes(**options, use_saved_pins=False)
+            resolved = select_routes(**options, latest_model="claude-fable")
+            blocked = select_routes(**options, latest_model="claude-fable", exclude_route_ids=[
+                f"claude-code/anthropic/{latest}",
+            ])
+            catalog["claude-code"]["stale"] = True
+            stale = select_routes(**options, latest_model="claude-fable")
+        self.assertEqual(ordinary["selected"]["canonical_key"], old)
+        self.assertEqual(resolved["selected"]["canonical_key"], latest)
+        self.assertEqual(resolved["fallbacks"], [])
+        self.assertIsNone(blocked["selected"])
+        self.assertEqual(blocked["filtered_sample"][0]["reason"], "excluded_route")
+        self.assertIn("discovery is stale", stale["rationale"])
+
+    def test_latest_step_persists_exact_fallback_pin(self):
+        catalog, quota = self._fake_selection_inputs()
+        latest = "gpt-6.10-astra"
+        for key in ("gpt-6.2-astra", latest, "gpt-6.11-astra-preview"):
+            catalog["codex"]["routes"].append(self._fake_route("codex", "openai", key, key, "codex:codex"))
+        step = select_route.parse_step_spec('{"latest_model":"gpt-astra","pin_agent":"codex","max_tier":2}')
+        with tempfile.TemporaryDirectory() as td, patch.object(
+            select_route, "get_cache_dir", return_value=Path(td)
+        ), patch.object(select_route, "get_survey", return_value=None):
+            plan = select_step_plan([step], all_models=catalog, quota_state=quota, run_id="latest-test")
+            selected = plan["steps"][0]["selected"]
+            policy = run.resolve_pinned_fallback_constraints(
+                selected, run_id="latest-test", exclude_vendors=None, exclude_agents=None,
+                include_vendors=None, max_tier=2, require_vision=False,
+                min_context=None, require_modalities=None,
+                allow_estimated_capabilities=False, allow_micro_quota=False,
+                min_headroom=None, speed="normal", exclude_route_ids=None,
+            )
+        self.assertEqual(selected["canonical_key"], latest)
+        self.assertEqual(policy["scope"], "planned_constraints")
+        self.assertEqual(policy["pin_model"], latest)
 
     def test_survey_rejects_invalid_released_at(self):
         with self.assertRaises(ValueError):

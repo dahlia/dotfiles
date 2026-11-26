@@ -18,6 +18,15 @@ candidate/filter/plan details. Direct selector commands below remain supported.
 
 - `--pin-agent`, `--pin-provider`, `--pin-model` restrict named agents/models.
   `--save-pin` persists a constraint; `--run-id` scopes it to a run.
+- `--latest-model LINEAGE` resolves the newest stable numbered release in the
+  discovered agent/provider/vendor scope before checking task fit, tier, quota,
+  or other route eligibility. It uses numeric versions, not release-age
+  bonuses. A blocked latest release does not make an older release eligible.
+  Use `prepare.py --refresh` for explicit latest requests. If discovery is
+  incomplete, do not claim the result is the latest outside the verified scope.
+  In step specs use `"latest_model": "gpt-astra"`; do not combine it with an
+  exact model pin for that step. With `--run-id`, the plan saves the resolved
+  canonical model as the exact fallback pin.
 - `--exclude-vendor` requires independence from the host vendor.
   `--include-vendor` (repeatable) restricts the allowed vendors.
 - `--max-tier N` permits only vendor-relative ranks 1 through N. Ranking uses
@@ -54,6 +63,15 @@ honors the same controls. Antigravity discovery does not prove available quota:
 quota comes from CodexBar group and model windows.
 
 ## Independent steps, not fallback chains
+
+To select the latest stable Fable release visible to Claude Code and preserve
+that exact model during execution:
+
+```bash
+python3 <skill-dir>/scripts/prepare.py --refresh --task architecture \
+  --pin-agent claude-code --latest-model claude-fable \
+  --steps 1 --run-id <run-id> --human
+```
 
 ```bash
 python3 <skill-dir>/scripts/select_route.py --task code_review --steps 3 \

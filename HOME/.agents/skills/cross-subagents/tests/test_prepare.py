@@ -102,6 +102,23 @@ class TestPreparation(unittest.TestCase):
         self.selector_models.assert_not_called()
         self.quota.assert_not_called()
 
+    def test_latest_flag_resolves_and_saves_model_from_refreshed_catalog(self):
+        latest = "claude-fable-5-2"
+        self.catalog["claude-code"]["routes"].append(
+            common.normalize_model_route("claude-code", "anthropic", latest)
+        )
+        receipt, code = prepare.prepare(self.flags() + [
+            "--latest-model", "claude-fable", "--pin-agent", "claude-code",
+            "--steps", "1", "--run-id", "latest-plan",
+        ], refresh=True)
+        self.assertEqual(code, 0, receipt)
+        self.assertEqual(receipt["selection"]["steps"][0]["selected"]["canonical_key"], latest)
+        step = select_route.load_selection_plan("latest-plan")["steps"][0]
+        self.assertEqual(step["route_id"], f"claude-code/anthropic/{latest}")
+        self.assertEqual(step["constraints"]["pin_model"], latest)
+        self.assertTrue(self.models.call_args.kwargs["refresh"])
+        self.quota.assert_not_called()
+
     def test_step_plan_constraints_are_persisted(self):
         flags = self.flags() + [
             "--run-id", "plan", "--steps", "2",

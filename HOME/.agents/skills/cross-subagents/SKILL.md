@@ -60,6 +60,14 @@ Categories: `code_review`, `security_audit`, `architecture`, `debugging`,
 Carry these requirements into selection **and execution**:
 
 - Named agent/model: `--pin-agent`, `--pin-provider`, `--pin-model`.
+- Explicit recency (“latest model”, “최신 모델”): refresh discovery and use
+  `--latest-model <lineage>` (e.g. `gpt-astra` or `claude-fable`). This pins
+  the newest stable numbered release in that lineage before eligibility checks;
+  `--max-tier` and the default recency score do not mean latest. If the lineage
+  is unclear and the choice matters, ask rather than assume. For a catalog whose
+  IDs do not establish release order, verify release metadata and pin the exact
+  ID, or disclose that latest cannot be verified. Do not silently use an older
+  model when the latest is blocked.
 - Independent opinion: `--exclude-vendor <host-vendor>`; frontier-only:
   `--include-vendor` and `--max-tier 2`.
 - Screenshots/mockups/visual captures: always `--require-vision`.
@@ -79,6 +87,9 @@ For flag semantics or multi-step plans, read
 are not fallback chains; save constraints with `--run-id` and execute each
 step's selected route. For scoring/surveys read
 [model-selection.md](references/model-selection.md), not for routine dispatch.
+For a latest-model request, use `prepare.py --refresh --steps 1 --run-id …`
+even for a single task so fallback reuses the resolved model pin. If a plan
+cannot be saved, use `run.py --no-fallback` for the selected exact route.
 
 ## 2. Choose native delegation or CLI
 

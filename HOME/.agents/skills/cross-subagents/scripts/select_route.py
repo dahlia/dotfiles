@@ -488,15 +488,36 @@ TIER_DEFAULT_TPS: dict[int, float] = {
 }
 
 
+def model_lineage_version(canonical_key: str) -> tuple[str, tuple[int, ...]] | None:
+    """Split a numeric release from a canonical ID without dropping its product tier."""
+    match = re.search(r"-(?:v)?(\d+(?:[.-]\d+)*)(?=-|$)", canonical_key)
+    if not match:
+        return None
+    lineage = canonical_key[:match.start()] + canonical_key[match.end():]
+    version = tuple(int(part) for part in re.split(r"[.-]", match[1]))
+    return lineage, version
+
+
 def resolve_prior_for_route(route: dict[str, Any]) -> dict[str, Any]:
     c_key = route["canonical_key"]
     # Re-derive the family from the canonical key so stale cached `family` values never hide a prior
     family = infer_model_family(c_key)
     if c_key in FAMILY_PRIORS:
         return FAMILY_PRIORS[c_key]
-    for prefix in ("gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6.1-terra", "gpt-6-luna"):
-        if c_key.startswith(prefix):
-            return FAMILY_PRIORS[prefix]
+    release = model_lineage_version(c_key)
+    if release:
+        lineage, version = release
+        # Use the closest known earlier release from the same product tier,
+        # never the prior for a parallel tier or a newer generation.
+        if lineage.startswith("gpt-"):
+            earlier = [
+                (parsed[1], prior_key)
+                for prior_key in FAMILY_PRIORS
+                if (parsed := model_lineage_version(prior_key))
+                and parsed[0] == lineage and parsed[1] <= version
+            ]
+            if earlier:
+                return FAMILY_PRIORS[max(earlier)[1]]
     if family in FAMILY_PRIORS:
         return FAMILY_PRIORS[family]
     # Open-ended fallback for newly discovered models so they are eligible across standard tasks
@@ -1285,6 +1306,46 @@ def quota_agents_for_routes(
     return sorted(relevant)
 
 
+def resolve_latest_model(
+    all_models: dict[str, Any],
+    lineage: str,
+    *,
+    pin_agent: str | None,
+    pin_provider: str | None,
+    exclude_agents: set[str],
+    exclude_vendors: set[str],
+    include_vendors: set[str],
+) -> str:
+    """Resolve one stable numeric release before checking route eligibility."""
+    releases: dict[str, tuple[int, ...]] = {}
+    for agent, data in all_models.items():
+        if agent in exclude_agents or (pin_agent and agent != pin_agent):
+            continue
+        for route in data.get("routes") or []:
+            if route.get("hidden") or (pin_provider and route["provider"].lower() != pin_provider):
+                continue
+            key = route["canonical_key"]
+            if re.search(r"(?:^|-)(?:preview|alpha|beta|rc|experimental|dev)(?:-|\d|$)", key):
+                continue
+            vendor = infer_model_vendor(route)
+            if vendor in exclude_vendors or (include_vendors and vendor not in include_vendors):
+                continue
+            parsed = model_lineage_version(key)
+            if not parsed or parsed[0] != lineage:
+                continue
+            if data.get("stale"):
+                raise ValueError(f"Cannot verify latest {lineage}: {agent} discovery is stale.")
+            if data.get("usable"):
+                releases[key] = parsed[1]
+    if not releases:
+        raise ValueError(f"No stable numbered releases for {lineage} in the scoped catalog.")
+    newest_version = max(releases.values())
+    newest = sorted(key for key, version in releases.items() if version == newest_version)
+    if len(newest) != 1:
+        raise ValueError(f"Cannot resolve latest {lineage} uniquely: {', '.join(newest)}.")
+    return newest[0]
+
+
 def select_routes(
     task: str = "general",
     min_context: int | None = None,
@@ -1318,6 +1379,7 @@ def select_routes(
     prefer_canonical_key: str | None = None,
     allowed_billing_modes: set[str] | None = None,
     review_history: dict[str, dict[str, Any]] | None = None,
+    latest_model: str | None = None,
 ) -> dict[str, Any]:
     """Run the 5-step route selection algorithm and return top route + fallback chain."""
     task_norm = task.strip().lower().replace("-", "_")
@@ -1329,7 +1391,7 @@ def select_routes(
     if review_history is None:
         review_history = load_review_history(get_cache_dir() / "runs") if task_norm == "code_review" else {}
 
-    pins = load_session_pins(run_id=run_id) if use_saved_pins else {}
+    pins = load_session_pins(run_id=run_id) if use_saved_pins and latest_model is None else {}
     eff_pin_agent = canonical_agent_name(pin_agent) if pin_agent else pins.get("pin_agent")
     eff_pin_provider = (pin_provider or pins.get("pin_provider") or "").strip().lower() or None
     eff_pin_model = (pin_model or pins.get("pin_model") or "").strip().lower() or None
@@ -1345,6 +1407,19 @@ def select_routes(
         req_mods.add("image")
 
     all_models = all_models if all_models is not None else collect_all_models(refresh=False)
+    if latest_model is not None:
+        lineage = latest_model.strip().lower()
+        try:
+            if pin_model:
+                raise ValueError("Specify a latest-model lineage or an exact model pin, not both.")
+            if not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z][a-z0-9]*)*", lineage):
+                raise ValueError("Specify a stable lineage such as gpt-astra or claude-fable.")
+            eff_pin_model = resolve_latest_model(
+                all_models, lineage, pin_agent=eff_pin_agent, pin_provider=eff_pin_provider,
+                exclude_agents=excl_agents, exclude_vendors=excl_vendors, include_vendors=incl_vendors,
+            )
+        except ValueError as exc:
+            return {"status": "no_route_available", "selected": None, "fallbacks": [], "rationale": str(exc)}
     if quota_state is None:
         owners = quota_agents_for_routes(
             all_models, pin_agent=eff_pin_agent, pin_provider=eff_pin_provider,
@@ -1369,6 +1444,8 @@ def select_routes(
 
         for route in a_data.get("routes") or []:
             r_id = route["route_id"]
+            if latest_model is not None and route["canonical_key"] != eff_pin_model:
+                continue
             if r_id.lower() in excl_routes:
                 filtered_out.append({"route_id": r_id, "reason": "excluded_route"})
                 continue
@@ -1570,6 +1647,17 @@ def select_routes(
         c.pop("_headroom_sort", None)
 
     if not candidates:
+        latest_details = {}
+        if latest_model is not None:
+            reasons = list(dict.fromkeys(item["reason"] for item in filtered_out))
+            reason_note = f" ({', '.join(reasons[:3])})" if reasons else ""
+            latest_details = {
+                "resolved_latest_model": eff_pin_model,
+                "rationale": (
+                    f"Latest {lineage} resolved to {eff_pin_model}, "
+                    f"but no route meets the constraints{reason_note}."
+                ),
+            }
         return {
             "status": "no_route_available",
             "task": task_norm,
@@ -1584,6 +1672,7 @@ def select_routes(
                 for r in filtered_out
             ),
             "filtered_sample": filtered_out[:15],
+            **latest_details,
         }
 
     selected = candidates[0]
@@ -1638,10 +1727,14 @@ def select_routes(
         "quality_floor": floor,
         "max_tier": max_tier,
         "max_cost_index": max_cost_index,
-        "rationale": selected["rationale"],
+        "rationale": (
+            f"Latest {lineage} resolved to {eff_pin_model}. {selected['rationale']}"
+            if latest_model is not None else selected["rationale"]
+        ),
         "selected": selected,
         "fallbacks": fallbacks,
         "candidate_count": len(candidates),
+        **({"resolved_latest_model": eff_pin_model} if latest_model is not None else {}),
     }
 
 
@@ -1666,6 +1759,7 @@ STEP_SPEC_KEYS = frozenset(
         "pin_agent",
         "pin_provider",
         "pin_model",
+        "latest_model",
     }
 )
 STEP_SPEC_LIST_KEYS = frozenset(
@@ -1817,6 +1911,7 @@ def select_step_plan(
             pin_agent=merged.get("pin_agent"),
             pin_provider=merged.get("pin_provider"),
             pin_model=merged.get("pin_model"),
+            latest_model=merged.get("latest_model"),
             exclude_agents=exclude_agents,
             exclude_vendors=exclude_vendors,
             include_vendors=merged.get("include_vendor"),
@@ -1840,7 +1935,7 @@ def select_step_plan(
                 {
                     "step": index,
                     "task": task_norm,
-                    "reason": res["status"],
+                    "reason": res.get("rationale") or res["status"],
                     "filtered_sample": res.get("filtered_sample"),
                 }
             )
@@ -1859,7 +1954,7 @@ def select_step_plan(
                 "constraints": {
                     "pin_agent": merged.get("pin_agent"),
                     "pin_provider": merged.get("pin_provider"),
-                    "pin_model": merged.get("pin_model"),
+                    "pin_model": res.get("resolved_latest_model") or merged.get("pin_model"),
                     "speed": speed,
                     "include_vendor": merged.get("include_vendor") or [],
                     "exclude_vendor": exclude_vendors,
@@ -1957,6 +2052,7 @@ def main(
     parser.add_argument("--pin-agent", help="Restrict selection to a specific agent.")
     parser.add_argument("--pin-provider", help="Restrict selection to a specific provider.")
     parser.add_argument("--pin-model", help="Restrict selection to a specific model ID or canonical key.")
+    parser.add_argument("--latest-model", metavar="LINEAGE", help="Pin the newest stable numbered release in a lineage, e.g. gpt-astra.")
     parser.add_argument("--exclude-agent", action="append", help="Exclude agent(s) from selection.")
     parser.add_argument("--exclude-vendor", action="append", help="Exclude model vendor(s) (e.g. openai, anthropic, google).")
     parser.add_argument(
@@ -2021,6 +2117,8 @@ def main(
     parser.add_argument("--human", action="store_true", help="Print concise human-readable summary.")
 
     args = parser.parse_args(argv)
+    if args.latest_model is not None and (args.pin_model or args.save_pin):
+        parser.error("--latest-model cannot be combined with --pin-model or --save-pin; use a saved step plan")
 
     quota_state = None
     if args.quota_state:
@@ -2087,6 +2185,7 @@ def main(
             "pin_agent": args.pin_agent,
             "pin_provider": args.pin_provider,
             "pin_model": args.pin_model,
+            "latest_model": args.latest_model,
             "exclude_agent": args.exclude_agent,
             "exclude_vendor": args.exclude_vendor,
             "include_vendor": args.include_vendor,
@@ -2151,6 +2250,7 @@ def main(
         pin_agent=args.pin_agent,
         pin_provider=args.pin_provider,
         pin_model=args.pin_model,
+        latest_model=args.latest_model,
         exclude_agents=args.exclude_agent,
         exclude_vendors=args.exclude_vendor,
         include_vendors=args.include_vendor,
@@ -2169,7 +2269,7 @@ def main(
 
     if args.human:
         if res["status"] != "ok" or not res.get("selected"):
-            print(f"No route available for task={args.task} (floor={res.get('quality_floor')}).")
+            print(res.get("rationale") or f"No route available for task={args.task} (floor={res.get('quality_floor')}).")
             return 1
         print(res["rationale"])
         for idx, fb in enumerate(res.get("fallbacks") or [], 1):

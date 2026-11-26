@@ -199,6 +199,8 @@ metadata rank exactly as before. Each candidate reports `release_date`,
 rationale includes the release age, so a freshness-driven pick is auditable
 rather than silent. Recency never bypasses the hard filters, the per-task
 quality floor, or `--max-tier`, which stays task-fit-only by design.
+For an explicit request to use the latest model, use the lineage pin in
+[selection-plans.md](selection-plans.md) instead of relying on this bonus.
 
 
 Hierarchical cache TTLs
