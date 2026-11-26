@@ -162,8 +162,10 @@ Use background completion notifications or synchronous execution with
 Parallel coordination uses blocking locks/joins, not active polling.
 
 Evaluate significance from actual contributions, not success alone. Mark
-no-actionable-findings reviews insignificant; use canonical IDs (DeepSeek
-V4.1+ is `deepseek-flash`) and repository-specific attribution rules.
+no-actionable-findings reviews insignificant. Use the report's canonical
+model IDs for attribution, not execution route IDs (for example, credit
+`gpt-6.2-sol` when the route ran `gpt-6.2-sol-fast`). Follow the repository's
+attribution rules.
 
 ```bash
 python3 <skill-dir>/scripts/run.py report --run-id <run-id> --include-defects --human

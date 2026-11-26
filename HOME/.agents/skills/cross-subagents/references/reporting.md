@@ -37,9 +37,15 @@ resolve aliases; they reject nonexistent bare generation prefixes.
 Examples: `opencode-go/glm-5.3` → `glm-5.3`,
 `claude-sonnet-5[1m]` → `claude-sonnet-5`,
 `claude-opus-5-5-low` → `claude-opus-5-5`,
+`openai/gpt-6.2-sol-fast` → `gpt-6.2-sol`,
 `deepseek-v4.1-flash` → `deepseek-flash`,
 `fable` → `claude-fable-5-1`; bare `gpt-6` is invalid.
-Respect the repository's crediting rule/trailer syntax without changing IDs.
+Use the report's canonical model IDs for credit, not raw execution route IDs.
+`gpt-6.2-sol-fast` is a known serving alias; do not strip `-fast` from other
+models by default. For IDs outside a run report, use the same offline
+normalizer: `python3 <skill-dir>/scripts/models.py normalize-id -- "<model-id>"`.
+Respect the repository's crediting rule/trailer syntax without changing
+canonical IDs.
 
 ## Final reporting
 

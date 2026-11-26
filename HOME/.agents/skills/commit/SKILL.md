@@ -1,7 +1,7 @@
 ---
 name: commit
 description: Make a commit in Git with an appropriate commit message for the currently staged changes.
-allowed-tools: Bash(git *)
+allowed-tools: Bash(git *) Bash(python3 *cross-subagents/scripts/models.py normalize-id *)
 ---
 
 Please make a commit with an appropriate commit message for the currently
@@ -55,10 +55,29 @@ be:
 Assisted-by: AGENT_NAME:MODEL_VERSION
 ~~~~
 
+Use the canonical model ID, not the raw provider or execution route. For
+delegated work, start with the relevant run report's significant contributions
+that actually affected this commit. Before running `git commit`, normalize
+every proposed `Assisted-by` model ID, including your own and any copied from
+an earlier report. If available, use the shared offline normalizer on the
+model part only:
+
+~~~~ bash
+python3 "$HOME/.agents/skills/cross-subagents/scripts/models.py" normalize-id -- "openai/gpt-6.2-sol-fast"
+~~~~
+
+This prints `gpt-6.2-sol`; the trailer is `Assisted-by: OpenCode:gpt-6.2-sol`.
+If the command is unavailable, apply that known alias explicitly and use
+confirmed canonical IDs for other models. Do not blindly strip suffixes such
+as `-fast`, `-flash`, `-plus`, or `-preview`: they can be part of a model's
+name. Inspect the final trailer block and deduplicate by agent and canonical
+model after normalization.
+
 For example:
 
 ~~~~
 Assisted-by: OpenCode:qwen3.6-plus
+Assisted-by: OpenCode:gpt-6.2-sol
 Assisted-by: Claude Code:claude-sonnet-4-6
 Assisted-by: Gemini CLI:gemini-3.1-pro-preview
 Assisted-by: Codex:gpt-5.5

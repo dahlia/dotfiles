@@ -1211,6 +1211,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Collect and query available model routes and surveys.")
     sub = parser.add_subparsers(dest="subcommand")
 
+    p_norm = sub.add_parser("normalize-id", help="Normalize a model ID offline for attribution.")
+    p_norm.add_argument("model_id", help="Raw model ID, optionally provider-prefixed.")
+
     p_col = sub.add_parser("collect", help="Collect model lists from installed agents.")
     p_col.add_argument("--agent", action="append", help="Collect only for specified agent(s).")
     p_col.add_argument("--refresh", action="store_true", help="Ignore TTL and force refresh.")
@@ -1239,6 +1242,11 @@ def main() -> int:
 
     args = parser.parse_args()
     cmd = args.subcommand or "collect"
+
+    if cmd == "normalize-id":
+        model_id, _, _ = normalize_official_model_id(args.model_id)
+        print(model_id)
+        return 0
 
     if cmd == "collect":
         res = collect_all_models(agents=args.agent, refresh=args.refresh)
