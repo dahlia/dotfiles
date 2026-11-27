@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+from subprocess import CompletedProcess
 import sys
 import tempfile
 import unittest
@@ -14,10 +15,62 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import common
 import models
 import prepare
+import probe
+import quota
 import select_route
 
 
 class TestPreparation(unittest.TestCase):
+    def test_blocked_auth_probe_leaves_host_discovery_and_quota_intact(self):
+        cache = self.root / "agents.json"
+        model_cache = self.root / "models" / "codex.json"
+        quota_cache = self.root / "quota" / "status.json"
+        model_cache.parent.mkdir()
+        quota_cache.parent.mkdir()
+        with patch.object(probe, "resolve_agent_binary", return_value={
+            "installed": True, "binary": "codex", "duplicate_installs": False,
+        }), patch.object(probe, "cache_cli_help_and_recipe", return_value={}), patch.object(
+            probe, "compute_agent_config_fingerprint", return_value="account"
+        ), patch.object(probe, "restricted_auth_context", return_value=False):
+            version = CompletedProcess([], 0, "codex 1.0.0", "")
+            status = CompletedProcess([], 0, "Logged in using ChatGPT", "")
+            with patch.object(probe, "run_cmd", side_effect=[version, status]):
+                host = probe.probe_all(agents=["codex"], refresh=True)
+            common.atomic_write_json(model_cache, self.catalog["codex"])
+            common.atomic_write_json(quota_cache, {
+                "schema_version": common.SCHEMA_VERSION,
+                "agents": {"codex": {"usable": True, "buckets": {"codex:account": {"used_percent": 20}}}},
+            })
+            before = {path: path.read_bytes() for path in (cache, model_cache, quota_cache)}
+
+            blocked = CompletedProcess([], 1, "Not logged in", "Keyring: D-Bus permission denied")
+            with patch.object(probe, "run_cmd", side_effect=[version, blocked]):
+                worker = probe.probe_all(agents=["codex"], refresh=True)
+
+            self.assertTrue(host["agents"]["codex"]["usable"])
+            self.assertTrue(worker["agents"]["codex"]["auth_access_blocked"])
+            self.assertFalse(worker["agents"]["codex"]["usable"])
+            self.assertFalse(models.collect_agent_models("codex", probe_data=worker)["usable"])
+            with patch.object(quota, "probe_all", return_value=worker):
+                quota.collect_quota(agents=["codex"], refresh=True)
+            self.assertEqual({path: path.read_bytes() for path in before}, before)
+
+    def test_restricted_probe_rechecks_fresh_host_auth_and_keeps_result_local(self):
+        cache = self.root / "agents.json"
+        host = {
+            "usable": True, "installed": True, "version_ok": True, "authenticated": True,
+            "binary": "codex", "collected_at": common.now_iso(), "version": "1.0.0",
+        }
+        common.atomic_write_json(cache, {"schema_version": common.SCHEMA_VERSION, "agents": {"codex": host}})
+        with patch.object(probe, "restricted_auth_context", return_value=True), patch.object(
+            probe, "resolve_agent_binary", return_value={"binary": "codex"}
+        ), patch.dict(probe.PROBE_DISPATCH, {"codex": lambda: {
+            **host, "authenticated": False, "usable": False,
+        }}):
+            worker = probe.probe_all(agents=["codex"])
+        self.assertTrue(worker["agents"]["codex"]["auth_access_blocked"])
+        self.assertEqual(common.read_json_file(cache)["agents"]["codex"], host)
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

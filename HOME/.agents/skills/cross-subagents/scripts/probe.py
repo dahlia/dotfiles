@@ -35,6 +35,52 @@ PROBE_TTL_SECONDS = 86400  # 24 hours
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
+AUTH_ACCESS_WARNING = (
+    "Authentication could not be verified in this execution environment. "
+    "Compare the CLI status in the host session and here."
+)
+_local_probes: dict[tuple[Path, str, bool], dict[str, Any]] = {}
+
+
+def restricted_auth_context() -> bool:
+    """Recognize a declared worker boundary or Codex's sandbox environment."""
+    return (
+        os.environ.get("CROSS_SUBAGENTS_AUTH_CONTEXT") == "restricted"
+        or os.environ.get("CODEX_SANDBOX") in ("seatbelt", "landlock", "bubblewrap")
+        or os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1"
+    )
+
+
+def auth_access_failure(text: str, *, auth_probe: bool = False) -> bool:
+    """Identify local access failures in CLI diagnostics, independently of a login verdict."""
+    text = strip_ansi(text).lower()
+    if re.search(r"errsecinteractionnotallowed|user interaction is not allowed|"
+                 r"org\.freedesktop\.secret\.error\.(?:islocked|nosession)", text):
+        return True
+    resource = re.search(
+        r"keychain|keyring|credential store|secret service|org\.freedesktop\.secrets|"
+        r"d-bus|dbus|auth\.json|\.credentials\.json|oauth|authentication", text,
+    )
+    if resource and re.search(r"\blocked\b|\bunavailable\b|serviceunknown", text):
+        return True
+    if auth_probe or resource:
+        return bool(re.search(
+            r"permission denied|operation not permitted|access denied|"
+            r"not (?:allowed|permitted)|blocked by (?:the )?sandbox|"
+            r"failed to connect|cannot autolaunch|no (?:session bus|secret service)|"
+            r"connection (?:refused|reset)|network is unreachable|read-only file system|"
+            r"failed to (?:read|open|access)",
+            text,
+        ))
+    return False
+
+
+def _auth_diagnostics(authenticated: bool, blocked: bool) -> dict[str, Any]:
+    if blocked and not authenticated:
+        return {"auth_access_blocked": True, "probe_error": AUTH_ACCESS_WARNING}
+    return {}
+
+
 def probe_binary_version(binary: str) -> str | None:
     """Return a CLI's version string, or `None` when it cannot be probed."""
     try:
@@ -357,18 +403,20 @@ def probe_codex() -> dict[str, Any]:
     authenticated = False
     auth_mode = None
     auth_transient = False
+    blocked = False
     try:
         a_proc = run_cmd([binary, "login", "status"], timeout=10)
         combined = strip_ansi(f"{a_proc.stdout}\n{a_proc.stderr}").strip()
-        if a_proc.returncode == 0 and "logged in" in combined.lower():
-            authenticated = True
+        lower = combined.lower()
+        authenticated = a_proc.returncode == 0 and "logged in" in lower and "not logged in" not in lower
+        if authenticated:
             auth_mode = combined.splitlines()[0].strip()
-        elif "not logged in" in combined.lower():
-            authenticated = False
-        elif a_proc.returncode != 0:
-            auth_transient = True
-    except Exception:
+        else:
+            blocked = auth_access_failure(combined, auth_probe=True)
+            auth_transient = blocked or (a_proc.returncode != 0 and "not logged in" not in lower)
+    except Exception as exc:
         auth_transient = True
+        blocked = isinstance(exc, PermissionError)
 
     usable = bool(version and authenticated)
     return {
@@ -377,6 +425,7 @@ def probe_codex() -> dict[str, Any]:
         "version_ok": version is not None,
         "authenticated": authenticated,
         "auth_check_transient": auth_transient,
+        **_auth_diagnostics(authenticated, blocked),
         "auth_mode": auth_mode,
         "recipe_flags": recipe_flags,
         "usable": usable,
@@ -428,6 +477,7 @@ def probe_claude_code() -> dict[str, Any]:
     plan_type = None
     api_provider = None
     auth_transient = False
+    blocked = False
     try:
         a_proc = run_cmd([binary, "auth", "status"], timeout=10)
         raw_out = strip_ansi(a_proc.stdout or "").strip()
@@ -439,8 +489,12 @@ def probe_claude_code() -> dict[str, Any]:
             api_provider = auth_json.get("apiProvider")
         elif a_proc.returncode != 0:
             auth_transient = True
-    except Exception:
+        if not authenticated:
+            blocked = auth_access_failure(f"{raw_out}\n{a_proc.stderr}", auth_probe=True)
+            auth_transient = auth_transient or blocked
+    except Exception as exc:
         auth_transient = True
+        blocked = isinstance(exc, PermissionError)
 
     usable = bool(version and authenticated)
     return {
@@ -449,6 +503,7 @@ def probe_claude_code() -> dict[str, Any]:
         "version_ok": version is not None,
         "authenticated": authenticated,
         "auth_check_transient": auth_transient,
+        **_auth_diagnostics(authenticated, blocked),
         "auth_method": auth_method,
         "plan_type": plan_type,
         "api_provider": api_provider,
@@ -585,10 +640,16 @@ def probe_opencode() -> dict[str, Any]:
     providers: list[dict[str, str]] = []
     auth_cmd_ok = False
     auth_transient = False
+    blocked = False
     try:
         # Prefer structured JSON output from `opencode auth list --format json`
         a_proc = run_cmd([binary, "auth", "list", "--format", "json"], timeout=10)
-        if a_proc.returncode == 0 and (a_proc.stdout or "").strip().startswith("["):
+        blocked = a_proc.returncode != 0 and auth_access_failure(
+            f"{a_proc.stderr}\n{a_proc.stdout}", auth_probe=True
+        )
+        if blocked:
+            auth_transient = True
+        elif a_proc.returncode == 0 and (a_proc.stdout or "").strip().startswith("["):
             auth_cmd_ok = True
             items = json.loads(a_proc.stdout)
             if isinstance(items, list):
@@ -611,7 +672,12 @@ def probe_opencode() -> dict[str, Any]:
         else:
             # Fallback to text parsing for older CLI builds without `--format json`
             a_proc_txt = run_cmd([binary, "auth", "list"], timeout=10)
-            if a_proc_txt.returncode == 0:
+            blocked = a_proc_txt.returncode != 0 and auth_access_failure(
+                f"{a_proc_txt.stderr}\n{a_proc_txt.stdout}", auth_probe=True
+            )
+            if blocked:
+                auth_transient = True
+            elif a_proc_txt.returncode == 0:
                 auth_cmd_ok = True
                 providers.extend(parse_opencode_auth_text(a_proc_txt.stdout or ""))
                 if not providers:
@@ -626,7 +692,9 @@ def probe_opencode() -> dict[str, Any]:
                 )
     except Exception as exc:
         auth_transient = True
-        warnings.append(f"`opencode auth list` raised an error: {exc}")
+        blocked = isinstance(exc, PermissionError)
+        if not blocked:
+            warnings.append(f"`opencode auth list` raised an error: {exc}")
 
     # OpenCode includes built-in free models under the `opencode` provider even when no external provider credentials exist
     authenticated = auth_cmd_ok
@@ -639,6 +707,7 @@ def probe_opencode() -> dict[str, Any]:
         "version_ok": version_ok,
         "authenticated": authenticated,
         "auth_check_transient": auth_transient,
+        **_auth_diagnostics(authenticated, blocked),
         "authenticated_providers": providers,
         "builtin_free_provider_available": auth_cmd_ok,
         "recipe_flags": recipe_flags,
@@ -689,6 +758,7 @@ def probe_antigravity() -> dict[str, Any]:
     authenticated = False
     model_count = 0
     auth_transient = False
+    blocked = False
     try:
         m_proc = run_cmd([binary, "models"], timeout=12)
         if m_proc.returncode == 0 and m_proc.stdout.strip():
@@ -697,8 +767,12 @@ def probe_antigravity() -> dict[str, Any]:
             authenticated = model_count > 0
         elif m_proc.returncode != 0:
             auth_transient = True
-    except Exception:
+        if not authenticated:
+            blocked = auth_access_failure(f"{m_proc.stderr}\n{m_proc.stdout}", auth_probe=True)
+            auth_transient = auth_transient or blocked
+    except Exception as exc:
         auth_transient = True
+        blocked = isinstance(exc, PermissionError)
 
     usable = bool(version and authenticated)
     return {
@@ -708,6 +782,7 @@ def probe_antigravity() -> dict[str, Any]:
         "version_ok": version is not None,
         "authenticated": authenticated,
         "auth_check_transient": auth_transient,
+        **_auth_diagnostics(authenticated, blocked),
         "discovered_model_count": model_count,
         "recipe_flags": recipe_flags,
         "usable": usable,
@@ -764,12 +839,17 @@ def probe_all(agents: list[str] | None = None, refresh: bool = False) -> dict[st
         else {}
     )
 
+    restricted = restricted_auth_context()
+    local_results: dict[str, dict[str, Any]] = {}
     agents_to_probe: list[str] = []
     for agent in target_agents:
-        if refresh or not _agent_entry_is_fresh(agent, existing_agents.get(agent)):
+        local = _local_probes.get((cache_path, agent, restricted))
+        if not refresh and local and _agent_entry_is_fresh(agent, local):
+            local_results[agent] = local
+        elif refresh or local or restricted or not _agent_entry_is_fresh(agent, existing_agents.get(agent)):
             agents_to_probe.append(agent)
 
-    if not agents_to_probe and existing:
+    if not agents_to_probe and not local_results and existing:
         return existing
 
     fresh_results: dict[str, dict[str, Any]] = {}
@@ -777,7 +857,14 @@ def probe_all(agents: list[str] | None = None, refresh: bool = False) -> dict[st
         prev = existing_agents.get(agent)
         try:
             res = PROBE_DISPATCH[agent]()
-            if res.get("auth_check_transient") and isinstance(prev, dict) and prev.get("usable"):
+            local_key = (cache_path, agent, restricted)
+            _local_probes.pop(local_key, None)
+            if restricted and res.get("installed") and res.get("version_ok") and not res.get("authenticated"):
+                res.update(_auth_diagnostics(False, True))
+            if restricted or res.get("auth_access_blocked"):
+                _local_probes[local_key] = res
+                local_results[agent] = res
+            elif res.get("auth_check_transient") and isinstance(prev, dict) and prev.get("usable"):
                 stale_copy = dict(prev)
                 stale_copy["stale"] = True
                 stale_copy["probe_error"] = "Transient auth/status check failure; retaining previous usable state."
@@ -785,7 +872,9 @@ def probe_all(agents: list[str] | None = None, refresh: bool = False) -> dict[st
             else:
                 fresh_results[agent] = res
         except Exception as exc:
-            if isinstance(prev, dict) and prev:
+            if restricted or isinstance(exc, PermissionError):
+                local_results[agent] = {"usable": False, **_auth_diagnostics(False, True)}
+            elif isinstance(prev, dict) and prev:
                 stale_copy = dict(prev)
                 stale_copy["stale"] = True
                 stale_copy["probe_error"] = str(exc)
@@ -824,7 +913,10 @@ def probe_all(agents: list[str] | None = None, refresh: bool = False) -> dict[st
             "agents": merged_agents,
         }
 
-    return locked_update_json(cache_path, _merge)
+    saved = locked_update_json(cache_path, _merge) if fresh_results else _merge(existing)
+    if local_results:
+        return {**saved, "agents": {**saved["agents"], **local_results}}
+    return saved
 
 
 def format_human_summary(data: dict[str, Any]) -> str:
@@ -832,12 +924,16 @@ def format_human_summary(data: dict[str, Any]) -> str:
     agents = data.get("agents") or {}
     for name, info in agents.items():
         status = "USABLE" if info.get("usable") else ("INSTALLED (UNAUTH)" if info.get("installed") else "MISSING")
+        if info.get("auth_access_blocked"):
+            status = "AUTH UNAVAILABLE HERE"
         if info.get("stale"):
             status += " [STALE]"
         ver = info.get("version") or "-"
         bin_path = info.get("binary") or "-"
         dup = " [DUPLICATE INSTALLS]" if info.get("duplicate_installs") else ""
         lines.append(f"- {name}: {status} | version={ver} | binary={bin_path}{dup}")
+        if info.get("probe_error"):
+            lines.append(f"    warning: {info['probe_error']}")
         for w in info.get("warnings") or []:
             lines.append(f"    warning: {w}")
     return "\n".join(lines)

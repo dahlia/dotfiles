@@ -43,7 +43,10 @@ from common import (
     read_json_file,
     validate_safe_identifier,
 )
-from probe import parse_semver, probe_all, run_cmd, strip_ansi
+from probe import (
+    AUTH_ACCESS_WARNING, auth_access_failure, parse_semver, probe_all,
+    restricted_auth_context, run_cmd, strip_ansi,
+)
 
 MODELS_TTL_SECONDS = 86400  # 24 hours
 SURVEY_COST_TTL_SECONDS = 7 * 86400  # 7 days
@@ -532,6 +535,13 @@ def collect_agent_models(
         canon, agent_info.get("binary"), current_ver
     )
 
+    restricted = restricted_auth_context()
+    if agent_info.get("auth_access_blocked"):
+        return {
+            "agent": canon, "usable": False, "routes": [],
+            "auth_access_blocked": True, "error": agent_info.get("probe_error") or AUTH_ACCESS_WARNING,
+        }
+
     existing = read_json_file(cache_file)
     if (
         not refresh
@@ -550,7 +560,8 @@ def collect_agent_models(
         if existing and existing.get("routes") and agent_info.get("stale"):
             existing["stale"] = True
             existing["refresh_error"] = reason
-            atomic_write_json(cache_file, existing)
+            if not restricted:
+                atomic_write_json(cache_file, existing)
             return existing
         empty_payload = {
             "schema_version": SCHEMA_VERSION,
@@ -563,7 +574,8 @@ def collect_agent_models(
             "error": reason,
             "routes": [],
         }
-        atomic_write_json(cache_file, empty_payload)
+        if not restricted:
+            atomic_write_json(cache_file, empty_payload)
         return empty_payload
 
     binary = agent_info["binary"]
@@ -594,9 +606,15 @@ def collect_agent_models(
             "meta": meta,
             "routes": routes,
         }
-        atomic_write_json(cache_file, payload)
+        if not restricted:
+            atomic_write_json(cache_file, payload)
         return payload
     except Exception as exc:
+        if isinstance(exc, PermissionError) or auth_access_failure(str(exc), auth_probe=True):
+            return {
+                "agent": canon, "usable": False, "routes": [],
+                "auth_access_blocked": True, "error": AUTH_ACCESS_WARNING,
+            }
         if (
             existing
             and existing.get("routes")
@@ -605,7 +623,8 @@ def collect_agent_models(
             existing["stale"] = True
             existing["refresh_error"] = str(exc)
             existing["last_error_at"] = now_iso()
-            atomic_write_json(cache_file, existing)
+            if not restricted:
+                atomic_write_json(cache_file, existing)
             return existing
         err_payload = {
             "schema_version": SCHEMA_VERSION,
@@ -618,7 +637,8 @@ def collect_agent_models(
             "error": str(exc),
             "routes": [],
         }
-        atomic_write_json(cache_file, err_payload)
+        if not restricted:
+            atomic_write_json(cache_file, err_payload)
         return err_payload
 
 
@@ -681,8 +701,10 @@ def collect_all_models(
         results[agent] = collect_agent_models(agent, probe_data=probe_data, refresh=refresh)
     # Merge with full cached catalog before rebuilding the global survey index
     full_catalog = load_all_cached_models()
-    full_catalog.update(results)
-    rebuild_survey_index(full_catalog)
+    if not restricted_auth_context():
+        full_catalog.update({agent: entry for agent, entry in results.items()
+                             if not entry.get("auth_access_blocked")})
+        rebuild_survey_index(full_catalog)
     return results
 
 

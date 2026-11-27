@@ -68,6 +68,8 @@ from common import (
 from guard import snapshot as guard_snapshot, verify as guard_verify
 from models import collect_all_models, repair_codex_models, resolve_official_model_id
 from probe import (
+    AUTH_ACCESS_WARNING,
+    auth_access_failure,
     CLAUDE_PARSER_FLAG_CHECKS,
     cache_cli_help_and_recipe,
     get_agent_recipe,
@@ -439,6 +441,9 @@ def allocate_next_attempt_dir(task_dir: Path) -> tuple[int, Path]:
     return next_num, attempt_dir
 
 
+ACCOUNT_ROUTE_FAILURES = ("quota", "auth", "auth_access")
+
+
 def classify_failure(exit_code: int, stdout_text: str, stderr_text: str, timed_out: bool = False) -> str:
     """Classify failure into standard error classes for repair and fallback routing.
 
@@ -452,6 +457,8 @@ def classify_failure(exit_code: int, stdout_text: str, stderr_text: str, timed_o
     if exit_code == 127:
         return "not_installed"
     combined = f"{stdout_text}\n{stderr_text}".lower()
+    if auth_access_failure(combined):
+        return "auth_access"
     if re.search(r"\bhit your [\w-]+ limit\b|\bindividual (?:model )?quota (?:reached|exhausted)\b", combined):
         return "quota"
     if any(marker in combined for marker in (
@@ -979,7 +986,7 @@ def invoke_codex(
         # would let a test transcript mentioning "429" or "quota" mark a bucket
         # exhausted.
         err_class = classify_failure(code, "", err_combined, timed_out=False)
-        if code == 0 and not stream_errors and (not saw_turn_completed or not final_text):
+        if code == 0 and err_class == "failed" and not stream_errors and (not saw_turn_completed or not final_text):
             err_class = "format"
         return {
             "status": "quota" if err_class == "quota" else "failed",
@@ -2187,7 +2194,7 @@ def invoke_opencode(
     # stream and on any stream that does not report its model.
     if not has_session_cmd and (
         resume_session_id or not observed_model or "/" not in observed_model
-    ):
+    ) and not auth_access_failure(err_combined):
         if not observed_model:
             stream_error = "OpenCode stream did not report the executed model."
             stream_class = "model_unavailable"
@@ -2242,7 +2249,7 @@ def invoke_opencode(
         if final_text:
             (attempt_dir / "partial_result.md").write_text(final_text + "\n", encoding="utf-8")
         err_class = classify_failure(code, "", err_combined, timed_out=False)
-        if code == 0 and not stream_errors and (not saw_completion or not final_text):
+        if code == 0 and err_class == "failed" and not stream_errors and (not saw_completion or not final_text):
             err_class = "format"
         return {
             "status": "quota" if err_class == "quota" else "failed",
@@ -2586,6 +2593,7 @@ def invoke_antigravity(
         elif auto_denial and err_class not in (
             "quota",
             "auth",
+            "auth_access",
             "model_unavailable",
             "no_option",
             "timeout",
@@ -2595,7 +2603,7 @@ def invoke_antigravity(
             # different (possibly weaker) model and hide the lost permissions.
             # A specific quota/auth/model class still wins.
             err_class = "permission"
-        elif code == 0 and result_status == "SUCCESS" and not response_text:
+        elif code == 0 and result_status == "SUCCESS" and not response_text and err_class == "failed":
             err_class = "format"
         elif code == 0 and result_status is None and err_class == "failed":
             # No terminal `result` event: a protocol/shape change, not a
@@ -3748,6 +3756,8 @@ def execute_task(
             child_env["CROSS_SUBAGENTS_RUN_ID"] = eff_run_id
             child_env["CROSS_SUBAGENTS_PARENT_INSTANCE"] = lease["instance_id"]
             child_env["CROSS_SUBAGENTS_PARENT_TASK_ID"] = eff_task_id
+            if effective_sandbox != "bypass":
+                child_env["CROSS_SUBAGENTS_AUTH_CONTEXT"] = "restricted"
 
             # The guard's own artifacts live under the run directory. When the
             # cache is inside --cwd, writing them between snapshot and verify
@@ -3787,7 +3797,7 @@ def execute_task(
                 route_buckets = set(route_quota_buckets(route))
                 if route["route_id"] in attempted_routes or (route_buckets & exhausted_buckets):
                     continue
-                if ((preflight_block or any(a.get("error_class") in ("quota", "auth") for a in attempts_history))
+                if ((preflight_block or any(a.get("error_class") in ACCOUNT_ROUTE_FAILURES for a in attempts_history))
                         and (route.get("billing_mode") or classify_route_billing(route)) not in recovery_billing):
                     continue
                 attempted_routes.add(route["route_id"])
@@ -3797,7 +3807,7 @@ def execute_task(
                         route["route_id"], preflight_block, "automatic",
                     )
 
-                if attempts_history and attempts_history[-1].get("error_class") in ("quota", "auth"):
+                if attempts_history and attempts_history[-1].get("error_class") in ACCOUNT_ROUTE_FAILURES:
                     previous = attempts_history[-1]
                     context_path = task_dir / f"{previous['error_class']}-handover-{previous['attempt']}.md"
                     context = _quota_handover_context(
@@ -3822,9 +3832,11 @@ def execute_task(
                     record_handover(
                         eff_run_id, eff_task_id, eff_task_id,
                         previous["route_id"], route["route_id"],
-                        "Authentication rejected; continuing through the eligible fallback chain."
-                        if previous["error_class"] == "auth" else
-                        "Quota exhausted; continuing through the eligible fallback chain.",
+                        {
+                            "auth": "Authentication rejected",
+                            "auth_access": "Authentication unavailable in this execution environment",
+                            "quota": "Quota exhausted",
+                        }[previous["error_class"]] + "; continuing through the eligible fallback chain.",
                         "automatic", str(context_path),
                     )
 
@@ -3916,9 +3928,10 @@ def execute_task(
                                 if str(w).strip()
                             ]
                             detail = f" {' '.join(unusable_reasons)}" if unusable_reasons else ""
+                            blocked = agent_info.get("auth_access_blocked")
                             res: dict[str, Any] = {
                                 "status": "failed",
-                                "exit_code": 127,
+                                "exit_code": 1 if blocked else 127,
                                 "session_id": None,
                                 "usage": {"input_tokens": 0, "output_tokens": 0},
                                 "requested_model": route.get("requested_model") or route["model_id"],
@@ -3926,8 +3939,8 @@ def execute_task(
                                 "observed_model": None,
                                 "session_cleaned_up": True,
                                 "cleanup_verified": True,
-                                "error_class": "not_installed",
-                                "error": f"Agent '{agent}' is not installed or not usable.{detail}",
+                                "error_class": "auth_access" if blocked else "not_installed",
+                                "error": AUTH_ACCESS_WARNING if blocked else f"Agent '{agent}' is not installed or not usable.{detail}",
                             }
                         elif agent == "codex":
                             res = invoke_codex(
@@ -4088,7 +4101,7 @@ def execute_task(
                     duration_ms = int((time.monotonic() - t0) * 1000)
 
                     maintenance_notice: dict[str, Any] | None = None
-                    if res.get("error_class") in ("quota", "auth"):
+                    if res.get("error_class") in ACCOUNT_ROUTE_FAILURES:
                         if res.get("error_class") == "quota":
                             error = res.get("error") or "Rate limit reached"
                             # The display error is truncated by adapters. Keep
@@ -4102,7 +4115,8 @@ def execute_task(
                             record_quota_observation(bucket, observation_error)
                         else:
                             bucket = route["quota_bucket"]
-                            record_auth_rejection(bucket, str(res.get("error") or ""), agent_version)
+                            if res.get("error_class") == "auth":
+                                record_auth_rejection(bucket, str(res.get("error") or ""), agent_version)
                         exhausted_buckets.add(bucket)
                     elif res.get("error_class") in ("no_option", "format"):
                         prev_recipe_flags = dict(current_recipe_flags)
@@ -4314,7 +4328,7 @@ def execute_task(
                 if resume_session_id or no_fallback:
                     break
 
-                if (attempts_history[-1].get("error_class") in ("quota", "auth")
+                if (attempts_history[-1].get("error_class") in ACCOUNT_ROUTE_FAILURES
                         and recovery_policy is not None and recovery_selections < 3):
                     recovery_selections += 1
                     recovery_args = {
@@ -4347,6 +4361,7 @@ def execute_task(
                 if attempts_history[-1].get("error_class") in (
                     "quota",
                     "auth",
+                    "auth_access",
                     "model_unavailable",
                     "not_installed",
                     "no_option",
@@ -4609,7 +4624,7 @@ def _quota_handover_context(
         except OSError as exc:
             excerpt = f"Partial answer could not be read: {exc}"
     reason = (
-        "The previous route could not authenticate." if previous.get("error_class") == "auth"
+        "The previous route could not authenticate." if previous.get("error_class") in ("auth", "auth_access")
         else "The previous route exhausted its quota."
     )
     return (

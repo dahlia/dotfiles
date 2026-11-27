@@ -47,7 +47,7 @@ from common import (
     route_quota_buckets,
     validate_safe_identifier,
 )
-from probe import probe_all, run_cmd, strip_ansi
+from probe import auth_access_failure, probe_all, restricted_auth_context, run_cmd, strip_ansi
 
 QUOTA_TTL_SECONDS = 900  # 15 minutes
 RESET_CREDIT_WAIT_SECONDS = 1800  # 30 minutes notification window
@@ -923,6 +923,8 @@ def _probe_opencode_provider(binary: str, provider: str) -> dict[str, Any]:
                 windows = _go_windows(data.get("go"))
                 if windows:
                     return {"windows": windows, "auth_status": "verified"}
+        elif auth_access_failure(f"{proc.stderr}\n{proc.stdout}", auth_probe=True):
+            raise PermissionError("Could not access OpenCode Console authentication in this environment.")
         elif re.search(r"\b401\b|\bunauthorized\b", strip_ansi(proc.stderr or ""), re.I):
             # This account error also applies to Console-backed Zen routes.
             return {"auth_status": "rejected", "console_auth_rejected": True}
@@ -980,6 +982,8 @@ def query_opencode_quota(binary: str, agent_info: dict[str, Any]) -> dict[str, A
         for provider, future in pending.items():
             try:
                 probe = future.result()
+            except PermissionError:
+                raise
             except (OSError, ValueError, subprocess.TimeoutExpired):
                 # Never persist command output, HTTP bodies, or credential data.
                 probe = {}
@@ -1109,8 +1113,10 @@ def record_quota_observation(bucket_id: str, error_text: str, reset_seconds: int
 
 def record_auth_rejection(bucket_id: str, error_text: str, agent_version: str | None) -> None:
     """Briefly avoid a credential rejected during dispatch, without saving its error text."""
+    if restricted_auth_context() or auth_access_failure(error_text):
+        return
     if not re.search(
-        r"\b401\b|\bunauthorized\b|not logged in|login required|"
+        r"\b401\b|\bunauthorized\b|"
         r"invalid (?:api key|access token)|(?:token|credentials?) (?:has |have )?expired|invalid_grant",
         error_text, re.I,
     ):
@@ -1369,6 +1375,8 @@ def collect_quota(
 
     for agent in agents_to_query:
         a_info = (probe_data.get("agents") or {}).get(agent) or {}
+        if a_info.get("auth_access_blocked"):
+            continue  # Access in this environment says nothing about the shared quota.
         binary = a_info.get("binary")
         ver = a_info.get("version")
         fp = compute_agent_config_fingerprint(agent, binary, ver)
@@ -1418,6 +1426,8 @@ def collect_quota(
             q_res["collected_at"] = now_iso()
             fresh_results[agent] = q_res
         except Exception as exc:
+            if isinstance(exc, PermissionError) or auth_access_failure(str(exc), auth_probe=True):
+                continue
             prev = existing_agents.get(agent)
             if isinstance(prev, dict) and isinstance(prev.get("buckets"), dict) and prev["buckets"]:
                 stale_copy = copy.deepcopy(prev)
@@ -1471,7 +1481,10 @@ def collect_quota(
             "buckets": all_buckets,
         }
 
-    baseline_saved = locked_update_json(cache_path, _merge)
+    baseline_saved = (
+        locked_update_json(cache_path, _merge) if fresh_results and not restricted_auth_context()
+        else _merge(existing)
+    )
     return overlay_observations(baseline_saved)
 
 

@@ -88,6 +88,7 @@
         "not_installed",
         "no_option",
         "auth",
+        "auth_access",
         "model_unavailable",
         "quota",
         "transient",

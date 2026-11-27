@@ -136,6 +136,44 @@ class QuotaRecoveryTests(unittest.TestCase):
             self.assertNotIn("api_metered", args["allowed_billing_modes"])
             self.assertEqual(run.build_run_report("recovery")["handovers"][0]["replacement_status"], "ok")
 
+    def test_local_auth_access_failure_falls_back_without_rejecting_account(self):
+        primary = common.normalize_model_route("opencode", "deepseek", "deepseek-v4")
+        backup = common.normalize_model_route("opencode", "opencode-go", "deepseek-v4")
+        error = "Not logged in: could not open keyring (D-Bus permission denied)"
+        error_class = run.classify_failure(1, "", error)
+        self.assertEqual(error_class, "auth_access")
+        self.assertEqual(run.classify_failure(1, "", "HTTP 401: token expired"), "auth")
+        self.assertEqual(run.classify_failure(1, "", "sandbox: permission denied writing report"), "permission")
+
+        def invoke(*args, **kwargs):
+            route = args[1]
+            metadata = {"cleanup_verified": True, "session_id": None, "usage": {},
+                        "session_cleaned_up": True}
+            if route == backup:
+                (args[3] / "result.md").write_text("Done")
+                return {"status": "ok", "exit_code": 0, **metadata}
+            return {"status": "failed", "exit_code": 1, "error_class": error_class,
+                    "error": error, **metadata}
+
+        selections = [
+            {"status": "ok", "selected": primary, "fallbacks": [], "rationale": "test selection"},
+            {"status": "ok", "selected": backup, "fallbacks": [], "rationale": "test selection"},
+        ]
+        with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {"CROSS_SUBAGENTS_CACHE_DIR": td}), patch.object(
+            run, "select_routes", side_effect=selections
+        ) as select, patch.object(run, "probe_all", return_value={"agents": {"opencode": {
+            "usable": True, "binary": "opencode", "version": "2.0.0",
+        }}}), patch.object(run, "invoke_opencode", side_effect=invoke) as dispatch, patch.object(
+            run, "record_auth_rejection"
+        ) as reject:
+            result = run.execute_task(run_id="worker", task_id="review", cwd=td, prompt_text="review",
+                                      sandbox_mode="read-only", quota_state={"buckets": {}, "agents": {}})
+            self.assertEqual(result["route_id"], backup["route_id"])
+            self.assertEqual(result["status"], "ok", result.get("error"))
+            self.assertEqual(select.call_args.kwargs["exclude_buckets"], [primary["quota_bucket"]])
+            self.assertTrue(all(call.args[7] == "read-only" for call in dispatch.call_args_list))
+            reject.assert_not_called()
+
     def test_explicit_route_blocked_at_preflight_is_never_invoked(self):
         primary = common.normalize_model_route("antigravity", "google", "gemini-4-argon-high", auth_plan="subscription")
         replacement = common.normalize_model_route("opencode", "google", "gemini-4-argon", auth_plan="subscription")

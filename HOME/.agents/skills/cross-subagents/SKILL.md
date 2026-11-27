@@ -100,7 +100,12 @@ exact model and required execution policy. Native tools avoid startup overhead
 but cannot provide CLI session-suppression flags. Use `run.py` for another
 agent/vendor or exact IDs, hygiene/resumption unavailable natively.
 If external binaries are blocked by host policy, use permitted native/inline
-execution and tell the user; do not bypass the policy.
+execution and tell the user; do not bypass the policy. When a coordinator runs
+inside a sandbox that does not identify itself, set
+`CROSS_SUBAGENTS_AUTH_CONTEXT=restricted` for its helpers. They verify CLI
+authentication locally and keep those results out of shared discovery and
+quota caches. An `auth_access` receipt identifies an environment-specific
+failure. Keep the original execution policy when selecting a fallback.
 Native receipts do not verify execution/model/permissions: retain host task
 and completion/model evidence and register with `record-native` using
 [reporting.md](references/reporting.md).
