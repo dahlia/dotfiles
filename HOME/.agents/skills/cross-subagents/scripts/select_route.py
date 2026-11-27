@@ -1074,7 +1074,11 @@ def evaluate_route_quota(
                 auth_rejected_buckets.append(b_id)
             elif not stale and bucket.get("auth_status") == "verified":
                 auth_verified = True
-        windows = list((bucket.get("windows") or {}).values())
+        # Codex snapshots use null for an unavailable secondary window.
+        windows = [
+            window for window in (bucket.get("windows") or {}).values()
+            if isinstance(window, dict) and window
+        ]
         if not windows or is_observed:
             windows.append(bucket)
         for b in windows:

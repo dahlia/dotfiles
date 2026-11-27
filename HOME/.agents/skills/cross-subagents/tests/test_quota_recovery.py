@@ -16,6 +16,33 @@ import select_route
 
 
 class QuotaRecoveryTests(unittest.TestCase):
+    def test_codex_quota_ignores_null_secondary_window(self):
+        route = common.normalize_model_route("codex", "openai", "gpt-6.2-sol")
+        bucket_id = route["quota_bucket"]
+        primary = {"used_percent": 100, "exhausted": True, "resets_at_epoch": 2000}
+        buckets = {bucket_id: {"windows": {"primary": primary, "secondary": None}}}
+
+        with patch.object(select_route.time, "time", return_value=1500) as clock:
+            active = select_route.evaluate_route_quota(route, buckets, True)
+            self.assertEqual(active["exhausted_buckets"], [bucket_id])
+            self.assertEqual(active["used_percent"], 100)
+            clock.return_value = 2000
+            expired = select_route.evaluate_route_quota(route, buckets, False)
+            self.assertFalse(expired["exhausted"])
+            self.assertEqual(expired["status"], "unknown")
+
+    def test_quota_uses_bucket_summary_when_windows_are_null(self):
+        route = common.normalize_model_route("codex", "openai", "gpt-6.2-sol")
+        bucket_id = route["quota_bucket"]
+        buckets = {bucket_id: {
+            "status": "ample", "used_percent": 25,
+            "windows": {"primary": None, "secondary": None},
+        }}
+
+        result = select_route.evaluate_route_quota(route, buckets, False)
+        self.assertEqual(result["status"], "ample")
+        self.assertEqual(result["used_percent"], 25)
+
     def test_stale_fable_limit_applies_to_both_entrypoints_only_until_reset(self):
         fable = common.normalize_model_route("claude-code", "anthropic", "claude-fable-5-1")
         bridge = common.normalize_model_route("opencode", "claude-agent", "claude-fable-5-1")
