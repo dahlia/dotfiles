@@ -10,10 +10,23 @@ restored; take observed or reported temporary changes into account too.
 Evidence and confirmation
 -------------------------
 
-1. Verify termination and an unchanged origin first. Then inspect the copy
-   guard's changed paths, answer, and available tool trace. In the absence
-   of a trace or other corroboration, do not infer order from a reviewer's
-   assurance or a clean sentinel.
+Verify termination and an unchanged origin first. Then inspect the copy
+guard's changed paths, answer, and available tool trace. Set aside untracked
+or Git-ignored changes in the copy when the available context shows they are
+incidental tool output and have no bearing on the review. For example, browser
+snapshots or logs under `.playwright-mcp/` can qualify even when the path was
+undeclared. Consider what produced the files and whether they were inputs to
+the code or checks under review. Use the path name and Git status as clues.
+When the context already establishes that the files are incidental, continue
+without a confirmation attempt or reconstructing when each file was written.
+Use the evidence rules below for tracked files, Git metadata, and any
+untracked or Git-ignored changes whose impact remains uncertain. If a report
+also contains incidental output, assess only the remaining changes.
+
+1. For changes that could affect the review, use the available evidence to
+   determine which reads and checks still apply. In the absence of a trace
+   or other corroboration, do not infer order from a reviewer's assurance or
+   a clean sentinel.
 2. Keep findings you can verify against the baseline. For example, a test
    added in scratch that fails against unchanged implementation can support
    a finding. A test that passes only after the reviewer edits implementation,
@@ -46,9 +59,10 @@ Do not present an earlier clean verdict as evidence. Prefer static inspection
 or checks with stdout and scratch-only outputs over repeating a command
 that rewrote protected inputs.
 
-Keep reports and output for any incident. After verified termination and
-classification, unchanged successful copies can be removed to reclaim
-space; keep mutated or uncertain copies private under `$WORK` for diagnosis.
+Follow the [retention rules in Step 5](../SKILL.md#step-5-report). After
+verified termination and classification, successful copies with only
+incidental output can be removed alongside unchanged copies. Keep other
+mutated or uncertain copies private under `$WORK` for diagnosis.
 
 Unsupported checkouts and hosts
 -------------------------------

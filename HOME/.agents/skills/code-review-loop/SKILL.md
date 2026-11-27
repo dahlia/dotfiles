@@ -62,15 +62,14 @@ reviewers. Do not exempt runner writes in the original repository.
 Every file this skill generates lives in `$WORK`, never in the repository. A
 prompt or a `review.json` written to the working tree shows up as an untracked
 file, which dirties a clean post-commit review and can get swept into the commit
-by a `git add -A` in pre-commit mode. Remove `$WORK` only after a successful
-loop with no failed, blocked or mutated attempts. Otherwise preserve it and
-report its path for diagnostic logs and any recovery data still needed.
+by a `git add -A` in pre-commit mode. Follow the
+[retention rules in Step 5](#step-5-report) before removing `$WORK`.
 The guard automatically removes each completed, unchanged attempt's backup
 archive and before/after snapshots once CLI child cleanup or native host
 completion is verified. This also applies to failed or blocked reviews: their
-logs remain, but unchanged inputs need no recovery copy. Mutated inputs, guard
-failures and uncertain completion retain recovery data. Never install an
-unconditional exit trap that deletes `$WORK`.
+logs remain, but unchanged inputs need no recovery copy. The guard retains
+recovery data for mutations, guard failures and uncertain completion. Never
+install an unconditional exit trap that deletes `$WORK`.
 
 Keep the contract to four short sections:
 
@@ -431,14 +430,15 @@ receipt. Negative or missing completion evidence does not prove termination.
 Triage verified findings from blocked or incomplete answers without granting
 clean coverage.
 
-An unchanged copy uses the usual clean/triage rules. A **mutated copy** does
-not invalidate the whole answer: follow
-[evidence and confirmation](references/review-evidence.md#evidence-and-confirmation).
-Require the same execution and coverage checks on both paths. For CLI the
-saved `.exit` is the command exit; the wrapper can return `40` independently.
-For native, `40` can accompany successful reviewer metadata. A failed **copy**
-guard with confirmed termination and verified original is unknown for that
-step, not a whole-loop stop. Keep the artifacts in either case.
+Use the usual clean and triage rules for an unchanged copy or one whose only
+changes are untracked or Git-ignored tool output unrelated to the review.
+Use [evidence and confirmation](references/review-evidence.md#evidence-and-confirmation)
+to decide which changes can be set aside and which evidence needs checking.
+Require the same execution and coverage checks for every copy. The wrapper
+can return `40` even when the reviewer succeeds. For CLI the saved `.exit` is
+the command exit. For native, check the reviewer metadata. If the copy guard
+fails to verify the copy, mark that step unknown. Continue with the remaining
+steps when termination and origin verification succeeded.
 
 Classify failures by `error_class` before retrying. `quota`, `auth` or
 `model_unavailable` (and `status: quota`) means re-plan the step or report it
@@ -636,15 +636,16 @@ Close with a short summary the user can act on:
     reviewer pass.
 
 Report execution modes, allowed output paths, retries and any validation that
-could not run. For copy mutations, list what changed, which findings or checks
-were confirmed on the baseline, and any remaining coverage gaps. If any
-attempt failed, was blocked, mutated protected inputs or
-lacked verification, preserve `$WORK` and report its path, even when a later
-retry succeeded. Keep guard reports and stderr so failures can be diagnosed
-without rerunning models. Only attempts needing recovery retain their large
-backup archives and snapshots; completed, unchanged attempts release them
-automatically. Remaining backup archives can contain private files; do not
-upload them or paste their contents into reports.
+could not run. Group incidental tool output by directory if worth mentioning.
+For mutations that could affect review evidence, list what changed, which
+findings or checks were confirmed on the baseline, and any remaining coverage
+gaps. If any attempt failed, was blocked, changed an input or Git state,
+raised doubt about review evidence, or lacked verification, preserve `$WORK`
+and report its path, even when a later retry succeeded. Keep guard reports and
+stderr so failures can be diagnosed without rerunning models. The guard
+automatically releases backup archives and snapshots for completed,
+unchanged attempts. Remaining backup archives can contain private files.
+Keep their contents out of uploads and reports.
 
 Remove `$WORK` only when every attempt was usable and no recovery is pending,
 after all rounds and authorized commits are finished.
