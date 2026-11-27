@@ -1057,36 +1057,53 @@ def evaluate_route_quota(
     limiting_bucket_id = route["quota_bucket"]
     limiting_bucket: dict[str, Any] = {}
 
+    auth_rejected_buckets: list[str] = []
+    auth_verified = False
+    now = time.time()
+
     for b_id in app_buckets:
-        b = buckets.get(b_id) or {}
-        if not b:
+        bucket = buckets.get(b_id) or {}
+        if not bucket:
             continue
-        is_obs_limited = b.get("status") == "observed_limited"
-        b_stale = False if is_obs_limited else agent_stale
-        reset = b.get("resets_at_epoch")
-        if not is_obs_limited and isinstance(reset, (int, float)):
-            if reset <= time.time():
+        stale = agent_stale or bool(bucket.get("stale"))
+        is_observed = bucket.get("status") == "observed_limited"
+        if route.get("auth_plan") != "free":
+            if bucket.get("auth_rejection_observed") or (
+                not stale and bucket.get("auth_status") == "rejected"
+            ):
+                auth_rejected_buckets.append(b_id)
+            elif not stale and bucket.get("auth_status") == "verified":
+                auth_verified = True
+        windows = list((bucket.get("windows") or {}).values())
+        if not windows or is_observed:
+            windows.append(bucket)
+        for b in windows:
+            reset = b.get("resets_at_epoch")
+            observed = is_observed and b is bucket
+            if not observed and isinstance(reset, (int, float)) and reset <= now:
                 continue  # The old window no longer describes current usage.
-            if b.get("exhausted"):
-                b_stale = False  # Staleness does not replenish a confirmed limit.
-        if b_stale:
-            continue
+            if stale and not observed and not (
+                b.get("exhausted") and isinstance(reset, (int, float))
+            ):
+                continue
 
-        if b.get("exhausted"):
-            exhausted_buckets.append(b_id)
+            if b.get("exhausted") and b_id not in exhausted_buckets:
+                exhausted_buckets.append(b_id)
 
-        sc = float(b.get("scarcity", 0.25))
-        if sc >= max_scarcity:
-            max_scarcity = sc
-            limiting_bucket_id = b_id
-            limiting_bucket = b
+            sc = float(b.get("scarcity", 0.25))
+            if (bool(b.get("exhausted")), sc) >= (
+                bool(limiting_bucket.get("exhausted")), max_scarcity
+            ):
+                limiting_bucket_id = b_id
+                limiting_bucket = b
 
-        max_imminence = max(max_imminence, float(b.get("reset_imminence", 0.0)))
-        max_credit_pressure = max(max_credit_pressure, float(b.get("credit_expiry_pressure", 0.0)))
-        hr = b.get("effective_headroom")
-        if hr is not None:
-            hr_val = float(hr)
-            min_headroom = hr_val if min_headroom is None else min(min_headroom, hr_val)
+            max_scarcity = max(max_scarcity, sc)
+            max_imminence = max(max_imminence, float(b.get("reset_imminence", 0.0)))
+            max_credit_pressure = max(max_credit_pressure, float(b.get("credit_expiry_pressure", 0.0)))
+            hr = b.get("effective_headroom")
+            if hr is not None:
+                hr_val = float(hr)
+                min_headroom = hr_val if min_headroom is None else min(min_headroom, hr_val)
 
     if not limiting_bucket:
         max_scarcity = 0.25
@@ -1097,6 +1114,8 @@ def evaluate_route_quota(
         "primary_bucket_id": route["quota_bucket"],
         "applicable_buckets": app_buckets,
         "exhausted_buckets": exhausted_buckets,
+        "auth_rejected_buckets": auth_rejected_buckets,
+        "auth_verified": auth_verified,
         "exhausted": len(exhausted_buckets) > 0,
         "status": "exhausted" if exhausted_buckets else limiting_bucket.get("status", "unknown"),
         "used_percent": limiting_bucket.get("used_percent"),
@@ -1204,6 +1223,9 @@ def check_route_eligibility(
         )
         if not matches_pin:
             return False, f"pinned_model_mismatch:{route['route_id']}", q_eval, traits
+
+    if q_eval["auth_rejected_buckets"]:
+        return False, f'auth_rejected:{",".join(q_eval["auth_rejected_buckets"])}', q_eval, traits
 
     if q_eval["exhausted"]:
         return False, f"quota_exhausted:{','.join(q_eval['exhausted_buckets'])}", q_eval, traits
@@ -1513,10 +1535,12 @@ def select_routes(
                 + speed_weight * speed_score
                 + WEIGHT_RECENCY * traits["recency_score"]
                 + headroom_bonus
+                + (0.03 if q_eval["auth_verified"] else 0.0)
                 + history_adjustment
             )
             score = round(score, 4)
 
+            auth_str = ", auth verified" if q_eval["auth_verified"] else ""
             used_str = (
                 f"{q_eval['used_percent']}% used"
                 if q_eval.get("used_percent") is not None
@@ -1555,7 +1579,7 @@ def select_routes(
             rationale = (
                 f"{r_id} [{off_agent} / {off_model}] selected — {task_norm} fit {traits['task_fit']:.2f} "
                 f"({traits['trait_source']}){vision_str}{speed_str}{tier_str}{age_str}, "
-                f"{q_eval['bucket_id']} {used_str}{reset_str}{history_str}, score {score:.3f}"
+                f"{q_eval['bucket_id']} {used_str}{reset_str}{auth_str}{history_str}, score {score:.3f}"
             )
 
             candidates.append(

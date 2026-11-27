@@ -261,61 +261,8 @@ user:
     summary.
 
 
-Cost gate and observability
----------------------------
-
-Before launching a parallel fan-out, run:
-
-~~~~ bash
-python3 <skill-dir>/scripts/run.py --cost-gate <num_calls> --task <category> \
-  [--route <agent>/<provider>/<model>] [--run-id <run-id>]
-~~~~
-
-`--route` prices that exact model (resolved from the catalog), and `--run-id`
-prices the routes saved in that run's `selection-plan.json` (the mean unit cost
-across planned steps, listed under `planned_routes`). Without either, the JSON
-is labelled `selection_source: "auto"` and its `note` states that the estimate
-is a generic representative route rather than the work plan.
-
-Print the one-line summary and ask before spawning if
-`requires_user_confirmation` is true. The thresholds are 5 total calls
-(including the coordinator) or an estimated cost index of 1.5. The thresholds
-are waived for an explicit route or fully resolved plan containing subscriptions
-when every subscription route has at least 25% remaining in its current weekly
-quota windows or a verified, unexpired free reset credit on the same account.
-Known free routes can be mixed with subscriptions without invalidating the
-waiver. Metered or unknown billing and unresolved planned routes still require
-confirmation. If the coordinator uses a different route, include it in the
-plan or check it separately before dispatch. Missing or stale quota evidence
-does not earn a waiver.
-
-Use `prepare.py` first to populate the quota cache, or supply a fresh
-coordinator snapshot. If `confirmation_timeout_seconds` is set, tell the user
-which routes and actions are planned, why the gate triggered, and that the
-same plan will run 30 minutes after delivery if they do not reply. Offer
-options to run now, wait, or cancel. This default is only for call/cost
-thresholds on a concrete subscription/free plan. If the timeout is `null`,
-do not treat silence as approval. Resolve generic estimates and incomplete
-plans before using a timeout.
-
-Use the host's asynchronous reply and one-shot wake-up mechanisms, as in
-[quota hand-over](quota-handover.md#ask-with-a-30-minute-default). Save the
-delivered question, UTC delivery time and deadline, full plan (including the
-coordinator), original constraints, and decision under the run artifacts.
-Continue independent work while waiting. If the host cannot wake this
-coordinator with access to the replies, use a supported interruptible wait
-or leave the decision pending and disclose the limitation. A background job
-may wake the coordinator but must not dispatch the batch itself or assume
-that an unread reply is silence. Do not poll or count turns as elapsed time.
-
-Before dispatch, honor any reply already received and verify that the batch
-is still pending and has not started. On timeout, recheck route availability,
-billing, permissions, and relevant inputs. Run only the unchanged plan, record
-the decision as `timeout`, and report that the default was used. If the plan
-needs to change, reassess it under the original request; the expired question
-does not authorize the change. Neither a waiver nor a timeout bypasses
-execution-time quota checks, adds billing or permissions, redeems a credit,
-or overrides an explicit requirement to wait for approval.
+Observability
+-------------
 
 Every invocation appends `task_started` and `task_finished` events to
 `$SKILL_CACHE_DIR/runs/<run-id>/manifest.jsonl`, and `run.py mark` appends

@@ -98,20 +98,27 @@ underlying model to a shared `canonical_key` (for example, both
 Quota tracking
 --------------
 
-OpenCode does not expose a unified proactive quota command across all connected
-providers. Track quota per provider bucket (`opencode:<provider>`) using
-observation mode:
+Selection reads provider-specific account metadata without dispatching a model.
 
- -  Initialize each authenticated provider bucket as `unknown`.
- -  Initialize `opencode:opencode-go` whenever the OpenCode Console credential
-    exists, even though it does not appear as a separate auth entry; failure
-    observations are recorded against that bucket.
- -  When an invocation fails with HTTP 429 or an exhausted-quota message on
-    `opencode:<provider>`, record the observation and cooldown timestamp via
-    `scripts/quota.py record-observation --bucket opencode:<provider> --error "<message>"`.
- -  Exhaustion on `opencode:opencode-go` does not mark `opencode:deepseek`
-    exhausted; `scripts/select_route.py` can fall back between providers for the
-    same canonical model.
+ -  OpenCode Go uses `opencode api get /api/experimental/usage/limits` for
+    the active Console workspace's rolling, weekly, and monthly windows. A
+    dedicated Go API key can use `/zen/go/v1/usage` when the CLI supplies no
+    Go windows.
+ -  Kimi Code membership uses the regional `/coding/v1/usages` service for
+    windows the account exposes. Moonshot's separately billed general API
+    uses a different account and is not queried by this check.
+ -  DeepSeek's `/user/balance` reports whether the direct API balance is
+    usable. Per-minute and upstream limits remain unknown.
+ -  Other providers and failed lookups fall back to observed failures. A
+    confirmed auth rejection or exhausted window blocks its provider bucket
+    (`opencode:<provider>`), even when the same canonical model also appears
+    in another catalog. Account calls use only the active stored connection,
+    and the quota cache contains normalized usage and auth status only.
+
+During dispatch, `run.py` excludes a failed provider pool, reselects within the
+original constraints, and records the hand-over. Quota failures retain a
+reported reset, if one is available. Definite credential rejections without
+a newer successful check get a five-minute cooldown.
 
 
 Subagent invocation

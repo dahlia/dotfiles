@@ -61,7 +61,6 @@ from common import (
     normalize_official_model_id,
     now_iso,
     official_agent_name,
-    parse_iso_age_seconds,
     read_json_file,
     validate_official_model_id,
     validate_safe_identifier,
@@ -77,7 +76,7 @@ from probe import (
     probe_all,
     strip_ansi,
 )
-from quota import QUOTA_TTL_SECONDS, collect_quota, record_quota_observation, quota_observation_bucket
+from quota import collect_quota, quota_observation_bucket, record_auth_rejection, record_quota_observation
 from registry import acquire_lease, heartbeat_lease, is_pid_alive, release_lease
 from select_route import (
     check_route_eligibility,
@@ -93,10 +92,6 @@ from select_route import (
 DEFAULT_TIMEOUT_SECONDS = 600
 DEFAULT_QUEUE_TIMEOUT_SECONDS = 300
 HEARTBEAT_INTERVAL_SECONDS = 30.0
-COST_GATE_MAX_CALLS = 5
-COST_GATE_MAX_COST_INDEX = 1.5
-COST_GATE_MIN_WEEKLY_REMAINING = 25.0
-COST_GATE_REPLY_TIMEOUT_SECONDS = 30 * 60
 # A terminal finish reason that means the final assistant message is complete.
 # Anything else (`length`, `tool-calls`, `content-filter`, unknown) is truncated.
 OPENCODE_SUCCESS_FINISH = frozenset({"stop", "end_turn", "completed", "finish", "done"})
@@ -459,6 +454,11 @@ def classify_failure(exit_code: int, stdout_text: str, stderr_text: str, timed_o
     combined = f"{stdout_text}\n{stderr_text}".lower()
     if re.search(r"\bhit your [\w-]+ limit\b|\bindividual (?:model )?quota (?:reached|exhausted)\b", combined):
         return "quota"
+    if any(marker in combined for marker in (
+        "insufficient account funds", "insufficient balance", "payment required",
+        "active opencode go subscription is required", "opencode go subscription required",
+    )):
+        return "quota"
     rate_limited = any(
         k in combined
         for k in (
@@ -589,6 +589,8 @@ def classify_exception(exc: Exception) -> tuple[str, int]:
         # The route's CLI cannot honour the requested posture; this is an
         # option/capability mismatch, not a permission failure.
         return "no_option", 1
+    if "auth_rejected:" in msg:
+        return "auth", 1
     if "quota_exhausted" in msg or "rate limit" in msg:
         return "quota", 1
     if "model" in msg and ("not found" in msg or "unavailable" in msg or "eligible" in msg):
@@ -3423,13 +3425,14 @@ def execute_task(
                         sandbox_mode=effective_sandbox,
                     )
                     if not ok:
-                        if reason.startswith(("quota_exhausted:", "insufficient_absolute_quota:")):
+                        if reason.startswith(("quota_exhausted:", "insufficient_absolute_quota:", "auth_rejected:")):
                             preflight_block = (
-                                f"quota_exhausted: Explicit route '{explicit_route['route_id']}' "
-                                f"is ineligible ({reason}). Refresh quota and select another eligible "
-                                "route under the original constraints, or follow the quota hand-over procedure."
+                                f"{'auth_rejected' if reason.startswith('auth_rejected:') else 'quota_exhausted'}: "
+                                f"Explicit route '{explicit_route['route_id']}' is ineligible ({reason}). "
+                                "Select another eligible route under the original constraints, "
+                                "or follow the quota hand-over procedure."
                             )
-                            preflight_buckets = q_eval.get("exhausted_buckets") or []
+                            preflight_buckets = q_eval.get("auth_rejected_buckets") or q_eval.get("exhausted_buckets") or []
                             if no_fallback or resume_session_id:
                                 raise ValueError(preflight_block)
                         else:
@@ -3784,7 +3787,7 @@ def execute_task(
                 route_buckets = set(route_quota_buckets(route))
                 if route["route_id"] in attempted_routes or (route_buckets & exhausted_buckets):
                     continue
-                if ((preflight_block or any(a.get("error_class") == "quota" for a in attempts_history))
+                if ((preflight_block or any(a.get("error_class") in ("quota", "auth") for a in attempts_history))
                         and (route.get("billing_mode") or classify_route_billing(route)) not in recovery_billing):
                     continue
                 attempted_routes.add(route["route_id"])
@@ -3794,9 +3797,9 @@ def execute_task(
                         route["route_id"], preflight_block, "automatic",
                     )
 
-                if attempts_history and attempts_history[-1].get("error_class") == "quota":
+                if attempts_history and attempts_history[-1].get("error_class") in ("quota", "auth"):
                     previous = attempts_history[-1]
-                    context_path = task_dir / f"quota-handover-{previous['attempt']}.md"
+                    context_path = task_dir / f"{previous['error_class']}-handover-{previous['attempt']}.md"
                     context = _quota_handover_context(
                         previous, effective_cwd, effective_sandbox, execution_policy,
                         {
@@ -3819,6 +3822,8 @@ def execute_task(
                     record_handover(
                         eff_run_id, eff_task_id, eff_task_id,
                         previous["route_id"], route["route_id"],
+                        "Authentication rejected; continuing through the eligible fallback chain."
+                        if previous["error_class"] == "auth" else
                         "Quota exhausted; continuing through the eligible fallback chain.",
                         "automatic", str(context_path),
                     )
@@ -4097,6 +4102,7 @@ def execute_task(
                             record_quota_observation(bucket, observation_error)
                         else:
                             bucket = route["quota_bucket"]
+                            record_auth_rejection(bucket, str(res.get("error") or ""), agent_version)
                         exhausted_buckets.add(bucket)
                     elif res.get("error_class") in ("no_option", "format"):
                         prev_recipe_flags = dict(current_recipe_flags)
@@ -4308,7 +4314,7 @@ def execute_task(
                 if resume_session_id or no_fallback:
                     break
 
-                if (attempts_history[-1].get("error_class") == "quota"
+                if (attempts_history[-1].get("error_class") in ("quota", "auth")
                         and recovery_policy is not None and recovery_selections < 3):
                     recovery_selections += 1
                     recovery_args = {
@@ -4602,9 +4608,13 @@ def _quota_handover_context(
                 excerpt = excerpt[:24000] + "\n[Truncated; inspect the evidence path if needed.]"
         except OSError as exc:
             excerpt = f"Partial answer could not be read: {exc}"
+    reason = (
+        "The previous route could not authenticate." if previous.get("error_class") == "auth"
+        else "The previous route exhausted its quota."
+    )
     return (
-        "Quota hand-over context\n=======================\n"
-        "The previous route exhausted its quota. Continue the original task above with "
+        "Provider hand-over context\n==========================\n"
+        f"{reason} Continue the original task above with "
         "its original scope, permissions, write set and acceptance criteria. Inspect the "
         "current working tree before changing files: the failed attempt may have already "
         "edited them. Determine completed and remaining work from files and evidence; "
@@ -4885,300 +4895,6 @@ def format_human_run_report(report: dict[str, Any]) -> str:
         for tr in sig_trailers:
             lines.append(f"  {tr}")
     return "\n".join(lines)
-
-
-def _route_cost_index(route: dict[str, Any], default: float = 0.20) -> float:
-    """Coerce a route's cost index, tolerating null/absent catalog values."""
-    value = (route or {}).get("cost_index")
-    try:
-        return float(value) if value is not None else default
-    except (TypeError, ValueError):
-        return default
-
-
-def _catalog_routes(route_ids: list[str]) -> dict[str, dict[str, Any]]:
-    """Index discovered catalog routes by lowercase route ID for the given agents."""
-    agents = sorted(
-        {route_id.split("/", 1)[0] for route_id in route_ids if "/" in route_id}
-    )
-    try:
-        catalog = collect_all_models(agents=agents or None, refresh=False)
-    except Exception:
-        return {}
-    index: dict[str, dict[str, Any]] = {}
-    for entry in (catalog or {}).values():
-        for route in entry.get("routes") or []:
-            route_id = str(route.get("route_id") or "").lower()
-            if route_id:
-                index[route_id] = dict(route)
-    return index
-
-
-def _subscription_gate_exemption(
-    route: dict[str, Any], state: dict[str, Any], now_ts: float,
-) -> str | None:
-    """Use actual weekly percentages, not capacity-weighted quota scores."""
-    if not all(route.get(key) for key in ("agent", "provider", "canonical_key")):
-        return None
-    owner = route_quota_owner(route)
-    account = (state.get("agents") or {}).get(owner) or {}
-    age = parse_iso_age_seconds(account.get("collected_at"))
-    if account.get("stale") or age is None or age >= QUOTA_TTL_SECONDS:
-        return None
-    if owner == "antigravity":
-        source_age = parse_iso_age_seconds(account.get("source_updated_at"))
-        if source_age is None or source_age >= QUOTA_TTL_SECONDS:
-            return None
-
-    buckets = {**(account.get("buckets") or {}), **(state.get("buckets") or {})}
-    weekly_remaining: list[float] = []
-    for bucket_id in route_quota_buckets(route):
-        bucket = buckets.get(bucket_id) or {}
-        windows = (bucket.get("windows") or {}).values() if bucket.get("windows") else [bucket]
-        weekly = [w for w in windows if w and w.get("window_duration_mins") == 10080]
-        if bucket_id in ("claude-code:all-models", "claude-code:fable") and not weekly:
-            weekly_remaining.append(0.0)  # A known weekly scope is missing from a partial report.
-        for window in weekly:
-            reset = window.get("resets_at_epoch")
-            used = window.get("used_percent")
-            try:
-                used_pct = float(used) if not isinstance(used, bool) else -1.0
-            except (ValueError, TypeError, OverflowError):
-                used_pct = -1.0
-            if (
-                bucket.get("status") == "observed_limited"
-                or window.get("exhausted")
-                or not isinstance(reset, (int, float))
-                or not reset > now_ts
-                or not 0 <= used_pct <= 100
-            ):
-                weekly_remaining.append(0.0)
-            else:
-                weekly_remaining.append(100.0 - used_pct)
-    if weekly_remaining and min(weekly_remaining) >= COST_GATE_MIN_WEEKLY_REMAINING:
-        return "weekly_quota"
-
-    # Only Codex currently reports account-scoped reset grants. A count alone
-    # is not evidence of a usable free grant; monetary balances do not count.
-    if owner == "codex":
-        credits = account.get("reset_credits") or {}
-        if credits.get("available_count") != 0 and any(
-            isinstance(credit, dict)
-            and credit.get("id")
-            and credit.get("status") == "available"
-            and credit.get("free_grant") is True
-            and isinstance(credit.get("expires_at"), (int, float))
-            and credit["expires_at"] > now_ts
-            for credit in credits.get("credits") or []
-        ):
-            return "free_reset_credit"
-    return None
-
-
-def evaluate_cost_gate(
-    num_calls: int,
-    task_category: str = "general",
-    run_id: str | None = None,
-    include_fallback_allowance: bool = True,
-    route_str: str | None = None,
-    force_route: bool = False,
-    max_tier: int | None = None,
-    max_cost_index: float | None = None,
-    exclude_vendors: list[str] | None = None,
-    include_vendors: list[str] | None = None,
-    quota_agents: list[str] | None = None,
-    exclude_quota_agents: list[str] | None = None,
-    quota_cache_only: bool = False,
-    quota_state: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Check whether a planned fan-out exceeds the cost/call confirmation gate.
-
-    The estimate follows the plan the caller actually intends to run: an
-    explicit `--route`, the run's saved selection plan, or (as a last resort) an
-    auto-selected representative route. The last case is labelled `generic`,
-    because mixing models in a multi-round plan makes a single auto route a poor
-    proxy for the real cost.
-    """
-    selection_source = "auto"
-    plan_routes: list[dict[str, Any]] = []
-    resolved_plan: list[dict[str, Any]] = []
-    plan_steps: list[dict[str, Any]] = []
-    planned_ids: list[str] = []
-    top: dict[str, Any] = {}
-    fallbacks: list[dict[str, Any]] = []
-    estimate_scope = "generic auto-selected representative route (not a planned route)"
-
-    plan = load_selection_plan(run_id) if not route_str or run_id else {}
-    if route_str:
-        top = resolve_explicit_route(route_str, force_route=force_route)
-        selection_source = "explicit_route"
-        estimate_scope = f"explicit route {top.get('route_id')}"
-        if top.get("in_catalog") is False:
-            selection_source = "explicit_route_unverified"
-            estimate_scope = (
-                f"explicit route {top.get('route_id')} (unlisted model, family-prior cost)"
-            )
-        unit_cost = _route_cost_index(top)
-        billing_mode = top.get("billing_mode") or classify_route_billing(top)
-        cost_estimated = bool(top.get("cost_estimated", True))
-    else:
-        plan_steps = plan.get("steps") or []
-        planned_ids = [str(step.get("route_id") or "").strip() for step in plan_steps]
-        catalog_index = _catalog_routes(planned_ids)
-        resolved_plan = [
-            catalog_index[route_id.lower()]
-            for route_id in planned_ids
-            if route_id and route_id.lower() in catalog_index
-        ]
-        if resolved_plan:
-            selection_source = "saved_plan"
-            plan_routes = [
-                {
-                    "route_id": route.get("route_id"),
-                    "cost_index": _route_cost_index(route),
-                }
-                for route in resolved_plan
-            ]
-            unit_cost = round(
-                sum(_route_cost_index(route) for route in resolved_plan)
-                / len(resolved_plan),
-                3,
-            )
-            modes = {
-                str(route.get("billing_mode") or classify_route_billing(route))
-                for route in resolved_plan
-            }
-            billing_mode = modes.pop() if len(modes) == 1 else "mixed"
-            cost_estimated = any(bool(route.get("cost_estimated", True)) for route in resolved_plan)
-            estimate_scope = (
-                f"saved selection plan ({len(resolved_plan)} step(s): "
-                + ", ".join(str(route.get("route_id")) for route in resolved_plan)
-                + ")"
-            )
-        else:
-            sel = select_routes(
-                task=task_category,
-                run_id=run_id,
-                max_tier=max_tier,
-                max_cost_index=max_cost_index,
-                exclude_vendors=exclude_vendors,
-                include_vendors=include_vendors,
-                quota_agents=quota_agents,
-                exclude_quota_agents=exclude_quota_agents,
-                quota_cache_only=quota_cache_only,
-                quota_state=quota_state,
-            )
-            top = sel.get("selected") or {}
-            fallbacks = sel.get("fallbacks") or []
-            unit_cost = _route_cost_index(top)
-            billing_mode = top.get("billing_mode") or "unknown"
-            cost_estimated = bool(top.get("cost_estimated", True))
-
-    requires_orchestrator = num_calls >= 3
-    orchestrator_calls = 1 if requires_orchestrator else 0
-    effective_calls = num_calls + orchestrator_calls
-
-    fallback_buffer = 0.0
-    if include_fallback_allowance:
-        fb_cost = _route_cost_index(fallbacks[0], unit_cost) if fallbacks else unit_cost
-        fallback_buffer = round(0.15 * fb_cost * num_calls, 3)
-
-    total_cost_idx = round(effective_calls * unit_cost + fallback_buffer, 3)
-    priced_routes = resolved_plan or ([top] if top else [])
-    modes = [str(route.get("billing_mode") or classify_route_billing(route)) for route in priced_routes]
-    reasons: list[str] = []
-    if not route_str and (
-        plan.get("status") in ("partial", "no_route_available")
-        or len(resolved_plan) != len(planned_ids)
-    ):
-        reasons.append("unresolved_planned_route")
-    if "api_metered" in modes:
-        reasons.append("metered_billing")
-    if not modes or any(mode not in ("subscription", "free", "api_metered") for mode in modes):
-        reasons.append("unknown_billing")
-
-    exemptions: dict[str, str] = {}
-    subscriptions = [route for route, mode in zip(priced_routes, modes) if mode == "subscription"]
-    quota_waiver = False
-    if not reasons and selection_source in ("explicit_route", "saved_plan") and subscriptions:
-        cached_state: dict[str, Any] | None = None
-        now_ts = time.time()
-        quota_waiver = True
-        for index, (route, mode) in enumerate(zip(priced_routes, modes)):
-            if mode != "subscription":
-                continue
-            route_id = route["route_id"]
-            constraints = (
-                plan_steps[index].get("constraints") if selection_source == "saved_plan"
-                else planned_constraints_for_route(plan, route_id)
-            ) or {}
-            state = quota_state if quota_state is not None else constraints.get("quota_state")
-            if state is None:
-                # The gate reuses preparation's cache; it never needs a new
-                # provider read or to widen the coordinator's quota ownership.
-                if cached_state is None:
-                    cached_state = collect_quota(agents=[], cache_only=True)
-                state = cached_state
-            exemption = _subscription_gate_exemption(route, state, now_ts)
-            if exemption:
-                exemptions[route_id] = exemption
-            else:
-                quota_waiver = False
-
-    can_default_after_timeout = not reasons and selection_source in ("explicit_route", "saved_plan")
-    if not quota_waiver:
-        if effective_calls >= COST_GATE_MAX_CALLS:
-            reasons.append("call_threshold")
-        if total_cost_idx >= COST_GATE_MAX_COST_INDEX:
-            reasons.append("cost_index_threshold")
-    requires_confirmation = bool(reasons)
-    timeout_seconds = (
-        COST_GATE_REPLY_TIMEOUT_SECONDS if requires_confirmation and can_default_after_timeout else None
-    )
-    gate_detail = "within auto gate"
-    if timeout_seconds is not None:
-        gate_detail = f"ASK WITH {timeout_seconds // 60}-MINUTE DEFAULT ({', '.join(reasons)})"
-    elif requires_confirmation:
-        gate_detail = f"EXPLICIT CONFIRMATION REQUIRED ({', '.join(reasons)})"
-    elif quota_waiver:
-        gate_detail += f" ({', '.join(sorted(set(exemptions.values())))})"
-    est_tag = "estimated" if cost_estimated else "verified"
-    route_label = top.get("route_id") or f"{len(plan_routes)} planned route(s)"
-    summary = (
-        f"Planned fan-out: {num_calls} worker call(s)"
-        f"{' + 1 orchestrator' if requires_orchestrator else ''} on {route_label} "
-        f"(billing={billing_mode}, {est_tag} cost index {total_cost_idx:.2f}; "
-        f"scope: {estimate_scope}) — "
-        f"{gate_detail}; "
-        f"{'spawn dedicated orchestrator subagent' if requires_orchestrator else 'direct invocation allowed'}."
-    )
-    result = {
-        "planned_worker_calls": num_calls,
-        "orchestrator_calls": orchestrator_calls,
-        "total_planned_calls": effective_calls,
-        "primary_route": top.get("route_id"),
-        "selection_source": selection_source,
-        "estimate_scope": estimate_scope,
-        "planned_routes": plan_routes,
-        "billing_mode": billing_mode,
-        "cost_estimated": cost_estimated,
-        "unit_cost_index": unit_cost,
-        "fallback_allowance_index": fallback_buffer,
-        "estimated_cost_index": total_cost_idx,
-        "requires_user_confirmation": requires_confirmation,
-        "confirmation_timeout_seconds": timeout_seconds,
-        "confirmation_reasons": reasons,
-        "subscription_exemptions": exemptions,
-        "requires_orchestrator_subagent": requires_orchestrator,
-        "summary": summary,
-    }
-    if selection_source == "auto":
-        result["note"] = (
-            "No explicit --route and no saved selection plan were available, so the cost index "
-            "uses one auto-selected representative route. Re-run with --route or pass the run ID "
-            "whose plan was saved to price the actual work plan."
-        )
-    return result
 
 
 def main() -> int:
@@ -5480,7 +5196,6 @@ def main() -> int:
     )
     parser.add_argument("--no-fallback", action="store_true", help="Disable automatic fallback chain on failure.")
     parser.add_argument("--dry-run", action="store_true", help="Print planned route and prompt paths without running.")
-    parser.add_argument("--cost-gate", type=int, metavar="NUM_CALLS", help="Evaluate cost/call gate for NUM_CALLS fan-out.")
     parser.add_argument("--report", action="store_true", help="Print the recursive subagent tree report for --run-id.")
     parser.add_argument("--only-significant", action="store_true", help="Filter --report to significant tasks only.")
     parser.add_argument("--human", action="store_true", help="Print human-readable output when used with --report.")
@@ -5514,31 +5229,6 @@ def main() -> int:
         except (OSError, ValueError) as exc:
             print(f"run: invalid --quota-state: {exc}", file=sys.stderr)
             return 2
-
-    if args.cost_gate is not None:
-        try:
-            gate = evaluate_cost_gate(
-                args.cost_gate,
-                task_category=args.task,
-                run_id=args.run_id,
-                route_str=args.route,
-                force_route=args.force_route,
-                max_tier=args.max_tier,
-                max_cost_index=args.max_cost_index,
-                exclude_vendors=args.exclude_vendor,
-                include_vendors=args.include_vendor,
-                quota_agents=args.quota_agent,
-                exclude_quota_agents=args.exclude_quota_agent,
-                quota_cache_only=args.quota_cache_only,
-                quota_state=supplied_quota_state,
-            )
-        except ValueError as exc:
-            print(
-                json.dumps({"status": "error", "error": str(exc)}, indent=2, ensure_ascii=False)
-            )
-            return 2
-        print(json.dumps(gate, indent=2, ensure_ascii=False))
-        return 0
 
     eff_speed = "fast" if (args.prefer_fast and args.speed == "normal") else args.speed
     sig_flag: bool | None = True if args.significant else (False if args.insignificant else None)

@@ -44,8 +44,10 @@ candidate quota itself; no separate unscoped `quota.py status` is needed.
 `--refresh` refreshes discovery only; `--refresh-quota` refreshes quota and is
 incompatible with `--quota-cache-only`/`--quota-state`. Never replace
 coordinator-owned quota with a live read. A confirmed exhausted bucket stays
-blocked until its known reset even if the reading becomes stale. Claude Code
-and OpenCode's `claude-agent` bridge share Claude subscription buckets; a
+blocked until its known reset even if the reading becomes stale. A rejected credential or an exhausted provider pool excludes only the affected
+routes. OpenCode checks Go, Kimi Code and DeepSeek; Antigravity checks its
+native usage panel on POSIX, with CodexBar as a fallback. A provider without
+usable telemetry has unknown quota. Claude Code and OpenCode's `claude-agent` bridge share Claude subscription buckets; a
 Fable-only limit does not block other Claude models. For individual diagnostics the
 original probe.py, models.py, defects.py and select_route.py remain available.
 Probe resolves mise shims and multiple PATH installations. OpenCode host and
@@ -205,15 +207,7 @@ Read only documents required by the current task, not this entire list.
 | 3+ concurrent agents, write scheduling or leases | [orchestration.md](references/orchestration.md) |
 | CLI option/format/protocol failure | Relevant agent reference below |
 
-Before **any fan-out**, run `run.py --cost-gate <num_calls> --task <category>`;
-price the intended `--route` or saved `--run-id`, not a generic auto estimate.
-Print the cost/call estimate. When `requires_user_confirmation` is true and
-`confirmation_timeout_seconds` is set, ask with a 30-minute default to run
-the stated plan; otherwise require express approval. Skip call/cost
-confirmation when every planned subscription route has verified weekly quota
-of at least 25% remaining or an available free reset credit. Follow
-[orchestration.md](references/orchestration.md#cost-gate-and-observability) for
-the timer, cancellation and revalidation rules.
+Dispatch the selected fan-out directly within the user's constraints.
 For 3+ concurrent agents, use one orchestrator returning a consolidated summary.
 Schedule disjoint write_sets first, single-writer for overlaps, serialize
 lockfiles/schemas, worktrees last. Read orchestration.md before that batch.

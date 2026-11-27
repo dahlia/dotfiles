@@ -47,13 +47,14 @@ Notice two properties of Antigravity's model catalog:
     `openai`) from `canonical_key` so cross-vendor diversity filters and
     canonical survey lookups match routes from Claude Code, Codex, and OpenCode.
 
-Quota collection uses `codexbar usage --provider antigravity --json`, including
-`primary`, `secondary`, `tertiary`, and `extraRateWindows`. Recognized window
-labels map to `antigravity:group:gemini`, `antigravity:group:third-party`
-(Claude/GPT), or `antigravity:model:<normalized-model-id>`. Short and weekly
-windows both apply. An ample group window cannot override an exhausted model
-window, and effort variants share the model bucket. Eligibility recomputes the
-applicable scopes for older cached routes too.
+On POSIX, quota collection runs the CLI's built-in `/usage` command in a
+temporary terminal in the system temp directory and reads the weekly and five-hour remaining
+percentages. The fallback is `codexbar usage --provider antigravity --json`
+when available, including when the CLI requires workspace trust. Recognized windows map to `antigravity:group:gemini`,
+`antigravity:group:third-party` (Claude/GPT), or, when the source identifies an
+individual model, `antigravity:model:<normalized-model-id>`. Eligibility
+checks each current window, including those associated with older cached
+routes and effort variants.
 
 Shared quota errors use `antigravity:default`. An explicit individual quota
 error uses the model bucket instead, so an Opus limit does not block Gemini.
@@ -61,7 +62,6 @@ Legacy individual errors attributed to the shared bucket are ignored because
 they do not identify the affected model. These scopes belong to Antigravity;
 they do not exhaust independent OpenCode provider accounts.
 
-CodexBar must be installed and able to read the connected Antigravity account.
 Missing, stale, or ambiguous account readings remain unknown. Refresh errors
 retain previous readings as stale; a confirmed exhaustion with a future
 provider reset still blocks selection until that reset. Do not describe unknown

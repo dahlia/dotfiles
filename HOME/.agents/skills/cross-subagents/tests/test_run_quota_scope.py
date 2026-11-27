@@ -67,23 +67,20 @@ class RunQuotaScopeTests(unittest.TestCase):
                              no_fallback=True)
             collect.assert_called_once_with(agents=[], refresh=False, cache_only=True)
 
-    def test_cli_passes_quota_controls_to_execution_and_cost_gate(self):
+    def test_cli_passes_quota_controls_to_execution(self):
         with tempfile.TemporaryDirectory() as td:
             state = Path(td) / 'quota.json'
             state.write_text(json.dumps({'agents': {}, 'buckets': {}}))
-            flags = ['--quota-agent', 'opencode', '--exclude-quota-agent', 'codex',
-                     '--quota-cache-only', '--quota-state', str(state)]
-            for gate in (False, True):
-                argv = ['run.py', *flags, *(['--cost-gate', '2'] if gate else [])]
-                with patch.object(sys, 'argv', argv), patch('builtins.print'), patch.object(
-                    run, 'execute_task', return_value={'status': 'ok'}
-                ) as execute, patch.object(run, 'evaluate_cost_gate', return_value={}) as cost:
-                    self.assertEqual(run.main(), 0)
-                    called = cost if gate else execute
-                    self.assertEqual(called.call_args.kwargs['quota_agents'], ['opencode'])
-                    self.assertEqual(called.call_args.kwargs['exclude_quota_agents'], ['codex'])
-                    self.assertTrue(called.call_args.kwargs['quota_cache_only'])
-                    self.assertEqual(called.call_args.kwargs['quota_state'], {'agents': {}, 'buckets': {}})
+            argv = ['run.py', '--quota-agent', 'opencode', '--exclude-quota-agent', 'codex',
+                    '--quota-cache-only', '--quota-state', str(state)]
+            with patch.object(sys, 'argv', argv), patch('builtins.print'), patch.object(
+                run, 'execute_task', return_value={'status': 'ok'}
+            ) as execute:
+                self.assertEqual(run.main(), 0)
+                self.assertEqual(execute.call_args.kwargs['quota_agents'], ['opencode'])
+                self.assertEqual(execute.call_args.kwargs['exclude_quota_agents'], ['codex'])
+                self.assertTrue(execute.call_args.kwargs['quota_cache_only'])
+                self.assertEqual(execute.call_args.kwargs['quota_state'], {'agents': {}, 'buckets': {}})
 
     def test_cli_rejects_malformed_quota_snapshot(self):
         with tempfile.TemporaryDirectory() as td:

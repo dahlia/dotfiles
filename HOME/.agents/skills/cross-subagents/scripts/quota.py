@@ -11,16 +11,23 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import codecs
 import copy
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
 import math
+import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from typing import Any
+from urllib.error import HTTPError
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from zoneinfo import ZoneInfo
 
 from common import (
@@ -632,14 +639,370 @@ def parse_antigravity_quota(records: Any) -> dict[str, Any]:
     }
 
 
-def query_antigravity_quota() -> dict[str, Any]:
-    binary = shutil.which("codexbar")
-    if not binary:
-        raise RuntimeError("codexbar is unavailable; Antigravity quota is unknown.")
-    proc = run_cmd([binary, "usage", "--provider", "antigravity", "--json"], timeout=30)
+AGY_USAGE_GROUPS = {
+    "GEMINI MODELS": "antigravity:group:gemini",
+    "CLAUDE AND GPT MODELS": "antigravity:group:third-party",
+}
+
+
+def parse_agy_usage(output: str) -> dict[str, Any]:
+    """Read the native /usage panel; its percentages represent remaining quota."""
+    panel = strip_ansi(output).replace("\r", "\n").rsplit("Models & Quota", 1)
+    buckets: dict[str, Any] = {}
+    if len(panel) == 2:
+        groups = re.split(r"(?m)^\s*(GEMINI MODELS|CLAUDE AND GPT MODELS)\s*$", panel[1])
+        for heading, body in zip(groups[1::2], groups[2::2]):
+            scope = AGY_USAGE_GROUPS[heading]
+            windows = {}
+            for match in re.finditer(
+                r"(Weekly|Five Hour) Limit Remaining\s+\[[█░]+\]\s+"
+                r"(\d+(?:\.\d+)?)%(?:\s+Refreshes in ([^\n]+))?",
+                body,
+            ):
+                label, remaining, delay = match.groups()
+                remaining_pct = float(remaining)
+                if not 0 <= remaining_pct <= 100:
+                    continue
+                duration = 10080 if label == "Weekly" else 300
+                parts = re.findall(r"(\d+)([dhms])\b", delay or "")
+                seconds = sum(int(n) * {"d": 86400, "h": 3600, "m": 60, "s": 1}[unit]
+                              for n, unit in parts)
+                reset = int(time.time()) + seconds if seconds else None
+                window = _usage_window(100.0 - remaining_pct, duration, reset)
+                if window:
+                    windows[label] = window
+            if windows:
+                buckets[scope] = {
+                    "bucket_id": scope, "agent": "antigravity", "windows": windows,
+                    **max(windows.values(), key=lambda w: (w["exhausted"], w["scarcity"])),
+                }
+    if not buckets:
+        raise RuntimeError("Antigravity /usage did not show recognizable quota windows.")
+    return {
+        "agent": "antigravity", "method": "agy:/usage", "source_updated_at": now_iso(),
+        "plan": estimate_plan_capacity("subscription"),
+        "reset_credits": {"available_count": None, "credits": []}, "buckets": buckets,
+    }
+
+
+def query_agy_tui_usage(binary: str) -> dict[str, Any]:
+    """Read the built-in slash command in an isolated terminal, without a model prompt."""
+    import fcntl
+    import pty
+    import select
+    import struct
+    import termios
+
+    master, slave = pty.openpty()
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 60, 160, 0, 0))
+        # A controlling tty is needed even with stdin and stdout on a PTY.
+        process = subprocess.Popen(
+            [sys.executable, "-c",
+             "import os,sys; os.login_tty(0); os.execvp(sys.argv[1], sys.argv[1:])",
+             binary, "--settings", '{"altScreenMode":"never"}'],
+            cwd=tempfile.gettempdir(), stdin=slave, stdout=slave, stderr=slave,
+            env={**os.environ, "TERM": "xterm-256color"},
+        )
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        output = ""
+        try:
+            def read_until(ready, timeout):
+                nonlocal output
+                deadline = time.monotonic() + timeout
+                while not ready(strip_ansi(output)):
+                    wait = max(0.0, deadline - time.monotonic())
+                    if not select.select([master], [], [], wait)[0]:
+                        return False
+                    output = (output + decoder.decode(os.read(master, 65536)))[-262144:]
+                return True
+
+            read_until(lambda s: "for shortcuts" in s or "Do you trust" in s, 8)
+            if "for shortcuts" not in strip_ansi(output) or "Do you trust" in strip_ansi(output):
+                raise RuntimeError("Antigravity did not reach a trusted interactive prompt.")
+            output = ""
+            os.write(master, b"/usage")
+            if not read_until(lambda s: bool(re.search(r"/usage\s+View model quota usage", s)), 3):
+                raise RuntimeError("Antigravity did not offer the built-in /usage command.")
+            output = ""
+            os.write(master, b"\r")
+            read_until(lambda s: "esc Close" in s and "Limit Remaining" in s, 8)
+            return parse_agy_usage(output)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def query_antigravity_quota(binary: str | None = None) -> dict[str, Any]:
+    if binary and os.name == "posix":
+        try:
+            return query_agy_tui_usage(binary)
+        except (OSError, RuntimeError):
+            pass
+    codexbar = shutil.which("codexbar")
+    if not codexbar:
+        raise RuntimeError("Antigravity /usage and CodexBar quota sources are unavailable.")
+    proc = run_cmd([codexbar, "usage", "--provider", "antigravity", "--json"], timeout=30)
     if proc.returncode != 0:
         raise RuntimeError("Antigravity quota query failed; retaining previous readings as stale.")
     return parse_antigravity_quota(json.loads(proc.stdout))
+
+
+OPENCODE_USAGE_PATH = "/api/experimental/usage/limits"
+KIMI_USAGE_URLS = {
+    "kimi-code-plan-global": "https://api.kimi.ai/coding/v1/usages",
+    "kimi-for-coding": "https://api.kimi.com/coding/v1/usages",
+    "kimi-code-plan": "https://api.kimi.com/coding/v1/usages",
+}
+
+
+class _NoUsageRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Do not forward provider credentials to a redirect destination.
+        return None
+
+
+def _fetch_account_usage(url: str, key: str) -> tuple[int, Any]:
+    request = Request(url, headers={
+        "Authorization": f"Bearer {key}",
+        "Accept": "application/json",
+        "User-Agent": "cross-subagents/1.0",
+    })
+    opener = build_opener(_NoUsageRedirect())
+    try:
+        with opener.open(request, timeout=8) as response:
+            return response.status, json.load(response)
+    except HTTPError as exc:
+        with exc:
+            try:
+                return exc.code, json.load(exc)
+            except ValueError:
+                return exc.code, None
+
+
+def _active_opencode_key(binary: str, provider: str) -> str | None:
+    proc = run_cmd([binary, "auth", "export", provider], timeout=8)
+    if proc.returncode:
+        return None
+    records = json.loads(proc.stdout)
+    if not isinstance(records, list):
+        return None
+    active = [
+        record.get("value") for record in records
+        if isinstance(record, dict) and record.get("integrationID") == provider
+        and record.get("active") is True
+    ]
+    if len(active) != 1 or not isinstance(active[0], dict) or active[0].get("type") != "key":
+        return None
+    key = active[0].get("key")
+    return key if isinstance(key, str) and key else None
+
+
+def _usage_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        number = float(value)
+    except (ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _usage_reset(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value // 1000 if value >= 10**12 else value
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return int(dt.timestamp()) if dt.tzinfo is not None else None
+        except (ValueError, OverflowError):
+            pass
+    return None
+
+
+def _usage_window(
+    percent: Any, duration: int | None, reset: Any, *, limited: bool | None = None,
+    capacity: float = 1.0,
+) -> dict[str, Any] | None:
+    used = _usage_number(percent)
+    epoch = _usage_reset(reset)
+    if (used is None and limited is not True) or (epoch is not None and epoch <= time.time()):
+        return None
+    return {
+        "used_percent": used, "window_duration_mins": duration, "resets_at_epoch": epoch,
+        **compute_window_metrics(used, duration, epoch, capacity, reached_limit=limited),
+    }
+
+
+def _go_windows(windows: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(windows, dict):
+        return {}
+    result = {}
+    for key, duration in (("rolling", 300), ("weekly", 10080), ("monthly", None)):
+        raw = windows.get(key)
+        if not isinstance(raw, dict):
+            continue
+        limited = raw.get("limited")
+        if not isinstance(limited, bool):
+            limited = {"ok": False, "rate-limited": True}.get(str(raw.get("status")))
+        window = _usage_window(raw.get("percent"), duration, raw.get("resetsAt"),
+                               limited=limited, capacity=PLAN_CAPACITY_FACTORS["opencode-go"])
+        if window:
+            result[key] = window
+    return result
+
+
+def _kimi_windows(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    # The service has returned both detailed counters and rate-limit ratios.
+    # When both exist, retain the more restrictive reading for the same window.
+    data = payload.get("data", payload)
+    if not isinstance(data, dict):
+        return {}
+    quota = data.get("quota", data)
+    if not isinstance(quota, dict):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+
+    def add(name, duration, percent, reset):
+        window = _usage_window(percent, duration, reset)
+        if window and window["used_percent"] >= result.get(name, {}).get("used_percent", -1):
+            result[name] = window
+
+    ratios = quota.get("usages")
+    if isinstance(ratios, dict):
+        for names, duration in (
+            (("limit5h", "limit_5h"), 300), (("limit7d", "limit_7d"), 10080),
+            (("monthTotal", "month_total", "limit_month_total"), None), (("monthCode", "month_code", "limit_month_code"), None),
+        ):
+            for name in names:
+                raw = ratios.get(name)
+                if isinstance(raw, dict):
+                    ratio = _usage_number(raw.get("usedRatio", raw.get("used_ratio")))
+                    if ratio is not None:
+                        add(names[0], duration, ratio * 100,
+                            raw.get("resetAt") or raw.get("reset_time"))
+
+    def add_detail(name, duration, detail):
+        if not isinstance(detail, dict):
+            return
+        limit = _usage_number(detail.get("limit"))
+        used = _usage_number(detail.get("used"))
+        remaining = _usage_number(detail.get("remaining"))
+        if used is None and limit is not None and remaining is not None:
+            used = max(0.0, limit - remaining)
+        if limit and used is not None:
+            add(name, duration, used * 100 / limit, detail.get("resetTime"))
+
+    add_detail("limit7d", 10080, quota.get("usage"))
+    limits = quota.get("limits")
+    if isinstance(limits, list):
+        for entry in limits:
+            if not isinstance(entry, dict) or not isinstance(entry.get("window"), dict):
+                continue
+            window = entry["window"]
+            if window.get("timeUnit") == "TIME_UNIT_MINUTE" and window.get("duration") == 300:
+                add_detail("limit5h", 300, entry.get("detail"))
+    return result
+
+
+def _probe_opencode_provider(binary: str, provider: str) -> dict[str, Any]:
+    if provider == "opencode-go":
+        proc = run_cmd([binary, "api", "get", OPENCODE_USAGE_PATH], timeout=12)
+        if proc.returncode == 0:
+            payload = json.loads(proc.stdout)
+            data = payload.get("data", payload) if isinstance(payload, dict) else {}
+            if isinstance(data, dict):
+                windows = _go_windows(data.get("go"))
+                if windows:
+                    return {"windows": windows, "auth_status": "verified"}
+        elif re.search(r"\b401\b|\bunauthorized\b", strip_ansi(proc.stderr or ""), re.I):
+            # This account error also applies to Console-backed Zen routes.
+            return {"auth_status": "rejected", "console_auth_rejected": True}
+        url = "https://opencode.ai/zen/go/v1/usage"
+    elif provider == "deepseek":
+        url = "https://api.deepseek.com/user/balance"
+    else:
+        url = KIMI_USAGE_URLS[provider]
+
+    key = _active_opencode_key(binary, provider)
+    if not key:
+        return {}
+    status, payload = _fetch_account_usage(url, key)
+    if status == 401:
+        return {"auth_status": "rejected"}
+    if status == 402 or (
+        status == 403 and isinstance(payload, dict)
+        and (
+            provider == "opencode-go" and "subscription required" in
+            str(payload.get("error", payload)).lower()
+            or provider in KIMI_USAGE_URLS and "usage limit" in
+            str(payload.get("error", payload)).lower()
+        )
+    ):
+        return {"windows": {"account": _usage_window(None, None, None, limited=True)}}
+    if status != 200 or not isinstance(payload, dict):
+        return {}
+    if provider == "opencode-go":
+        return {"windows": _go_windows(payload.get("usage")), "auth_status": "verified"}
+    if provider == "deepseek":
+        available = payload.get("is_available")
+        if not isinstance(available, bool):
+            return {}
+        return {
+            "windows": {} if available else {"balance": _usage_window(None, None, None, limited=True)},
+            "auth_status": "verified", "balance_available": available,
+        }
+    windows = _kimi_windows(payload)
+    return {"windows": windows, "auth_status": "verified"} if windows else {}
+
+
+def query_opencode_quota(binary: str, agent_info: dict[str, Any]) -> dict[str, Any]:
+    result = build_observed_quota("opencode", agent_info)
+    connected = {
+        record["provider"] for record in agent_info.get("authenticated_providers") or []
+        if isinstance(record, dict) and record.get("provider")
+    }
+    targets = connected.intersection({"opencode-go", "deepseek", *KIMI_USAGE_URLS})
+    if connected.intersection({"opencode", "opencode-console"}):
+        targets.add("opencode-go")
+    result["method"] = "opencode:provider-usage"
+    failures = []
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        pending = {p: executor.submit(_probe_opencode_provider, binary, p) for p in sorted(targets)}
+        for provider, future in pending.items():
+            try:
+                probe = future.result()
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                # Never persist command output, HTTP bodies, or credential data.
+                probe = {}
+            if not probe:
+                failures.append(provider)
+                continue
+            bucket = result["buckets"][f"opencode:{provider}"]
+            windows = probe.get("windows") or {}
+            if windows:
+                bucket.update(max(windows.values(), key=lambda w: (w["exhausted"], w["scarcity"])))
+                bucket["windows"] = windows
+            if probe.get("auth_status") == "verified":
+                bucket["auth_checked_at_epoch"] = time.time()
+            for field in ("auth_status", "balance_available"):
+                if field in probe:
+                    bucket[field] = probe[field]
+            if probe.get("console_auth_rejected"):
+                for console in ("opencode", "opencode-console"):
+                    if f"opencode:{console}" in result["buckets"]:
+                        result["buckets"][f"opencode:{console}"]["auth_status"] = "rejected"
+    if failures:
+        result["unverified_providers"] = failures
+    return result
 
 
 def get_observations_file() -> Path:
@@ -744,6 +1107,34 @@ def record_quota_observation(bucket_id: str, error_text: str, reset_seconds: int
     return entry
 
 
+def record_auth_rejection(bucket_id: str, error_text: str, agent_version: str | None) -> None:
+    """Briefly avoid a credential rejected during dispatch, without saving its error text."""
+    if not re.search(
+        r"\b401\b|\bunauthorized\b|not logged in|login required|"
+        r"invalid (?:api key|access token)|(?:token|credentials?) (?:has |have )?expired|invalid_grant",
+        error_text, re.I,
+    ):
+        return
+    now = time.time()
+    agent = bucket_id.split(":", 1)[0]
+    fingerprint = compute_agent_config_fingerprint(agent, None, agent_version)
+
+    def update(current: dict[str, Any] | None) -> dict[str, Any]:
+        base = current or {"schema_version": SCHEMA_VERSION, "buckets": {}}
+        records = {
+            key: value for key, value in (base.get("auth_rejections") or {}).items()
+            if value.get("expires_at", 0) > now
+        }
+        records[bucket_id] = {
+            "observed_at": now, "expires_at": now + 300,
+            "agent_version": agent_version, "config_fingerprint": fingerprint,
+        }
+        base["auth_rejections"] = records
+        return base
+
+    locked_update_json(get_observations_file(), update)
+
+
 def _strip_expired_overlay_fields(bucket: dict[str, Any]) -> dict[str, Any]:
     """Restore a bucket that had a persisted `observed_limited` overlay back to unknown baseline."""
     if bucket.get("status") != "observed_limited":
@@ -838,6 +1229,21 @@ def overlay_observations(payload: dict[str, Any]) -> dict[str, Any]:
         if agent_prefix in agents_map and isinstance(agents_map[agent_prefix], dict):
             agents_map[agent_prefix].setdefault("buckets", {})[b_id] = overlaid
 
+    for bucket_id, obs in (obs_data.get("auth_rejections") or {}).items():
+        if obs.get("expires_at", 0) <= now_ts:
+            continue
+        agent = bucket_id.split(":", 1)[0]
+        bucket = all_buckets.get(bucket_id) or {}
+        if (bucket.get("auth_checked_at_epoch") or 0) > obs["observed_at"]:
+            continue
+        fp = compute_agent_config_fingerprint(agent, None, obs.get("agent_version"))
+        if fp != obs.get("config_fingerprint"):
+            continue
+        updated = {**bucket, "bucket_id": bucket_id, "agent": agent, "auth_rejection_observed": True}
+        all_buckets[bucket_id] = updated
+        if isinstance(agents_map.get(agent), dict):
+            agents_map[agent].setdefault("buckets", {})[bucket_id] = updated
+
     return out
 
 
@@ -896,8 +1302,10 @@ def build_observed_quota(agent: str, agent_info: dict[str, Any]) -> dict[str, An
 def _agent_quota_is_fresh(agent: str, entry: dict[str, Any] | None) -> bool:
     if not isinstance(entry, dict) or entry.get("stale"):
         return False
+    if agent == "opencode" and entry.get("method") != "opencode:provider-usage":
+        return False
     if agent == "antigravity":
-        if entry.get("method") != "codexbar:antigravity":
+        if entry.get("method") not in ("agy:/usage", "codexbar:antigravity"):
             return False
         source_age = parse_iso_age_seconds(entry.get("source_updated_at"))
         if source_age is None or source_age >= QUOTA_TTL_SECONDS or source_age < -60:
@@ -983,12 +1391,12 @@ def collect_quota(
             elif agent == "claude-code":
                 q_res = query_claude_quota(binary, plan_type=a_info.get("plan_type"))
             elif agent == "antigravity":
-                q_res = query_antigravity_quota()
+                q_res = query_antigravity_quota(binary)
             else:
-                q_res = build_observed_quota(agent, a_info)
+                q_res = query_opencode_quota(binary, a_info)
             fp = compute_agent_config_fingerprint(agent, binary, ver)
             prev = existing_agents.get(agent) or {}
-            if agent in ("claude-code", "antigravity") and prev.get("config_fingerprint") == fp:
+            if agent in ("claude-code", "antigravity", "opencode") and prev.get("config_fingerprint") == fp:
                 # A valid partial report is not evidence that an omitted,
                 # previously exhausted window has reset.
                 for bucket_id, bucket in (prev.get("buckets") or {}).items():
@@ -996,7 +1404,12 @@ def collect_quota(
                     if (bucket.get("exhausted") and isinstance(reset, (int, float))
                             and reset > time.time()
                             and (q_res["buckets"].get(bucket_id) or {}).get("used_percent") is None):
-                        q_res["buckets"][bucket_id] = bucket
+                        if agent != "opencode":
+                            q_res["buckets"][bucket_id] = bucket
+                        elif bucket.get("provider") in q_res.get("unverified_providers", []):
+                            q_res["buckets"][bucket_id] = {
+                                **bucket, "stale": True, "auth_status": None,
+                            }
             q_res["binary"] = binary
             q_res["agent_version"] = ver
             q_res["config_fingerprint"] = fp
@@ -1408,11 +1821,15 @@ def format_human_quota(data: dict[str, Any]) -> str:
             else (f"{b['used_percent']}%" if b.get("used_percent") is not None else "unknown")
         )
         st = b.get("status", "unknown")
+        auth = "rejected" if b.get("auth_rejection_observed") else b.get("auth_status")
+        account_status = f" | auth={auth}" if auth else ""
+        if isinstance(b.get("balance_available"), bool):
+            account_status += f" | balance_available={str(b['balance_available']).lower()}"
         hrs = f", resets in {b['hours_until_reset']}h" if b.get("hours_until_reset") is not None else ""
         scarcity = b.get("scarcity")
         imminence = b.get("reset_imminence")
         lines.append(
-            f"- {b_id}: status={st} | used={used}{hrs} | scarcity={scarcity} | reset_imminence={imminence}"
+            f"- {b_id}: status={st} | used={used}{hrs} | scarcity={scarcity} | reset_imminence={imminence}{account_status}"
         )
     return "\n".join(lines)
 

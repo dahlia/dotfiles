@@ -102,6 +102,32 @@ class AntigravityQuotaTests(unittest.TestCase):
         }, 1794497812)
         self.assertEqual(observed["resets_at_epoch"], baseline["resets_at_epoch"])
 
+    def test_native_usage_panel_reads_remaining_percent_and_resets(self):
+        output = """└ Models & Quota
+GEMINI MODELS
+  Weekly Limit Remaining
+    [██░] 65.00%
+    Refreshes in 5d 21h 42m
+  Five Hour Limit Remaining
+    [░░░] 0.00%
+    Refreshes in 28m
+CLAUDE AND GPT MODELS
+  Weekly Limit Remaining
+    [█░░] 50.00%
+    Refreshes in 5d 21h 59m
+  Five Hour Limit Remaining
+    [███] 100.00%
+    Quota available
+"""
+        with patch.object(quota.time, "time", return_value=1000):
+            buckets = quota.parse_agy_usage(output)["buckets"]
+            gemini = buckets["antigravity:group:gemini"]
+            third_party = buckets["antigravity:group:third-party"]
+            self.assertEqual(gemini["windows"]["Weekly"]["used_percent"], 35)
+            self.assertEqual(gemini["resets_at_epoch"], 1000 + 28 * 60)
+            self.assertTrue(gemini["exhausted"])
+            self.assertFalse(third_party["exhausted"])
+
     def test_recent_collection_does_not_extend_source_ttl(self):
         entry = {"method": "codexbar:antigravity", "collected_at": "recent", "source_updated_at": "old"}
         with patch.object(quota, "parse_iso_age_seconds", side_effect=lambda value: 901 if value == "old" else 0):
